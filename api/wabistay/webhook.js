@@ -9,20 +9,22 @@ const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY;
 const WA_PHONE_NUMBER_ID = process.env.WA_PHONE_NUMBER_ID;
 const WA_ACCESS_TOKEN = process.env.WA_ACCESS_TOKEN;
 const WA_VERIFY_TOKEN = process.env.WA_VERIFY_TOKEN;
-const WA_APP_SECRET = process.env.WA_APP_SECRET;
 
 // ─── AIRTABLE HELPERS ───────────────────────────────────────────────────────
 
 async function airtableGet(table, filterFormula) {
   const url = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(table)}?filterByFormula=${encodeURIComponent(filterFormula)}`;
+  console.log(`[Airtable GET] ${table} | ${filterFormula}`);
   const res = await fetch(url, {
     headers: { Authorization: `Bearer ${AIRTABLE_API_KEY}` }
   });
   const data = await res.json();
+  if (data.error) console.error(`[Airtable ERROR] ${table}:`, JSON.stringify(data.error));
   return data.records || [];
 }
 
 async function airtableCreate(table, fields) {
+  console.log(`[Airtable CREATE] ${table}`, JSON.stringify(fields));
   const res = await fetch(`https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(table)}`, {
     method: 'POST',
     headers: {
@@ -31,10 +33,13 @@ async function airtableCreate(table, fields) {
     },
     body: JSON.stringify({ fields })
   });
-  return await res.json();
+  const data = await res.json();
+  if (data.error) console.error(`[Airtable CREATE ERROR] ${table}:`, JSON.stringify(data.error));
+  return data;
 }
 
 async function airtableUpdate(table, recordId, fields) {
+  console.log(`[Airtable UPDATE] ${table} ${recordId}`, JSON.stringify(fields));
   const res = await fetch(`https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(table)}/${recordId}`, {
     method: 'PATCH',
     headers: {
@@ -43,12 +48,15 @@ async function airtableUpdate(table, recordId, fields) {
     },
     body: JSON.stringify({ fields })
   });
-  return await res.json();
+  const data = await res.json();
+  if (data.error) console.error(`[Airtable UPDATE ERROR] ${table}:`, JSON.stringify(data.error));
+  return data;
 }
 
 // ─── WHATSAPP HELPER ────────────────────────────────────────────────────────
 
 async function sendWhatsApp(to, message) {
+  console.log(`[WhatsApp SEND] to: ${to} | msg: ${message.slice(0, 60)}...`);
   const res = await fetch(`https://graph.facebook.com/v19.0/${WA_PHONE_NUMBER_ID}/messages`, {
     method: 'POST',
     headers: {
@@ -62,13 +70,14 @@ async function sendWhatsApp(to, message) {
       text: { body: message }
     })
   });
-  return await res.json();
+  const data = await res.json();
+  if (data.error) console.error(`[WhatsApp SEND ERROR]:`, JSON.stringify(data.error));
+  return data;
 }
 
 // ─── FORMAT PHONE ────────────────────────────────────────────────────────────
 
 function formatPhone(raw) {
-  // Strips spaces, dashes, +. Converts 0XX to 27XX.
   let clean = raw.replace(/[\s\-\+]/g, '');
   if (clean.startsWith('0')) clean = '27' + clean.slice(1);
   return clean;
@@ -79,26 +88,22 @@ function formatPhone(raw) {
 async function handleMessage(from, messageText) {
   const phone = formatPhone(from);
   const text = messageText.trim().toLowerCase();
+  console.log(`[handleMessage] from: ${phone} | text: ${text}`);
 
-  // Look up guest by phone number
   const guestRecords = await airtableGet('WS_Guests', `{Phone Number} = '${phone}'`);
   const guest = guestRecords[0] || null;
   const sessionState = guest ? guest.fields['Session State'] : null;
+  console.log(`[State] guest: ${guest ? guest.id : 'none'} | state: ${sessionState}`);
 
   // ── CLEANER REPLY: DONE ──────────────────────────────────────────────────
   if (text === 'done') {
-    // Find cleaner by phone
     const cleanerRecords = await airtableGet('WS_Cleaners', `{Phone Number} = '${phone}'`);
     if (cleanerRecords.length > 0) {
-      // Find the most recent Cleaning room linked to this cleaner
-      // For now: find any room in Cleaning status
       const cleaningRooms = await airtableGet('WS_Rooms', `{Status} = 'Cleaning'`);
       if (cleaningRooms.length > 0) {
         const room = cleaningRooms[0];
         await airtableUpdate('WS_Rooms', room.id, { Status: 'Available' });
         await sendWhatsApp(phone, `Thank you! ${room.fields['Room Name']} is marked as clean and available. ✅`);
-
-        // Notify owner — owner number must be set as env var OWNER_PHONE
         const ownerPhone = process.env.OWNER_PHONE;
         if (ownerPhone) {
           await sendWhatsApp(ownerPhone, `✅ ${room.fields['Room Name']} has been cleaned and is now available for new bookings.`);
@@ -110,11 +115,8 @@ async function handleMessage(from, messageText) {
 
   // ── NEW GUEST or FALLBACK ────────────────────────────────────────────────
   if (!guest || !sessionState || sessionState === 'NEW') {
-    // Get available rooms
     const availableRooms = await airtableGet('WS_Rooms', `{Status} = 'Available'`);
     const roomCount = availableRooms.length;
-
-    // Get active rates
     const activeRates = await airtableGet('WS_Rates', `{Active} = 1`);
     let rateText = '';
     if (activeRates.length > 0) {
@@ -125,7 +127,6 @@ async function handleMessage(from, messageText) {
 
     const greeting = `Hi! 👋 Welcome to Villa Liza Guest Lodge, Boksburg.\n\nWe currently have *${roomCount} room${roomCount !== 1 ? 's' : ''}* available.\n\n*Our rates:*\n${rateText}\n\nTo make a booking, please reply with:\n1. Your full name\n2. Check-in date (e.g. 25 June)\n3. Check-out date (e.g. 27 June)`;
 
-    // Create or update guest record with state AWAITING_DETAILS
     if (!guest) {
       await airtableCreate('WS_Guests', {
         'Guest Name': 'Unknown',
@@ -142,16 +143,13 @@ async function handleMessage(from, messageText) {
     return;
   }
 
-  // ── AWAITING_DETAILS: Guest sends name + dates ───────────────────────────
+  // ── AWAITING_DETAILS ────────────────────────────────────────────────────
   if (sessionState === 'AWAITING_DETAILS') {
-    // Parse the message — store raw, don't try to be clever
     const lines = messageText.trim().split('\n').map(l => l.trim()).filter(Boolean);
-
     let guestName = guest.fields['Guest Name'] !== 'Unknown' ? guest.fields['Guest Name'] : null;
     let checkIn = null;
     let checkOut = null;
 
-    // Simple heuristic: first line is name if it doesn't contain a date keyword
     const dateKeywords = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec','january','february','march','april','june','july','august','september','october','november','december'];
 
     lines.forEach((line, i) => {
@@ -166,23 +164,19 @@ async function handleMessage(from, messageText) {
       }
     });
 
-    // If we can't parse enough — ask again
     if (!guestName || !checkIn) {
       await sendWhatsApp(phone, `Sorry, I didn't quite get that. Please reply with your:\n1. Full name\n2. Check-in date (e.g. 25 June)\n3. Check-out date (e.g. 27 June)\n\nSend each on a new line.`);
       return;
     }
 
-    // Update guest name
     await airtableUpdate('WS_Guests', guest.id, {
       'Guest Name': guestName,
       'Session State': 'AWAITING_ETA'
     });
 
-    // Get active rate for booking amount
     const activeRates = await airtableGet('WS_Rates', `{Active} = 1`);
     const rate = activeRates[0] || null;
 
-    // Create booking record
     const bookingData = {
       'Guest': [guest.id],
       'Booking Type': 'Overnight',
@@ -207,32 +201,26 @@ async function handleMessage(from, messageText) {
     return;
   }
 
-  // ── AWAITING_ETA: Guest sends arrival time ───────────────────────────────
+  // ── AWAITING_ETA ────────────────────────────────────────────────────────
   if (sessionState === 'AWAITING_ETA') {
     const eta = messageText.trim();
-
-    // Find their most recent Enquiry booking
     const bookings = await airtableGet('WS_Bookings', `AND({Status}='Enquiry', FIND('${guest.id}', ARRAYJOIN({Guest})))`);
     if (bookings.length > 0) {
-      const booking = bookings[0];
-      await airtableUpdate('WS_Bookings', booking.id, {
+      await airtableUpdate('WS_Bookings', bookings[0].id, {
         'ETA': eta,
         'Status': 'Confirmed'
       });
     }
-
     await airtableUpdate('WS_Guests', guest.id, { 'Session State': 'CONFIRMED' });
-
     await sendWhatsApp(phone,
       `Perfect! We'll have your room ready for you. 🛏️\n\nSee you at *${eta}*.\n\nIf your plans change, reply *CANCEL* and we'll free up the room.\n\nWe look forward to hosting you at Villa Liza! 🌟`
     );
     return;
   }
 
-  // ── CONFIRMED: Handle CANCEL or CHECKOUT ────────────────────────────────
+  // ── CONFIRMED ───────────────────────────────────────────────────────────
   if (sessionState === 'CONFIRMED') {
     if (text === 'cancel') {
-      // Find confirmed booking
       const bookings = await airtableGet('WS_Bookings', `AND({Status}='Confirmed', FIND('${guest.id}', ARRAYJOIN({Guest})))`);
       if (bookings.length > 0) {
         await airtableUpdate('WS_Bookings', bookings[0].id, { 'Status': 'Cancelled' });
@@ -243,18 +231,14 @@ async function handleMessage(from, messageText) {
     }
 
     if (text.includes('check') && text.includes('out') || text === 'checking out' || text === 'checkout') {
-      // Find confirmed booking
       const bookings = await airtableGet('WS_Bookings', `AND({Status}='Checked In', FIND('${guest.id}', ARRAYJOIN({Guest})))`);
       let roomName = 'your room';
-
       if (bookings.length > 0) {
         const booking = bookings[0];
         await airtableUpdate('WS_Bookings', booking.id, {
           'Status': 'Checked Out',
           'Checkout Confirmed': true
         });
-
-        // Get room from booking and set to Cleaning
         if (booking.fields['Room'] && booking.fields['Room'].length > 0) {
           const roomId = booking.fields['Room'][0];
           const roomRecords = await airtableGet('WS_Rooms', `RECORD_ID() = '${roomId}'`);
@@ -264,8 +248,6 @@ async function handleMessage(from, messageText) {
           }
         }
       }
-
-      // Notify all active cleaners
       const cleaners = await airtableGet('WS_Cleaners', `{Active} = 1`);
       for (const cleaner of cleaners) {
         const cleanerPhone = cleaner.fields['Phone Number'];
@@ -277,7 +259,6 @@ async function handleMessage(from, messageText) {
           );
         }
       }
-
       await airtableUpdate('WS_Guests', guest.id, { 'Session State': 'NEW' });
       await sendWhatsApp(phone,
         `Thank you for staying with us at Villa Liza! 🌟\n\nWe hope you enjoyed your stay. You're welcome back anytime.\n\nSafe travels! 👋`
@@ -285,7 +266,6 @@ async function handleMessage(from, messageText) {
       return;
     }
 
-    // Any other message from confirmed guest
     await sendWhatsApp(phone,
       `Hi ${guest.fields['Guest Name']}! Your booking is confirmed. 🛏️\n\nReply *CANCEL* to cancel your booking, or *CHECKING OUT* when you leave.`
     );
@@ -293,14 +273,15 @@ async function handleMessage(from, messageText) {
   }
 
   // ── FALLBACK ─────────────────────────────────────────────────────────────
-  await airtableUpdate('WS_Guests', guest.id, { 'Session State': 'NEW' });
+  if (guest) {
+    await airtableUpdate('WS_Guests', guest.id, { 'Session State': 'NEW' });
+  }
   await sendWhatsApp(phone, `Hi! Reply with your name and dates to make a booking, or *CHECKING OUT* if you are leaving today.`);
 }
 
 // ─── MAIN HANDLER ────────────────────────────────────────────────────────────
 
 module.exports = async function handler(req, res) {
-  // Webhook verification (GET)
   if (req.method === 'GET') {
     const mode = req.query['hub.mode'];
     const token = req.query['hub.verify_token'];
@@ -312,12 +293,9 @@ module.exports = async function handler(req, res) {
     return res.status(403).send('Forbidden');
   }
 
-  // Inbound message (POST)
   if (req.method === 'POST') {
     try {
       const body = req.body;
-
-      // Acknowledge immediately — Meta requires 200 within 5 seconds
       res.status(200).send('OK');
 
       const entry = body?.entry?.[0];
@@ -325,18 +303,22 @@ module.exports = async function handler(req, res) {
       const value = changes?.value;
       const messages = value?.messages;
 
+      console.log(`[POST] entry: ${!!entry} | messages: ${messages?.length || 0}`);
+
       if (!messages || messages.length === 0) return;
 
       const message = messages[0];
       const from = message.from;
       const messageText = message?.text?.body;
 
-      if (!messageText) return; // Ignore non-text messages for now
+      console.log(`[POST] from: ${from} | text: ${messageText}`);
+
+      if (!messageText) return;
 
       await handleMessage(from, messageText);
 
     } catch (err) {
-      console.error('WS1 webhook error:', err);
+      console.error('[FATAL]', err.message, err.stack);
     }
     return;
   }
