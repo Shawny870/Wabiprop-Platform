@@ -14,6 +14,7 @@
 //   F8 — CHECKED_IN state added (gate arrival → checked in flow)
 //   F9 — All guest-facing messages converted to numbered menu options (Rule 11)
 //   F10 — Greeting scoped to overnight bookings, HOURLY keyword placeholder added
+//   F11 — Room assigned at gate arrival, Notify Phone from WS_Properties with OWNER_PHONE fallback
 
 const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID;
 const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY;
@@ -268,20 +269,55 @@ async function handleMessage(from, messageText) {
   if (sessionState === 'CONFIRMED') {
     // F9: accept number or word equivalent (Rule 11)
     if (text === '1' || text === 'here' || text === 'arrived' || text === 'at the gate') {
-      // F8: gate arrival — notify owner, set booking Checked In, move to CHECKED_IN
+      // F11: gate arrival — assign first available room, notify party, move to CHECKED_IN
+
+      // Step 1: get notify phone from WS_Properties, fallback to OWNER_PHONE
+      const properties = await airtableGet('WS_Properties', `{Property Name} = 'Villa Liza Guest Lodge'`);
+      const notifyPhone = (properties.length > 0 && properties[0].fields['Notify Phone'])
+        ? properties[0].fields['Notify Phone'].replace(/[\s\-\+]/g, '')
+        : OWNER_PHONE;
+
+      // Step 2: find first available room
+      const availableRooms = await airtableGet('WS_Rooms', `{Status} = 'Available'`);
+      let assignedRoomName = null;
+      let assignedRoomId = null;
+
+      if (availableRooms.length > 0) {
+        assignedRoomId = availableRooms[0].id;
+        assignedRoomName = availableRooms[0].fields['Room Name'];
+        // Step 3: set room → Occupied
+        await airtableUpdate('WS_Rooms', assignedRoomId, { 'Status': 'Occupied' });
+      }
+
+      // Step 4: update booking — Checked In + link room if assigned
       const bookings = await airtableGetBookingsByGuestId(guest.id, 'Confirmed');
       if (bookings.length > 0) {
-        await airtableUpdate('WS_Bookings', bookings[0].id, { 'Status': 'Checked In' });
+        const bookingUpdate = { 'Status': 'Checked In' };
+        if (assignedRoomId) bookingUpdate['Room'] = [assignedRoomId];
+        await airtableUpdate('WS_Bookings', bookings[0].id, bookingUpdate);
       }
+
+      // Step 5: set session → CHECKED_IN
       await airtableUpdate('WS_Guests', guest.id, { 'Session State': 'CHECKED_IN' });
-      if (OWNER_PHONE) {
-        await sendWhatsApp(OWNER_PHONE,
-          `🔔 ${guest.fields['Guest Name']} is at the gate. Please open for them.\nPhone: ${phone}`
+
+      // Step 6: notify party
+      if (notifyPhone) {
+        const roomInfo = assignedRoomName ? `Room ${assignedRoomName} assigned.` : 'No rooms available — please assign manually.';
+        await sendWhatsApp(notifyPhone,
+          `🔔 ${guest.fields['Guest Name']} is at the gate. ${roomInfo}\nPhone: ${phone}`
         );
       }
-      await sendWhatsApp(phone,
-        `Welcome to Villa Liza! 🌟 We've notified someone to open the gate for you.\n\nEnjoy your stay. When you're ready to leave, reply with a number:\n1 - Check out`
-      );
+
+      // Step 7: tell guest their room or no availability
+      if (assignedRoomName) {
+        await sendWhatsApp(phone,
+          `Welcome to Villa Liza! 🌟 You've been assigned *${assignedRoomName}*.\n\nSomeone is on their way to open the gate for you. Enjoy your stay!\n\nWhen you're ready to leave, reply with a number:\n1 - Check out`
+        );
+      } else {
+        await sendWhatsApp(phone,
+          `Welcome to Villa Liza! 🌟 We've notified someone to assist you at the gate.\n\nEnjoy your stay! When you're ready to leave, reply with a number:\n1 - Check out`
+        );
+      }
       return;
     }
 
