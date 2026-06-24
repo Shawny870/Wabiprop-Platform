@@ -11,6 +11,9 @@
 //   F5 — FIND/ARRAYJOIN linked record filter replaced with direct lookup
 //   F6 — Airtable error logging now includes HTTP status code
 //   F7 — OWNER_PHONE notification added to NEW booking creation
+//   F8 — CHECKED_IN state added (gate arrival → checked in flow)
+//   F9 — All guest-facing messages converted to numbered menu options (Rule 11)
+//   F10 — Greeting scoped to overnight bookings only
 
 const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID;
 const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY;
@@ -156,7 +159,7 @@ async function handleMessage(from, messageText) {
       rateText = '• Contact us for current rates';
     }
 
-    const greeting = `Hi! 👋 Welcome to Villa Liza Guest Lodge, Boksburg.\n\nWe currently have *${roomCount} room${roomCount !== 1 ? 's' : ''}* available.\n\n*Our rates:*\n${rateText}\n\nTo make a booking, please reply with:\n1. Your full name\n2. Check-in date (e.g. 25 June)\n3. Check-out date (e.g. 27 June)`;
+    const greeting = `Hi! 👋 Welcome to Villa Liza Guest Lodge, Boksburg.\n\nWe currently have *${roomCount} room${roomCount !== 1 ? 's' : ''}* available.\n\n*Our rates:*\n${rateText}\n\nTo make an *overnight booking*, please send:\n1. Your full name\n2. Check-in date (e.g. 25 June)\n3. Check-out date (e.g. 27 June)\n\nSend all three, each on a new line.\n\n_For short stays, please call us directly._`;
 
     if (!guest) {
       await airtableCreate('WS_Guests', {
@@ -254,14 +257,35 @@ async function handleMessage(from, messageText) {
     }
     await airtableUpdate('WS_Guests', guest.id, { 'Session State': 'CONFIRMED' });
     await sendWhatsApp(phone,
-      `Perfect! We'll have your room ready for you. 🛏️\n\nSee you at *${eta}*.\n\nIf your plans change, reply *CANCEL* and we'll free up the room.\n\nWe look forward to hosting you at Villa Liza! 🌟`
+      `Perfect! We'll have your room ready for you. 🛏️\n\nSee you at *${eta}*.\n\nWhen you arrive, reply with a number:\n1 - I'm at the gate\n2 - Cancel my booking\n\nWe look forward to hosting you at Villa Liza! 🌟`
     );
     return;
   }
 
   // ── CONFIRMED ───────────────────────────────────────────────────────────
+  // F8: CONFIRMED now handles gate arrival and cancel only
+  // Checkout moved to CHECKED_IN state
   if (sessionState === 'CONFIRMED') {
-    if (text === 'cancel') {
+    // F9: accept number or word equivalent (Rule 11)
+    if (text === '1' || text === 'here' || text === 'arrived' || text === 'at the gate') {
+      // F8: gate arrival — notify owner, set booking Checked In, move to CHECKED_IN
+      const bookings = await airtableGetBookingsByGuestId(guest.id, 'Confirmed');
+      if (bookings.length > 0) {
+        await airtableUpdate('WS_Bookings', bookings[0].id, { 'Status': 'Checked In' });
+      }
+      await airtableUpdate('WS_Guests', guest.id, { 'Session State': 'CHECKED_IN' });
+      if (OWNER_PHONE) {
+        await sendWhatsApp(OWNER_PHONE,
+          `🔔 ${guest.fields['Guest Name']} is at the gate. Please open for them.\nPhone: ${phone}`
+        );
+      }
+      await sendWhatsApp(phone,
+        `Welcome to Villa Liza! 🌟 We've notified someone to open the gate for you.\n\nEnjoy your stay. When you're ready to leave, reply with a number:\n1 - Check out`
+      );
+      return;
+    }
+
+    if (text === '2' || text === 'cancel') {
       // F5: was FIND/ARRAYJOIN
       const bookings = await airtableGetBookingsByGuestId(guest.id, 'Confirmed');
       if (bookings.length > 0) {
@@ -272,7 +296,17 @@ async function handleMessage(from, messageText) {
       return;
     }
 
-    if ((text.includes('check') && text.includes('out')) || text === 'checking out' || text === 'checkout') {
+    // F9: fallback — show numbered menu
+    await sendWhatsApp(phone,
+      `Hi ${guest.fields['Guest Name']}! Your booking is confirmed. 🛏️\n\nReply with a number:\n1 - I'm at the gate\n2 - Cancel my booking`
+    );
+    return;
+  }
+
+  // ── CHECKED_IN ──────────────────────────────────────────────────────────
+  // F8: new state — guest has arrived, booking is Checked In
+  if (sessionState === 'CHECKED_IN') {
+    if (text === '1' || text === 'checking out' || text === 'checkout' || text === 'check out') {
       // F5: was FIND/ARRAYJOIN
       const bookings = await airtableGetBookingsByGuestId(guest.id, 'Checked In');
       let roomName = 'your room';
@@ -310,8 +344,9 @@ async function handleMessage(from, messageText) {
       return;
     }
 
+    // F9: fallback — show numbered menu
     await sendWhatsApp(phone,
-      `Hi ${guest.fields['Guest Name']}! Your booking is confirmed. 🛏️\n\nReply *CANCEL* to cancel your booking, or *CHECKING OUT* when you leave.`
+      `Hi ${guest.fields['Guest Name']}! You're checked in. 🛏️\n\nReply with a number:\n1 - Check out`
     );
     return;
   }
