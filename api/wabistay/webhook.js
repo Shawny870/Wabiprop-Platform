@@ -302,7 +302,7 @@ async function handleMessage(from, messageText) {
 
       // Step 6: notify party
       if (notifyPhone) {
-        const roomInfo = assignedRoomName ? `Room ${assignedRoomName} assigned.` : 'No rooms available — please assign manually.';
+        const roomInfo = assignedRoomName ? `${assignedRoomName} assigned.` : 'No rooms available — please assign manually.';
         await sendWhatsApp(notifyPhone,
           `🔔 ${guest.fields['Guest Name']} is at the gate. ${roomInfo}\nPhone: ${phone}`
         );
