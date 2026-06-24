@@ -3,12 +3,21 @@
 // Reads: WS_Rooms, WS_Rates, WS_Guests, WS_Cleaners
 // Writes: WS_Guests, WS_Bookings, WS_Rooms
 // No AI. Deterministic state machine only.
+// FIX LOG:
+//   F1 — Body parse guard added (req.body undefined protection)
+//   F2 — res.status(200) moved to AFTER handleMessage completes
+//   F3 — Meta API version v19.0 → v25.0
+//   F4 — {Active} = 1 → {Active} = TRUE() for Rates and Cleaners
+//   F5 — FIND/ARRAYJOIN linked record filter replaced with direct lookup
+//   F6 — Airtable error logging now includes HTTP status code
+//   F7 — OWNER_PHONE notification added to NEW booking creation
 
 const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID;
 const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY;
 const WA_PHONE_NUMBER_ID = process.env.WA_PHONE_NUMBER_ID;
 const WA_ACCESS_TOKEN = process.env.WA_ACCESS_TOKEN;
 const WA_VERIFY_TOKEN = process.env.WA_VERIFY_TOKEN;
+const OWNER_PHONE = process.env.OWNER_PHONE;
 
 // ─── AIRTABLE HELPERS ───────────────────────────────────────────────────────
 
@@ -18,6 +27,8 @@ async function airtableGet(table, filterFormula) {
   const res = await fetch(url, {
     headers: { Authorization: `Bearer ${AIRTABLE_API_KEY}` }
   });
+  // F6: log HTTP status so we can see 401/403/404 in logs
+  console.log(`[Airtable GET STATUS] ${table} | HTTP ${res.status}`);
   const data = await res.json();
   if (data.error) console.error(`[Airtable ERROR] ${table}:`, JSON.stringify(data.error));
   return data.records || [];
@@ -33,6 +44,7 @@ async function airtableCreate(table, fields) {
     },
     body: JSON.stringify({ fields })
   });
+  console.log(`[Airtable CREATE STATUS] ${table} | HTTP ${res.status}`);
   const data = await res.json();
   if (data.error) console.error(`[Airtable CREATE ERROR] ${table}:`, JSON.stringify(data.error));
   return data;
@@ -48,16 +60,29 @@ async function airtableUpdate(table, recordId, fields) {
     },
     body: JSON.stringify({ fields })
   });
+  console.log(`[Airtable UPDATE STATUS] ${table} | HTTP ${res.status}`);
   const data = await res.json();
   if (data.error) console.error(`[Airtable UPDATE ERROR] ${table}:`, JSON.stringify(data.error));
   return data;
 }
 
+// F5: direct record ID lookup — replaces FIND/ARRAYJOIN pattern
+async function airtableGetBookingsByGuestId(guestId, status) {
+  // Fetch all bookings with matching status, then filter by guest ID in JS
+  // Airtable linked record filter via FIND/ARRAYJOIN is unreliable
+  const allBookings = await airtableGet('WS_Bookings', `{Status} = '${status}'`);
+  return allBookings.filter(b => {
+    const guests = b.fields['Guest'] || [];
+    return guests.includes(guestId);
+  });
+}
+
 // ─── WHATSAPP HELPER ────────────────────────────────────────────────────────
 
 async function sendWhatsApp(to, message) {
-  console.log(`[WhatsApp SEND] to: ${to} | msg: ${message.slice(0, 60)}...`);
-  const res = await fetch(`https://graph.facebook.com/v19.0/${WA_PHONE_NUMBER_ID}/messages`, {
+  console.log(`[WhatsApp SEND] to: ${to} | msg: ${message.slice(0, 80)}...`);
+  // F3: was v19.0 — now v25.0 to match webhook subscription version
+  const res = await fetch(`https://graph.facebook.com/v25.0/${WA_PHONE_NUMBER_ID}/messages`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${WA_ACCESS_TOKEN}`,
@@ -70,6 +95,7 @@ async function sendWhatsApp(to, message) {
       text: { body: message }
     })
   });
+  console.log(`[WhatsApp SEND STATUS] HTTP ${res.status}`);
   const data = await res.json();
   if (data.error) console.error(`[WhatsApp SEND ERROR]:`, JSON.stringify(data.error));
   return data;
@@ -99,15 +125,17 @@ async function handleMessage(from, messageText) {
   if (text === 'done') {
     const cleanerRecords = await airtableGet('WS_Cleaners', `{Phone Number} = '${phone}'`);
     if (cleanerRecords.length > 0) {
+      // F4: was {Active} = 1 — Airtable checkbox requires TRUE()
       const cleaningRooms = await airtableGet('WS_Rooms', `{Status} = 'Cleaning'`);
       if (cleaningRooms.length > 0) {
         const room = cleaningRooms[0];
-        await airtableUpdate('WS_Rooms', room.id, { Status: 'Available' });
+        await airtableUpdate('WS_Rooms', room.id, { 'Status': 'Available' });
         await sendWhatsApp(phone, `Thank you! ${room.fields['Room Name']} is marked as clean and available. ✅`);
-        const ownerPhone = process.env.OWNER_PHONE;
-        if (ownerPhone) {
-          await sendWhatsApp(ownerPhone, `✅ ${room.fields['Room Name']} has been cleaned and is now available for new bookings.`);
+        if (OWNER_PHONE) {
+          await sendWhatsApp(OWNER_PHONE, `✅ ${room.fields['Room Name']} has been cleaned and is now available for new bookings.`);
         }
+      } else {
+        await sendWhatsApp(phone, `Thanks! No rooms currently marked for cleaning — nothing to update.`);
       }
       return;
     }
@@ -117,12 +145,15 @@ async function handleMessage(from, messageText) {
   if (!guest || !sessionState || sessionState === 'NEW') {
     const availableRooms = await airtableGet('WS_Rooms', `{Status} = 'Available'`);
     const roomCount = availableRooms.length;
-    const activeRates = await airtableGet('WS_Rates', `{Active} = 1`);
+    // F4: was {Active} = 1 — Airtable checkbox requires TRUE()
+    const activeRates = await airtableGet('WS_Rates', `{Active} = TRUE()`);
     let rateText = '';
     if (activeRates.length > 0) {
       rateText = activeRates.map(r =>
         `• ${r.fields['Rate Name']}: R${r.fields['Amount']} ${r.fields['Rate Type'] === 'Per Night' ? 'per night' : 'per hour'}`
       ).join('\n');
+    } else {
+      rateText = '• Contact us for current rates';
     }
 
     const greeting = `Hi! 👋 Welcome to Villa Liza Guest Lodge, Boksburg.\n\nWe currently have *${roomCount} room${roomCount !== 1 ? 's' : ''}* available.\n\n*Our rates:*\n${rateText}\n\nTo make a booking, please reply with:\n1. Your full name\n2. Check-in date (e.g. 25 June)\n3. Check-out date (e.g. 27 June)`;
@@ -150,7 +181,8 @@ async function handleMessage(from, messageText) {
     let checkIn = null;
     let checkOut = null;
 
-    const dateKeywords = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec','january','february','march','april','june','july','august','september','october','november','december'];
+    const dateKeywords = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec',
+      'january','february','march','april','june','july','august','september','october','november','december'];
 
     lines.forEach((line, i) => {
       const lower = line.toLowerCase();
@@ -174,7 +206,8 @@ async function handleMessage(from, messageText) {
       'Session State': 'AWAITING_ETA'
     });
 
-    const activeRates = await airtableGet('WS_Rates', `{Active} = 1`);
+    // F4: was {Active} = 1
+    const activeRates = await airtableGet('WS_Rates', `{Active} = TRUE()`);
     const rate = activeRates[0] || null;
 
     const bookingData = {
@@ -195,6 +228,13 @@ async function handleMessage(from, messageText) {
     const booking = await airtableCreate('WS_Bookings', bookingData);
     const bookingRef = booking.id ? `WS-${booking.id.slice(-6).toUpperCase()}` : 'WS-000001';
 
+    // F7: Owner was never notified on new booking — now they are
+    if (OWNER_PHONE) {
+      await sendWhatsApp(OWNER_PHONE,
+        `📋 New booking enquiry from ${guestName}\nPhone: ${phone}\nRef: ${bookingRef}\nCheck-in: ${checkIn}\nCheck-out: ${checkOut || 'TBC'}`
+      );
+    }
+
     await sendWhatsApp(phone,
       `Thanks ${guestName}! 🙏\n\nYour booking enquiry has been received.\n\n*Ref:* ${bookingRef}\n*Check-in:* ${checkIn}\n*Check-out:* ${checkOut || 'TBC'}\n${rate ? `*Rate:* R${rate.fields['Amount']} per night` : ''}\n\nWhat time do you expect to arrive? (e.g. "around 2pm" or "after 5")`
     );
@@ -204,7 +244,8 @@ async function handleMessage(from, messageText) {
   // ── AWAITING_ETA ────────────────────────────────────────────────────────
   if (sessionState === 'AWAITING_ETA') {
     const eta = messageText.trim();
-    const bookings = await airtableGet('WS_Bookings', `AND({Status}='Enquiry', FIND('${guest.id}', ARRAYJOIN({Guest})))`);
+    // F5: was FIND/ARRAYJOIN — now JS filter on fetched records
+    const bookings = await airtableGetBookingsByGuestId(guest.id, 'Enquiry');
     if (bookings.length > 0) {
       await airtableUpdate('WS_Bookings', bookings[0].id, {
         'ETA': eta,
@@ -221,7 +262,8 @@ async function handleMessage(from, messageText) {
   // ── CONFIRMED ───────────────────────────────────────────────────────────
   if (sessionState === 'CONFIRMED') {
     if (text === 'cancel') {
-      const bookings = await airtableGet('WS_Bookings', `AND({Status}='Confirmed', FIND('${guest.id}', ARRAYJOIN({Guest})))`);
+      // F5: was FIND/ARRAYJOIN
+      const bookings = await airtableGetBookingsByGuestId(guest.id, 'Confirmed');
       if (bookings.length > 0) {
         await airtableUpdate('WS_Bookings', bookings[0].id, { 'Status': 'Cancelled' });
       }
@@ -230,8 +272,9 @@ async function handleMessage(from, messageText) {
       return;
     }
 
-    if (text.includes('check') && text.includes('out') || text === 'checking out' || text === 'checkout') {
-      const bookings = await airtableGet('WS_Bookings', `AND({Status}='Checked In', FIND('${guest.id}', ARRAYJOIN({Guest})))`);
+    if ((text.includes('check') && text.includes('out')) || text === 'checking out' || text === 'checkout') {
+      // F5: was FIND/ARRAYJOIN
+      const bookings = await airtableGetBookingsByGuestId(guest.id, 'Checked In');
       let roomName = 'your room';
       if (bookings.length > 0) {
         const booking = bookings[0];
@@ -248,7 +291,8 @@ async function handleMessage(from, messageText) {
           }
         }
       }
-      const cleaners = await airtableGet('WS_Cleaners', `{Active} = 1`);
+      // F4: was {Active} = 1
+      const cleaners = await airtableGet('WS_Cleaners', `{Active} = TRUE()`);
       for (const cleaner of cleaners) {
         const cleanerPhone = cleaner.fields['Phone Number'];
         const cleanerName = cleaner.fields['Cleaner Name'];
@@ -294,34 +338,60 @@ module.exports = async function handler(req, res) {
   }
 
   if (req.method === 'POST') {
-    try {
-      const body = req.body;
+    // F1: explicit body parse guard — req.body can be undefined or a raw string
+    // depending on how Meta sends the webhook and Vercel's body parser state
+    let body = req.body;
+    if (!body) {
+      console.error('[BODY] req.body is undefined — body parser did not run');
       res.status(200).send('OK');
+      return;
+    }
+    if (typeof body === 'string') {
+      try {
+        body = JSON.parse(body);
+        console.log('[BODY] Parsed raw string body successfully');
+      } catch (e) {
+        console.error('[BODY] Failed to parse body string:', e.message);
+        res.status(200).send('OK');
+        return;
+      }
+    }
 
-      const entry = body?.entry?.[0];
-      const changes = entry?.changes?.[0];
-      const value = changes?.value;
-      const messages = value?.messages;
+    const entry = body?.entry?.[0];
+    const changes = entry?.changes?.[0];
+    const value = changes?.value;
+    const messages = value?.messages;
 
-      console.log(`[POST] entry: ${!!entry} | messages: ${messages?.length || 0}`);
+    console.log(`[POST] entry: ${!!entry} | messages: ${messages?.length || 0}`);
 
-      if (!messages || messages.length === 0) return;
+    if (!messages || messages.length === 0) {
+      // F2: respond 200 before returning on no-message events (status updates etc)
+      res.status(200).send('OK');
+      return;
+    }
 
-      const message = messages[0];
-      const from = message.from;
-      const messageText = message?.text?.body;
+    const message = messages[0];
+    const from = message.from;
+    const messageText = message?.text?.body;
 
-      console.log(`[POST] from: ${from} | text: ${messageText}`);
+    console.log(`[POST] from: ${from} | text: ${messageText}`);
 
-      if (!messageText) return;
+    if (!messageText) {
+      res.status(200).send('OK');
+      return;
+    }
 
+    // F2: handleMessage runs FULLY before we respond 200
+    // Previous code sent 200 first — Vercel could kill the function mid-execution
+    try {
       await handleMessage(from, messageText);
-
     } catch (err) {
       console.error('[FATAL]', err.message, err.stack);
     }
+
+    res.status(200).send('OK');
     return;
   }
 
   res.status(405).send('Method Not Allowed');
-}
+};
