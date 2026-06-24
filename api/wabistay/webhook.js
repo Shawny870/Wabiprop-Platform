@@ -13,7 +13,7 @@
 //   F7 — OWNER_PHONE notification added to NEW booking creation
 //   F8 — CHECKED_IN state added (gate arrival → checked in flow)
 //   F9 — All guest-facing messages converted to numbered menu options (Rule 11)
-//   F10 — Greeting scoped to overnight bookings only
+//   F10 — Greeting scoped to overnight bookings, HOURLY keyword placeholder added
 
 const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID;
 const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY;
@@ -159,7 +159,7 @@ async function handleMessage(from, messageText) {
       rateText = '• Contact us for current rates';
     }
 
-    const greeting = `Hi! 👋 Welcome to Villa Liza Guest Lodge, Boksburg.\n\nWe currently have *${roomCount} room${roomCount !== 1 ? 's' : ''}* available.\n\n*Our rates:*\n${rateText}\n\nTo make an *overnight booking*, please send:\n1. Your full name\n2. Check-in date (e.g. 25 June)\n3. Check-out date (e.g. 27 June)\n\nSend all three, each on a new line.\n\n_For short stays, please call us directly._`;
+    const greeting = `Hi! 👋 Welcome to Villa Liza Guest Lodge, Boksburg.\n\nWe currently have *${roomCount} room${roomCount !== 1 ? 's' : ''}* available.\n\n*Our rates:*\n${rateText}\n\nTo make an *overnight booking*, please send:\n1. Your full name\n2. Check-in date (e.g. 25 June)\n3. Check-out date (e.g. 27 June)\n\nSend all three, each on a new line.\n\n_For short stay bookings, reply HOURLY and we'll assist you._`;
 
     if (!guest) {
       await airtableCreate('WS_Guests', {
