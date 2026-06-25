@@ -16,6 +16,7 @@
 //   F10 — Greeting scoped to overnight bookings, HOURLY keyword placeholder added
 //   F11 — Room assigned at gate arrival, Notify Phone from WS_Properties with OWNER_PHONE fallback
 //   F12 — Axiom HTTP logging added (fire-and-forget, never blocks state machine)
+//   F13 — Booking Ref written back to WS_Bookings after CREATE
 
 const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID;
 const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY;
@@ -257,6 +258,10 @@ async function handleMessage(from, messageText) {
 
     const booking = await airtableCreate('WS_Bookings', bookingData);
     const bookingRef = booking.id ? `WS-${booking.id.slice(-6).toUpperCase()}` : 'WS-000001';
+    // F13: write Booking Ref back to Airtable after CREATE
+    if (booking.id) {
+      await airtableUpdate('WS_Bookings', booking.id, { 'Booking Ref': bookingRef });
+    }
     logToAxiom(booking.id ? 'info' : 'error', 'booking_create', {
       phone,
       guestName,
