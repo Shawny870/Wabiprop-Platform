@@ -15,6 +15,7 @@
 //   F9 — All guest-facing messages converted to numbered menu options (Rule 11)
 //   F10 — Greeting scoped to overnight bookings, HOURLY keyword placeholder added
 //   F11 — Room assigned at gate arrival, Notify Phone from WS_Properties with OWNER_PHONE fallback
+//   F12 — Axiom HTTP logging added (fire-and-forget, never blocks state machine)
 
 const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID;
 const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY;
@@ -22,6 +23,7 @@ const WA_PHONE_NUMBER_ID = process.env.WA_PHONE_NUMBER_ID;
 const WA_ACCESS_TOKEN = process.env.WA_ACCESS_TOKEN;
 const WA_VERIFY_TOKEN = process.env.WA_VERIFY_TOKEN;
 const OWNER_PHONE = process.env.OWNER_PHONE;
+const AXIOM_TOKEN = process.env.AXIOM_TOKEN;
 
 // ─── AIRTABLE HELPERS ───────────────────────────────────────────────────────
 
@@ -113,12 +115,36 @@ function formatPhone(raw) {
   return clean;
 }
 
+// ─── AXIOM LOGGER ────────────────────────────────────────────────────────────
+// F12: fire-and-forget log to Axiom HTTP API
+// Never awaited in critical path — cannot block or break the state machine
+// Dataset: wabistay · Token via AXIOM_TOKEN env var
+
+function logToAxiom(level, event, detail = {}) {
+  if (!AXIOM_TOKEN) return;
+  const payload = [{
+    _time: new Date().toISOString(),
+    level,
+    event,
+    ...detail
+  }];
+  fetch('https://api.axiom.co/v1/datasets/wabistay/ingest', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${AXIOM_TOKEN}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(payload)
+  }).catch(err => console.error('[Axiom ERROR]', err.message));
+}
+
 // ─── STATE MACHINE ───────────────────────────────────────────────────────────
 
 async function handleMessage(from, messageText) {
   const phone = formatPhone(from);
   const text = messageText.trim().toLowerCase();
   console.log(`[handleMessage] from: ${phone} | text: ${text}`);
+  logToAxiom('info', 'message_received', { phone, text: messageText.slice(0, 100) });
 
   const guestRecords = await airtableGet('WS_Guests', `{Phone Number} = '${phone}'`);
   const guest = guestRecords[0] || null;
@@ -231,6 +257,13 @@ async function handleMessage(from, messageText) {
 
     const booking = await airtableCreate('WS_Bookings', bookingData);
     const bookingRef = booking.id ? `WS-${booking.id.slice(-6).toUpperCase()}` : 'WS-000001';
+    logToAxiom(booking.id ? 'info' : 'error', 'booking_create', {
+      phone,
+      guestName,
+      bookingRef,
+      airtableId: booking.id || null,
+      error: booking.error ? JSON.stringify(booking.error) : null
+    });
 
     // F7: Owner was never notified on new booking — now they are
     if (OWNER_PHONE) {
@@ -458,6 +491,7 @@ module.exports = async function handler(req, res) {
       await handleMessage(from, messageText);
     } catch (err) {
       console.error('[FATAL]', err.message, err.stack);
+      logToAxiom('error', 'fatal', { message: err.message, stack: err.stack });
     }
 
     res.status(200).send('OK');
