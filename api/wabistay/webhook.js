@@ -17,6 +17,7 @@
 //   F11 — Room assigned at gate arrival, Notify Phone from WS_Properties with OWNER_PHONE fallback
 //   F12 — Axiom HTTP logging added (fire-and-forget, never blocks state machine)
 //   F13 — Booking Ref written back to WS_Bookings after CREATE
+//   F14 — Gate cooldown guard: ignores checkout trigger if checked in < 60s ago
 
 const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID;
 const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY;
@@ -327,10 +328,13 @@ async function handleMessage(from, messageText) {
         await airtableUpdate('WS_Rooms', assignedRoomId, { 'Status': 'Occupied' });
       }
 
-      // Step 4: update booking — Checked In + link room if assigned
+      // Step 4: update booking — Checked In + link room + timestamp if assigned
       const bookings = await airtableGetBookingsByGuestId(guest.id, 'Confirmed');
       if (bookings.length > 0) {
-        const bookingUpdate = { 'Status': 'Checked In' };
+        const bookingUpdate = {
+          'Status': 'Checked In',
+          'Checked In At': new Date().toISOString()
+        };
         if (assignedRoomId) bookingUpdate['Room'] = [assignedRoomId];
         await airtableUpdate('WS_Bookings', bookings[0].id, bookingUpdate);
       }
@@ -381,6 +385,21 @@ async function handleMessage(from, messageText) {
   // F8: new state — guest has arrived, booking is Checked In
   if (sessionState === 'CHECKED_IN') {
     if (text === '1' || text === 'checking out' || text === 'checkout' || text === 'check out') {
+      // F14: gate cooldown guard — if guest just checked in (< 60s ago), ignore checkout trigger
+      const recentBookings = await airtableGetBookingsByGuestId(guest.id, 'Checked In');
+      if (recentBookings.length > 0 && recentBookings[0].fields['Checked In At']) {
+        const checkedInAt = new Date(recentBookings[0].fields['Checked In At']);
+        const secondsSinceCheckin = (Date.now() - checkedInAt.getTime()) / 1000;
+        if (secondsSinceCheckin < 60) {
+          await sendWhatsApp(phone,
+            `Hi ${guest.fields['Guest Name']}! You're checked in to Villa Liza. 🛏️
+
+When you're ready to leave, reply with a number:
+1 - Check out`
+          );
+          return;
+        }
+      }
       // F5: was FIND/ARRAYJOIN
       const bookings = await airtableGetBookingsByGuestId(guest.id, 'Checked In');
       let roomName = 'your room';
