@@ -189,9 +189,6 @@ async function handleTenantIssue(phone, messageText, tenantRecord) {
       'Date Reported':          new Date().toISOString(),
     };
 
-    // Include owner phone if present — needed for V2 cron queries
-    if (ownerPhone) issueFields['Owner Phone'] = ownerPhone;
-
     logToAxiom('info', 'flow1_issue_create_attempt', { phone, issueTitle: issueFields['Issue Title'] });
     const created = await airtableCreate('WP_Issues', issueFields);
 
@@ -325,7 +322,6 @@ async function handleAgentAssign(phone, messageText, agentRecord) {
     const patched = await airtableUpdate('WP_Issues', issueId, {
       'Issue Resolution Status': 'Contractor Assigned',
       'Contractor Name':  contractorName,
-      'Contractor Phone': contractorPhone,
     });
 
     if (patched.error) {
