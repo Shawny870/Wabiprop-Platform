@@ -8,12 +8,28 @@
 //   P2 — Flow 1: tenant issue intake (lookup, create issue, notify tenant + agent)
 //   P3 — Flow 2: agent assigns contractor (lookup contractor, patch issue, notify 3 parties)
 //   P4 — Separate WP_PHONE_NUMBER_ID env var (Wabiprop) from WA_PHONE_NUMBER_ID (Wabistay)
+//   P5 — Axiom HTTP logging added (fire-and-forget, dataset: wabiprop)
 
 const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID;
 const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY;
 const WA_PHONE_NUMBER_ID = process.env.WP_PHONE_NUMBER_ID;   // Wabiprop-specific Phone ID
 const WA_ACCESS_TOKEN = process.env.WA_ACCESS_TOKEN;
 const WA_VERIFY_TOKEN = process.env.WA_VERIFY_TOKEN;
+const AXIOM_TOKEN = process.env.AXIOM_TOKEN;
+
+// ─── AXIOM LOGGER ────────────────────────────────────────────────────────────
+// Fire-and-forget — never awaited, never blocks the flow
+// Dataset: wabiprop · Token via AXIOM_TOKEN env var
+
+function logToAxiom(level, event, detail = {}) {
+  if (!AXIOM_TOKEN) return;
+  const payload = [{ _time: new Date().toISOString(), level, event, ...detail }];
+  fetch('https://api.axiom.co/v1/datasets/wabiprop/ingest', {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${AXIOM_TOKEN}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  }).catch(err => console.error('[Axiom ERROR]', err.message));
+}
 
 // ─── AIRTABLE HELPERS ────────────────────────────────────────────────────────
 
@@ -143,6 +159,7 @@ async function identifySender(phone) {
 
 async function handleTenantIssue(phone, messageText, tenantRecord) {
   console.log(`[Flow 1] Tenant intake — phone: ${phone}`);
+  logToAxiom('info', 'flow1_start', { phone, msg: messageText.slice(0, 100) });
 
   try {
     const f = tenantRecord.fields;
@@ -151,6 +168,15 @@ async function handleTenantIssue(phone, messageText, tenantRecord) {
     const propertyName  = (f['Property Name']         || '').trim();
     const ownerPhone    = (f['Owner Phone']            || '').trim();
     const agentPhone    = (f['Agent WhatsApp Number'] || '').trim();
+
+    logToAxiom('info', 'flow1_tenant_fields', {
+      phone,
+      tenantName: tenantName || '(empty)',
+      unitAddress: unitAddress || '(empty)',
+      propertyName: propertyName || '(empty)',
+      agentPhone: agentPhone || '(empty)',
+      ownerPhone: ownerPhone || '(empty)',
+    });
 
     // ── Step 1: create WP_Issues record ─────────────────────────────────────
     const issueFields = {
@@ -167,15 +193,18 @@ async function handleTenantIssue(phone, messageText, tenantRecord) {
     // Include owner phone if present — needed for V2 cron queries
     if (ownerPhone) issueFields['Owner Phone'] = ownerPhone;
 
+    logToAxiom('info', 'flow1_issue_create_attempt', { phone, issueTitle: issueFields['Issue Title'] });
     const created = await airtableCreate('WP_Issues', issueFields);
 
     if (!created.id) {
+      logToAxiom('error', 'flow1_issue_create_failed', { phone, error: JSON.stringify(created.error || created) });
       throw new Error(`Airtable create returned no record ID. Error: ${JSON.stringify(created.error || created)}`);
     }
 
     // Issue Ref is an autonumber — Airtable returns it in the created record fields
     const issueRef = created.fields?.['Issue Ref'] || created.id.slice(-6).toUpperCase();
     console.log(`[Flow 1] Issue created — Ref: ${issueRef} | Airtable ID: ${created.id}`);
+    logToAxiom('info', 'flow1_issue_created', { phone, issueRef, airtableId: created.id });
 
     // ── Step 2: acknowledge tenant ───────────────────────────────────────────
     const tenantMsg =
@@ -184,11 +213,18 @@ async function handleTenantIssue(phone, messageText, tenantRecord) {
       `Issue: ${messageText.slice(0, 80)}${messageText.length > 80 ? '...' : ''}\n\n` +
       `Your agent has been notified and will be in touch shortly. Please do not resend this message.`;
 
-    await sendWhatsApp(phone, tenantMsg);
+    logToAxiom('info', 'flow1_tenant_ack_attempt', { phone, issueRef });
+    const tenantSend = await sendWhatsApp(phone, tenantMsg);
+    logToAxiom(tenantSend.error ? 'error' : 'info', 'flow1_tenant_ack_result', {
+      phone, issueRef,
+      metaError: tenantSend.error ? JSON.stringify(tenantSend.error) : null,
+      messageId: tenantSend.messages?.[0]?.id || null,
+    });
 
     // ── Step 3: notify agent ─────────────────────────────────────────────────
     if (!agentPhone) {
       console.warn(`[Flow 1] No agent phone on tenant record — skipping agent notification`);
+      logToAxiom('warn', 'flow1_no_agent_phone', { phone, tenantName });
     } else {
       const agentMsg =
         `🔧 New maintenance issue logged.\n\n` +
@@ -199,13 +235,21 @@ async function handleTenantIssue(phone, messageText, tenantRecord) {
         `Issue: ${messageText}\n\n` +
         `Reply *Assign [contractor name]* to dispatch.`;
 
-      await sendWhatsApp(agentPhone, agentMsg);
+      logToAxiom('info', 'flow1_agent_notify_attempt', { phone, agentPhone, issueRef });
+      const agentSend = await sendWhatsApp(agentPhone, agentMsg);
+      logToAxiom(agentSend.error ? 'error' : 'info', 'flow1_agent_notify_result', {
+        phone, agentPhone, issueRef,
+        metaError: agentSend.error ? JSON.stringify(agentSend.error) : null,
+        messageId: agentSend.messages?.[0]?.id || null,
+      });
     }
 
     console.log(`[Flow 1] Complete — Ref: WP-${issueRef} | Tenant: ${tenantName}`);
+    logToAxiom('info', 'flow1_complete', { phone, issueRef, tenantName });
 
   } catch (err) {
     console.error(`[Flow 1 ERROR]`, err.message);
+    logToAxiom('error', 'flow1_error', { phone, error: err.message });
     await alertShawn('Flow 1 (tenant intake)', err.message, phone);
     // Do not send tenant acknowledgement — issue was not confirmed created
   }
@@ -377,7 +421,10 @@ async function routeMessage(phone, messageText) {
   const text = messageText.trim();
   const textLower = text.toLowerCase();
 
+  logToAxiom('info', 'message_received', { phone, text: text.slice(0, 100) });
+
   const { role, record } = await identifySender(phone);
+  logToAxiom('info', 'sender_identified', { phone, role });
 
   // ── UNKNOWN SENDER ──────────────────────────────────────────────────────
   if (role === 'unknown') {
