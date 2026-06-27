@@ -182,7 +182,7 @@ async function handleTenantIssue(phone, messageText, tenantRecord) {
     const issueFields = {
       'Issue Title':            `${tenantName} — ${messageText.slice(0, 60)}`,
       'Description':            messageText,
-      'Status':                 'Open',
+      'Issue Resolution Status': 'Open',
       'Urgency':                'Routine',
       'Tenant WhatsApp Number': phone,
       'Agent WhatsApp Number':  agentPhone,
@@ -299,7 +299,7 @@ async function handleAgentAssign(phone, messageText, agentRecord) {
     // Airtable sort param: sort[0][field]=Date Reported&sort[0][direction]=desc
     const issueUrl =
       `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent('WP_Issues')}` +
-      `?filterByFormula=${encodeURIComponent(`AND({Agent WhatsApp Number} = '${phone}', {Status} = 'Open')`)}` +
+      `?filterByFormula=${encodeURIComponent(`AND({Agent WhatsApp Number} = '${phone}', {Issue Resolution Status} = 'Open')`)}` +
       `&sort%5B0%5D%5Bfield%5D=Date%20Reported&sort%5B0%5D%5Bdirection%5D=desc` +
       `&maxRecords=1`;
 
@@ -324,7 +324,7 @@ async function handleAgentAssign(phone, messageText, agentRecord) {
 
     // ── Step 4: PATCH the issue ──────────────────────────────────────────────
     const patched = await airtableUpdate('WP_Issues', issueId, {
-      'Status':           'Contractor Assigned',
+      'Issue Resolution Status': 'Contractor Assigned',
       'Contractor Name':  contractorName,
       'Contractor Phone': contractorPhone,
     });
@@ -485,7 +485,7 @@ async function routeMessage(phone, messageText) {
     // Check if tenant has a pending-confirmation issue — if so, this is Flow 4b/4c
     const pendingIssues = await airtableGet(
       'WP_Issues',
-      `AND({Tenant WhatsApp Number} = '${phone}', {Status} = 'Pending Confirmation')`
+      `AND({Tenant WhatsApp Number} = '${phone}', {Issue Resolution Status} = 'Pending Confirmation')`
     );
     if (pendingIssues.length > 0 && (textLower === 'yes' || textLower === '1' || textLower === 'no' || textLower === '2')) {
       await handleTenantClosure(phone, text, record);
