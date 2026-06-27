@@ -186,7 +186,6 @@ async function handleTenantIssue(phone, messageText, tenantRecord) {
       'Urgency':                'Routine',
       'Tenant Whatsapp Number': phone,
       'Agent Whatsapp number':  agentPhone,
-      'Property Name':          propertyName,
       'Date Reported':          new Date().toISOString(),
     };
 
