@@ -121,8 +121,8 @@ function formatPhone(raw) {
 // Returns { role: 'agent'|'contractor'|'tenant'|'unknown', record: <airtable record or null> }
 
 async function identifySender(phone) {
-  // Check WP_Agents — field: "Agent WhatsApp Number" (note: lowercase 'app' per schema)
-  const agentRecords = await airtableGet('WP_Agents', `{Agent WhatsApp Number} = '${phone}'`);
+  // Check WP_Agents — field: "Agent Whatsapp number" (note: lowercase 'app' per schema)
+  const agentRecords = await airtableGet('WP_Agents', `{Agent Whatsapp number} = '${phone}'`);
   if (agentRecords.length > 0) {
     console.log(`[Router] Identified as AGENT: ${phone}`);
     return { role: 'agent', record: agentRecords[0] };
@@ -167,7 +167,7 @@ async function handleTenantIssue(phone, messageText, tenantRecord) {
     const unitAddress   = (f['Unit Address']          || '').trim();
     const propertyName  = (f['Property Name']         || '').trim();
     const ownerPhone    = (f['Owner Phone']            || '').trim();
-    const agentPhone    = (f['Agent WhatsApp Number'] || '').trim();
+    const agentPhone    = (f['Agent Whatsapp number'] || '').trim();
 
     logToAxiom('info', 'flow1_tenant_fields', {
       phone,
@@ -185,7 +185,8 @@ async function handleTenantIssue(phone, messageText, tenantRecord) {
       'Issue Resolution Status': 'Open',
       'Urgency':                'Routine',
       'Tenant Whatsapp Number': phone,
-      'Agent WhatsApp Number':  agentPhone,
+      'Agent Whatsapp number':  agentPhone,
+      'Property Name':          propertyName,
       'Date Reported':          new Date().toISOString(),
     };
 
@@ -298,7 +299,7 @@ async function handleAgentAssign(phone, messageText, agentRecord) {
     // Airtable sort param: sort[0][field]=Date Reported&sort[0][direction]=desc
     const issueUrl =
       `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent('WP_Issues')}` +
-      `?filterByFormula=${encodeURIComponent(`AND({Agent WhatsApp Number} = '${phone}', {Issue Resolution Status} = 'Open')`)}` +
+      `?filterByFormula=${encodeURIComponent(`AND({Agent Whatsapp number} = '${phone}', {Issue Resolution Status} = 'Open')`)}` +
       `&sort%5B0%5D%5Bfield%5D=Date%20Reported&sort%5B0%5D%5Bdirection%5D=desc` +
       `&maxRecords=1`;
 
