@@ -7,10 +7,11 @@
 //   P1 — GET verification handler + POST router skeleton
 //   P2 — Flow 1: tenant issue intake (lookup, create issue, notify tenant + agent)
 //   P3 — Flow 2: agent assigns contractor (lookup contractor, patch issue, notify 3 parties)
+//   P4 — Separate WP_PHONE_NUMBER_ID env var (Wabiprop) from WA_PHONE_NUMBER_ID (Wabistay)
 
 const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID;
 const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY;
-const WA_PHONE_NUMBER_ID = process.env.WA_PHONE_NUMBER_ID;
+const WA_PHONE_NUMBER_ID = process.env.WP_PHONE_NUMBER_ID;   // Wabiprop-specific Phone ID
 const WA_ACCESS_TOKEN = process.env.WA_ACCESS_TOKEN;
 const WA_VERIFY_TOKEN = process.env.WA_VERIFY_TOKEN;
 
