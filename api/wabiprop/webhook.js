@@ -6,6 +6,7 @@
 // BUILD LOG:
 //   P1 — GET verification handler + POST router skeleton
 //   P2 — Flow 1: tenant issue intake (lookup, create issue, notify tenant + agent)
+//   P3 — Flow 2: agent assigns contractor (lookup contractor, patch issue, notify 3 parties)
 
 const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID;
 const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY;
@@ -209,10 +210,128 @@ async function handleTenantIssue(phone, messageText, tenantRecord) {
   }
 }
 
+// ─── FLOW 2 — AGENT ASSIGNS CONTRACTOR ──────────────────────────────────────
+// Trigger: agent sends "Assign [name]" (case insensitive)
+// Reads:   WP_Contractors (name partial match), WP_Issues (most recent Open for this agent)
+// Writes:  WP_Issues — Status, Contractor Name, Contractor Phone
+// Sends:   3 WhatsApp messages — contractor dispatch, tenant update, agent confirmation
+// Error:   logs + alerts Shawn
+
 async function handleAgentAssign(phone, messageText, agentRecord) {
   console.log(`[Flow 2] Agent assign — phone: ${phone} | msg: ${messageText}`);
-  // P3: full implementation here
-  await sendWhatsApp(phone, `[STUB] Assign command received. Flow 2 not yet built.`);
+
+  try {
+    // ── Step 1: parse contractor name from message ───────────────────────────
+    // messageText arrives as the original-cased string e.g. "Assign Sipho Nkosi"
+    const searchName = messageText.slice(7).trim(); // strip "Assign " (7 chars)
+    if (!searchName) {
+      await sendWhatsApp(phone, `Please include a contractor name. Example: *Assign Sipho Nkosi Plumbing*`);
+      return;
+    }
+    console.log(`[Flow 2] Searching contractor: "${searchName}"`);
+
+    // ── Step 2: query WP_Contractors — partial case-insensitive match ────────
+    // SEARCH() in Airtable formulas is case-insensitive
+    const contractorRecords = await airtableGet(
+      'WP_Contractors',
+      `AND(SEARCH(LOWER('${searchName.replace(/'/g, "\\'")}'), LOWER({Contractor Name})) > 0, {Active} = TRUE())`
+    );
+
+    if (contractorRecords.length === 0) {
+      await sendWhatsApp(phone,
+        `Contractor not found. Available contractors:\n- Sipho Nkosi Plumbing\n- Themba Electrical\n- General Mike Repairs`
+      );
+      return;
+    }
+
+    // Take first match (most contractors will be unambiguous from partial name)
+    const contractor = contractorRecords[0];
+    const contractorName  = (contractor.fields['Contractor Name']  || '').trim();
+    const contractorPhone = (contractor.fields['Phone (WhatsApp)'] || '').trim();
+    console.log(`[Flow 2] Contractor matched: "${contractorName}" (${contractorPhone})`);
+
+    // ── Step 3: find most recent Open issue for this agent ───────────────────
+    // Airtable sort param: sort[0][field]=Date Reported&sort[0][direction]=desc
+    const issueUrl =
+      `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent('WP_Issues')}` +
+      `?filterByFormula=${encodeURIComponent(`AND({Agent WhatsApp Number} = '${phone}', {Status} = 'Open')`)}` +
+      `&sort%5B0%5D%5Bfield%5D=Date%20Reported&sort%5B0%5D%5Bdirection%5D=desc` +
+      `&maxRecords=1`;
+
+    console.log(`[Flow 2] Querying open issues for agent: ${phone}`);
+    const issueRes  = await fetch(issueUrl, { headers: { Authorization: `Bearer ${AIRTABLE_API_KEY}` } });
+    console.log(`[Flow 2] Open issues query HTTP ${issueRes.status}`);
+    const issueData = await issueRes.json();
+    const openIssues = issueData.records || [];
+
+    if (openIssues.length === 0) {
+      await sendWhatsApp(phone, `No open issues found to assign.`);
+      return;
+    }
+
+    const issue      = openIssues[0];
+    const issueId    = issue.id;
+    const issueTitle = (issue.fields['Issue Title']            || '').trim();
+    const description       = (issue.fields['Description']            || '').trim();
+    const tenantPhone       = (issue.fields['Tenant WhatsApp Number'] || '').trim();
+    const unitAddress       = (issue.fields['Unit Address']           || '').trim();
+    console.log(`[Flow 2] Issue found: "${issueTitle}" | Tenant: ${tenantPhone}`);
+
+    // ── Step 4: PATCH the issue ──────────────────────────────────────────────
+    const patched = await airtableUpdate('WP_Issues', issueId, {
+      'Status':           'Contractor Assigned',
+      'Contractor Name':  contractorName,
+      'Contractor Phone': contractorPhone,
+    });
+
+    if (patched.error) {
+      throw new Error(`Issue PATCH failed: ${JSON.stringify(patched.error)}`);
+    }
+    console.log(`[Flow 2] Issue patched — Status: Contractor Assigned`);
+
+    // ── Step 5: resolve tenant name for messages ─────────────────────────────
+    let tenantName = 'Tenant';
+    if (tenantPhone) {
+      const tenantRecords = await airtableGet('WP_Tenants', `{Whatsapp Phone Number} = '${tenantPhone}'`);
+      if (tenantRecords.length > 0) {
+        tenantName = (tenantRecords[0].fields['Full Name'] || 'Tenant').trim();
+      }
+    }
+
+    // ── Step 6: send to contractor ───────────────────────────────────────────
+    if (contractorPhone) {
+      const contractorMsg =
+        `🔧 New job assigned.\n\n` +
+        `Ref: ${issueTitle}\n` +
+        `Tenant: ${tenantName}\n` +
+        `Unit: ${unitAddress || 'see agent for address'}\n` +
+        `Issue: ${description}\n` +
+        `Tenant contact: ${tenantPhone}\n\n` +
+        `Reply *on my way* when leaving. Reply *done* when complete.`;
+
+      await sendWhatsApp(contractorPhone, contractorMsg);
+    }
+
+    // ── Step 7: send to tenant ───────────────────────────────────────────────
+    if (tenantPhone) {
+      const tenantMsg =
+        `Hi ${tenantName}, your issue has been assigned to ${contractorName}. ` +
+        `They will contact you shortly.`;
+
+      await sendWhatsApp(tenantPhone, tenantMsg);
+    }
+
+    // ── Step 8: confirm to agent ─────────────────────────────────────────────
+    await sendWhatsApp(phone,
+      `✅ ${contractorName} assigned to ${issueTitle}. Tenant and contractor notified.`
+    );
+
+    console.log(`[Flow 2] Complete — ${contractorName} assigned to "${issueTitle}"`);
+
+  } catch (err) {
+    console.error(`[Flow 2 ERROR]`, err.message);
+    await alertShawn('Flow 2 (agent assign)', err.message, phone);
+  }
 }
 
 async function handleAgentReport(phone, agentRecord) {
