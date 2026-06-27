@@ -252,9 +252,9 @@ async function handleTenantIssue(phone, messageText, tenantRecord) {
 }
 
 // ─── FLOW 2a — AGENT REQUESTS CONTRACTOR LIST ───────────────────────────────
-// Trigger: agent sends "1" with no pending assignment on their open issue
+// Trigger: agent sends "1"
 // Reads:   WP_Issues (most recent Open for this agent), WP_Contractors (all Active)
-// Writes:  WP_Issues — Attending Agent + Attending Timestamp (marks pending selection)
+// Writes:  nothing — list is stateless; selection arrives as "Assign N" command
 // Sends:   1 WhatsApp message — numbered contractor list
 
 async function handleAgentShowContractors(phone, agentRecord) {
@@ -296,16 +296,12 @@ async function handleAgentShowContractors(phone, agentRecord) {
       .map((c, i) => `${i + 1} - ${(c.fields['Contractor Name'] || 'Unknown').trim()}`)
       .join('\n');
 
+    const exampleNums = contractorRecords.slice(0, 3).map((_, i) => `*Assign ${i + 1}*`).join(', ');
+
     const msg =
       `Select a contractor for WP-${issueRef}:\n\n` +
       `${listLines}\n\n` +
-      `Reply with a number to assign.`;
-
-    // Mark issue pending — Attending Agent = agent phone
-    await airtableUpdate('WP_Issues', issueId, {
-      'Attending Agent':     phone,
-      'Attending Timestamp': new Date().toISOString(),
-    });
+      `Reply ${exampleNums} to confirm.`;
 
     await sendWhatsApp(phone, msg);
     console.log(`[Flow 2a] Contractor list sent for WP-${issueRef}`);
@@ -317,27 +313,32 @@ async function handleAgentShowContractors(phone, agentRecord) {
 }
 
 // ─── FLOW 2b — AGENT SELECTS CONTRACTOR ─────────────────────────────────────
-// Trigger: agent sends a number (1–9) while an Open issue has Attending Agent = their phone
-// Reads:   WP_Issues (pending issue), WP_Contractors (sorted alphabetically), WP_Tenants
-// Writes:  WP_Issues — Issue Resolution Status, Contractor Name, clears Attending Agent
+// Trigger: agent sends "Assign N" (e.g. "Assign 2")
+// Reads:   WP_Issues (most recent Open for this agent), WP_Contractors (sorted alphabetically), WP_Tenants
+// Writes:  WP_Issues — Issue Resolution Status, Contractor Name
 // Sends:   2 WhatsApp messages — agent confirmation + contractor dispatch
 
 async function handleAgentContractorSelect(phone, selection, agentRecord) {
   console.log(`[Flow 2b] Contractor select — agent: ${phone} | selection: ${selection}`);
 
   try {
-    // Find the Open issue pending assignment for this agent
-    const pendingIssues = await airtableGet(
-      'WP_Issues',
-      `AND({Attending Agent} = '${phone}', {Issue Resolution Status} = 'Open')`
-    );
+    // Find most recent Open issue for this agent
+    const issueUrl =
+      `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent('WP_Issues')}` +
+      `?filterByFormula=${encodeURIComponent(`AND({Agent Whatsapp number} = '${phone}', {Issue Resolution Status} = 'Open')`)}` +
+      `&sort%5B0%5D%5Bfield%5D=Date%20Reported&sort%5B0%5D%5Bdirection%5D=desc` +
+      `&maxRecords=1`;
 
-    if (pendingIssues.length === 0) {
-      await sendWhatsApp(phone, `No pending assignment found. Reply *1* to see the contractor list.`);
+    const issueRes  = await fetch(issueUrl, { headers: { Authorization: `Bearer ${AIRTABLE_API_KEY}` } });
+    const issueData = await issueRes.json();
+    const openIssues = issueData.records || [];
+
+    if (openIssues.length === 0) {
+      await sendWhatsApp(phone, `No open issues found. Nothing to assign.`);
       return;
     }
 
-    const issue       = pendingIssues[0];
+    const issue       = openIssues[0];
     const issueId     = issue.id;
     const issueRef    = issue.fields['Issue Ref'] || issueId.slice(-6).toUpperCase();
     const description = (issue.fields['Description']            || '').trim();
@@ -359,11 +360,10 @@ async function handleAgentContractorSelect(phone, selection, agentRecord) {
     const contractorName  = (contractor.fields['Contractor Name']  || '').trim();
     const contractorPhone = (contractor.fields['Phone (whatsApp)'] || '').trim();
 
-    // PATCH issue — assign contractor, clear pending state
+    // PATCH issue — assign contractor
     const patched = await airtableUpdate('WP_Issues', issueId, {
       'Issue Resolution Status': 'Contractor Assigned',
       'Contractor Name':         contractorName,
-      'Attending Agent':         '',
     });
 
     if (patched.error) {
@@ -464,21 +464,14 @@ async function routeMessage(phone, messageText) {
 
   // ── AGENT COMMANDS ───────────────────────────────────────────────────────
   if (role === 'agent') {
-    // Single digit 1–9: contractor selection (if pending) or show list (if "1" with none)
-    if (/^[1-9]$/.test(text)) {
-      const pendingIssues = await airtableGet(
-        'WP_Issues',
-        `AND({Attending Agent} = '${phone}', {Issue Resolution Status} = 'Open')`
-      );
-      if (pendingIssues.length > 0) {
-        await handleAgentContractorSelect(phone, text, record);
-        return;
-      }
-      if (text === '1') {
-        await handleAgentShowContractors(phone, record);
-        return;
-      }
-      await sendWhatsApp(phone, `No pending selection. Reply *1* to see the contractor list.`);
+    if (text === '1') {
+      await handleAgentShowContractors(phone, record);
+      return;
+    }
+    // "Assign N" — e.g. "Assign 2" or "assign 3"
+    const assignMatch = textLower.match(/^assign\s+([1-9]\d*)$/);
+    if (assignMatch) {
+      await handleAgentContractorSelect(phone, assignMatch[1], record);
       return;
     }
     if (textLower === 'report') {
