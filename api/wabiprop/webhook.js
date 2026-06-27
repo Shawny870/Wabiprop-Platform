@@ -184,10 +184,13 @@ async function handleTenantIssue(phone, messageText, tenantRecord) {
       'Description':            messageText,
       'Issue Resolution Status': 'Open',
       'Urgency':                'Routine',
-      'Tenant Whatsapp Number': phone,
-      'Agent Whatsapp number':  agentPhone,
+      'Tenant WhatsApp Number': phone,
+      'Agent WhatsApp Number':  agentPhone,
       'Date Reported':          new Date().toISOString(),
     };
+
+    // Include owner phone if present — needed for V2 cron queries
+    if (ownerPhone) issueFields['Owner Phone'] = ownerPhone;
 
     logToAxiom('info', 'flow1_issue_create_attempt', { phone, issueTitle: issueFields['Issue Title'] });
     const created = await airtableCreate('WP_Issues', issueFields);
@@ -295,7 +298,7 @@ async function handleAgentAssign(phone, messageText, agentRecord) {
     // Airtable sort param: sort[0][field]=Date Reported&sort[0][direction]=desc
     const issueUrl =
       `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent('WP_Issues')}` +
-      `?filterByFormula=${encodeURIComponent(`AND({Agent Whatsapp number} = '${phone}', {Issue Resolution Status} = 'Open')`)}` +
+      `?filterByFormula=${encodeURIComponent(`AND({Agent WhatsApp Number} = '${phone}', {Issue Resolution Status} = 'Open')`)}` +
       `&sort%5B0%5D%5Bfield%5D=Date%20Reported&sort%5B0%5D%5Bdirection%5D=desc` +
       `&maxRecords=1`;
 
@@ -322,6 +325,7 @@ async function handleAgentAssign(phone, messageText, agentRecord) {
     const patched = await airtableUpdate('WP_Issues', issueId, {
       'Issue Resolution Status': 'Contractor Assigned',
       'Contractor Name':  contractorName,
+      'Contractor Phone': contractorPhone,
     });
 
     if (patched.error) {
@@ -480,7 +484,7 @@ async function routeMessage(phone, messageText) {
     // Check if tenant has a pending-confirmation issue — if so, this is Flow 4b/4c
     const pendingIssues = await airtableGet(
       'WP_Issues',
-      `AND({Tenant Whatsapp Number} = '${phone}', {Issue Resolution Status} = 'Pending Confirmation')`
+      `AND({Tenant WhatsApp Number} = '${phone}', {Issue Resolution Status} = 'Pending Confirmation')`
     );
     if (pendingIssues.length > 0 && (textLower === 'yes' || textLower === '1' || textLower === 'no' || textLower === '2')) {
       await handleTenantClosure(phone, text, record);
