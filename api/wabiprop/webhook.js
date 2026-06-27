@@ -5,6 +5,7 @@
 // No AI. Deterministic logic only. Solar Geyser Principle.
 // BUILD LOG:
 //   P1 — GET verification handler + POST router skeleton
+//   P2 — Flow 1: tenant issue intake (lookup, create issue, notify tenant + agent)
 
 const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID;
 const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY;
@@ -116,8 +117,8 @@ async function identifySender(phone) {
     return { role: 'contractor', record: contractorRecords[0] };
   }
 
-  // Check WP_Tenants — field: "WhatsApp Phone Number" (note capitalisation)
-  const tenantRecords = await airtableGet('WP_Tenants', `{WhatsApp Phone Number} = '${phone}'`);
+  // Check WP_Tenants — field: "Whatsapp Phone Number" (lowercase 'app' — confirmed live)
+  const tenantRecords = await airtableGet('WP_Tenants', `{Whatsapp Phone Number} = '${phone}'`);
   if (tenantRecords.length > 0) {
     console.log(`[Router] Identified as TENANT: ${phone}`);
     return { role: 'tenant', record: tenantRecords[0] };
@@ -131,10 +132,81 @@ async function identifySender(phone) {
 // These will be replaced with full implementations in P2–P8.
 // They are stubs only — they log and send a placeholder reply.
 
+// ─── FLOW 1 — TENANT ISSUE INTAKE ───────────────────────────────────────────
+// Trigger: any text message from a registered tenant
+// Reads:   WP_Tenants (already fetched by router — passed in as tenantRecord)
+// Writes:  WP_Issues (creates new record, Status = Open)
+// Sends:   2 WhatsApp messages — tenant acknowledgement + agent notification
+// Error:   logs to console + alerts Shawn, never sends tenant ack if create failed
+
 async function handleTenantIssue(phone, messageText, tenantRecord) {
   console.log(`[Flow 1] Tenant intake — phone: ${phone}`);
-  // P2: full implementation here
-  await sendWhatsApp(phone, `[STUB] Tenant intake received. Flow 1 not yet built.`);
+
+  try {
+    const f = tenantRecord.fields;
+    const tenantName    = (f['Full Name']             || '').trim();
+    const unitAddress   = (f['Unit Address']          || '').trim();
+    const propertyName  = (f['Property Name']         || '').trim();
+    const ownerPhone    = (f['Owner Phone']            || '').trim();
+    const agentPhone    = (f['Agent WhatsApp Number'] || '').trim();
+
+    // ── Step 1: create WP_Issues record ─────────────────────────────────────
+    const issueFields = {
+      'Issue Title':            `${tenantName} — ${messageText.slice(0, 60)}`,
+      'Description':            messageText,
+      'Status':                 'Open',
+      'Urgency':                'Routine',
+      'Tenant WhatsApp Number': phone,
+      'Agent WhatsApp Number':  agentPhone,
+      'Property Name':          propertyName,
+      'Date Reported':          new Date().toISOString(),
+    };
+
+    // Include owner phone if present — needed for V2 cron queries
+    if (ownerPhone) issueFields['Owner Phone'] = ownerPhone;
+
+    const created = await airtableCreate('WP_Issues', issueFields);
+
+    if (!created.id) {
+      throw new Error(`Airtable create returned no record ID. Error: ${JSON.stringify(created.error || created)}`);
+    }
+
+    // Issue Ref is an autonumber — Airtable returns it in the created record fields
+    const issueRef = created.fields?.['Issue Ref'] || created.id.slice(-6).toUpperCase();
+    console.log(`[Flow 1] Issue created — Ref: ${issueRef} | Airtable ID: ${created.id}`);
+
+    // ── Step 2: acknowledge tenant ───────────────────────────────────────────
+    const tenantMsg =
+      `Hi ${tenantName}, your maintenance request has been received.\n\n` +
+      `Reference: WP-${issueRef}\n` +
+      `Issue: ${messageText.slice(0, 80)}${messageText.length > 80 ? '...' : ''}\n\n` +
+      `Your agent has been notified and will be in touch shortly. Please do not resend this message.`;
+
+    await sendWhatsApp(phone, tenantMsg);
+
+    // ── Step 3: notify agent ─────────────────────────────────────────────────
+    if (!agentPhone) {
+      console.warn(`[Flow 1] No agent phone on tenant record — skipping agent notification`);
+    } else {
+      const agentMsg =
+        `🔧 New maintenance issue logged.\n\n` +
+        `Ref: WP-${issueRef}\n` +
+        `Tenant: ${tenantName}\n` +
+        `Unit: ${unitAddress || 'unknown'}\n` +
+        `Property: ${propertyName || 'unknown'}\n` +
+        `Issue: ${messageText}\n\n` +
+        `Reply *Assign [contractor name]* to dispatch.`;
+
+      await sendWhatsApp(agentPhone, agentMsg);
+    }
+
+    console.log(`[Flow 1] Complete — Ref: WP-${issueRef} | Tenant: ${tenantName}`);
+
+  } catch (err) {
+    console.error(`[Flow 1 ERROR]`, err.message);
+    await alertShawn('Flow 1 (tenant intake)', err.message, phone);
+    // Do not send tenant acknowledgement — issue was not confirmed created
+  }
 }
 
 async function handleAgentAssign(phone, messageText, agentRecord) {
