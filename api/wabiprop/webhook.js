@@ -184,7 +184,7 @@ async function handleTenantIssue(phone, messageText, tenantRecord) {
       'Description':            messageText,
       'Issue Resolution Status': 'Open',
       'Urgency':                'Routine',
-      'Tenant WhatsApp Number': phone,
+      'Tenant Whatsapp Number': phone,
       'Agent WhatsApp Number':  agentPhone,
       'Date Reported':          new Date().toISOString(),
     };
@@ -317,7 +317,7 @@ async function handleAgentAssign(phone, messageText, agentRecord) {
     const issueId    = issue.id;
     const issueTitle = (issue.fields['Issue Title']            || '').trim();
     const description       = (issue.fields['Description']            || '').trim();
-    const tenantPhone       = (issue.fields['Tenant WhatsApp Number'] || '').trim();
+    const tenantPhone       = (issue.fields['Tenant Whatsapp Number'] || '').trim();
     const unitAddress       = (issue.fields['Unit Address']           || '').trim();
     console.log(`[Flow 2] Issue found: "${issueTitle}" | Tenant: ${tenantPhone}`);
 
@@ -484,7 +484,7 @@ async function routeMessage(phone, messageText) {
     // Check if tenant has a pending-confirmation issue — if so, this is Flow 4b/4c
     const pendingIssues = await airtableGet(
       'WP_Issues',
-      `AND({Tenant WhatsApp Number} = '${phone}', {Issue Resolution Status} = 'Pending Confirmation')`
+      `AND({Tenant Whatsapp Number} = '${phone}', {Issue Resolution Status} = 'Pending Confirmation')`
     );
     if (pendingIssues.length > 0 && (textLower === 'yes' || textLower === '1' || textLower === 'no' || textLower === '2')) {
       await handleTenantClosure(phone, text, record);
