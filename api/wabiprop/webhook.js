@@ -167,7 +167,7 @@ async function handleTenantIssue(phone, messageText, tenantRecord) {
     const unitAddress   = (f['Unit Address']          || '').trim();
     const propertyName  = (f['Property Name']         || '').trim();
     const ownerPhone    = (f['Owner Phone']            || '').trim();
-    const agentPhone    = (f['Agent Whatsapp number'] || '').trim();
+    const agentPhone    = (f['Agent WhatsApp Number'] || '').trim();
 
     logToAxiom('info', 'flow1_tenant_fields', {
       phone,
