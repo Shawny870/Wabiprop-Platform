@@ -128,8 +128,8 @@ async function identifySender(phone) {
     return { role: 'agent', record: agentRecords[0] };
   }
 
-  // Check WP_Contractors — field: "Phone (WhatsApp)"
-  const contractorRecords = await airtableGet('WP_Contractors', `{Phone (WhatsApp)} = '${phone}'`);
+  // Check WP_Contractors — field: "Phone (whatsApp)"
+  const contractorRecords = await airtableGet('WP_Contractors', `{Phone (whatsApp)} = '${phone}'`);
   if (contractorRecords.length > 0) {
     console.log(`[Router] Identified as CONTRACTOR: ${phone}`);
     return { role: 'contractor', record: contractorRecords[0] };
@@ -288,7 +288,7 @@ async function handleAgentAssign(phone, messageText, agentRecord) {
     // Take first match (most contractors will be unambiguous from partial name)
     const contractor = contractorRecords[0];
     const contractorName  = (contractor.fields['Contractor Name']  || '').trim();
-    const contractorPhone = (contractor.fields['Phone (WhatsApp)'] || '').trim();
+    const contractorPhone = (contractor.fields['Phone (whatsApp)'] || '').trim();
     console.log(`[Flow 2] Contractor matched: "${contractorName}" (${contractorPhone})`);
 
     // ── Step 3: find most recent Open issue for this agent ───────────────────
@@ -315,7 +315,6 @@ async function handleAgentAssign(phone, messageText, agentRecord) {
     const issueTitle = (issue.fields['Issue Title']            || '').trim();
     const description       = (issue.fields['Description']            || '').trim();
     const tenantPhone       = (issue.fields['Tenant Whatsapp Number'] || '').trim();
-    const unitAddress       = (issue.fields['Unit Address']           || '').trim();
     console.log(`[Flow 2] Issue found: "${issueTitle}" | Tenant: ${tenantPhone}`);
 
     // ── Step 4: PATCH the issue ──────────────────────────────────────────────
@@ -329,12 +328,15 @@ async function handleAgentAssign(phone, messageText, agentRecord) {
     }
     console.log(`[Flow 2] Issue patched — Status: Contractor Assigned`);
 
-    // ── Step 5: resolve tenant name for messages ─────────────────────────────
+    // ── Step 5: resolve tenant name + unit address from WP_Tenants ──────────
+    // Unit Address lives on WP_Tenants, not WP_Issues — look it up via tenant phone
     let tenantName = 'Tenant';
+    let unitAddress = '';
     if (tenantPhone) {
       const tenantRecords = await airtableGet('WP_Tenants', `{Whatsapp Phone Number} = '${tenantPhone}'`);
       if (tenantRecords.length > 0) {
-        tenantName = (tenantRecords[0].fields['Full Name'] || 'Tenant').trim();
+        tenantName  = (tenantRecords[0].fields['Full Name']    || 'Tenant').trim();
+        unitAddress = (tenantRecords[0].fields['Unit Address'] || '').trim();
       }
     }
 
