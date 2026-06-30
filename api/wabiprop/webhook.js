@@ -697,11 +697,11 @@ async function handleTenantClosure(phone, messageText, tenantRecord, pendingIssu
     if (confirmed) {
       // ── Flow 4b: tenant confirms issue resolved ──────────────────────────
       // "Date Resolved" is a date field — ISO date string (no time portion)
-      // "Satisfaction" is a singleSelect — "Positive" per spec
+      // "Satisfaction" is a singleSelect — live options confirmed Meta API 30 Jun 2026: "Y", "N", "Pending"
       const patched = await airtableUpdate('WP_Issues', issueId, {
         'Issue Resolution Status': 'Resolved',
         'Date Resolved':           new Date().toISOString().split('T')[0],
-        'Satisfaction':            'Positive',
+        'Satisfaction':            'Y',
       });
       if (patched.error) throw new Error(`Issue PATCH failed: ${JSON.stringify(patched.error)}`);
 
@@ -721,10 +721,10 @@ async function handleTenantClosure(phone, messageText, tenantRecord, pendingIssu
 
     } else {
       // ── Flow 4c: tenant rejects, reopen issue ───────────────────────────
-      // "Satisfaction" is a singleSelect — "Negative" per spec
+      // "Satisfaction" is a singleSelect — live options confirmed Meta API 30 Jun 2026: "Y", "N", "Pending"
       const patched = await airtableUpdate('WP_Issues', issueId, {
         'Issue Resolution Status': 'Open',
-        'Satisfaction':            'Negative',
+        'Satisfaction':            'N',
       });
       if (patched.error) throw new Error(`Issue PATCH failed: ${JSON.stringify(patched.error)}`);
 
@@ -851,9 +851,18 @@ async function routeMessage(phone, messageText) {
       'WP_Issues',
       `AND({Tenant Whatsapp Number} = '${phone}', {Issue Resolution Status} = 'Pending Confirmation')`
     );
-    if (pendingIssues.length > 0 && (textLower === 'yes' || textLower === '1' || textLower === 'no' || textLower === '2')) {
-      // Pass the pending issue directly — avoids a second Airtable lookup in handleTenantClosure
-      await handleTenantClosure(phone, text, record, pendingIssues[0]);
+    if (pendingIssues.length > 0) {
+      if (textLower === 'yes' || textLower === '1' || textLower === 'no' || textLower === '2') {
+        // Pass the pending issue directly — avoids a second Airtable lookup in handleTenantClosure
+        await handleTenantClosure(phone, text, record, pendingIssues[0]);
+      } else {
+        // Tenant has a pending issue but replied something unexpected — re-prompt, do not create new issue
+        await sendWhatsApp(phone,
+          `Please reply with a number to confirm your maintenance request status:\n\n` +
+          `1 — Yes, resolved. Thank you.\n` +
+          `2 — No, still a problem.`
+        );
+      }
       return;
     }
     // Any other tenant message = new issue intake (Flow 1)
