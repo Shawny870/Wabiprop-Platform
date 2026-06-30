@@ -697,11 +697,11 @@ async function handleTenantClosure(phone, messageText, tenantRecord, pendingIssu
     if (confirmed) {
       // ── Flow 4b: tenant confirms issue resolved ──────────────────────────
       // "Date Resolved" is a date field — ISO date string (no time portion)
-      // "Satisfaction" is a singleSelect — "Positive" per spec
+      // "Satisfaction" is a singleSelect — live options confirmed Meta API 30 Jun 2026: "Y", "N", "Pending"
       const patched = await airtableUpdate('WP_Issues', issueId, {
         'Issue Resolution Status': 'Resolved',
         'Date Resolved':           new Date().toISOString().split('T')[0],
-        'Satisfaction':            'Positive',
+        'Satisfaction':            'Y',
       });
       if (patched.error) throw new Error(`Issue PATCH failed: ${JSON.stringify(patched.error)}`);
 
@@ -721,10 +721,10 @@ async function handleTenantClosure(phone, messageText, tenantRecord, pendingIssu
 
     } else {
       // ── Flow 4c: tenant rejects, reopen issue ───────────────────────────
-      // "Satisfaction" is a singleSelect — "Negative" per spec
+      // "Satisfaction" is a singleSelect — live options confirmed Meta API 30 Jun 2026: "Y", "N", "Pending"
       const patched = await airtableUpdate('WP_Issues', issueId, {
         'Issue Resolution Status': 'Open',
-        'Satisfaction':            'Negative',
+        'Satisfaction':            'N',
       });
       if (patched.error) throw new Error(`Issue PATCH failed: ${JSON.stringify(patched.error)}`);
 
