@@ -851,9 +851,18 @@ async function routeMessage(phone, messageText) {
       'WP_Issues',
       `AND({Tenant Whatsapp Number} = '${phone}', {Issue Resolution Status} = 'Pending Confirmation')`
     );
-    if (pendingIssues.length > 0 && (textLower === 'yes' || textLower === '1' || textLower === 'no' || textLower === '2')) {
-      // Pass the pending issue directly — avoids a second Airtable lookup in handleTenantClosure
-      await handleTenantClosure(phone, text, record, pendingIssues[0]);
+    if (pendingIssues.length > 0) {
+      if (textLower === 'yes' || textLower === '1' || textLower === 'no' || textLower === '2') {
+        // Pass the pending issue directly — avoids a second Airtable lookup in handleTenantClosure
+        await handleTenantClosure(phone, text, record, pendingIssues[0]);
+      } else {
+        // Tenant has a pending issue but replied something unexpected — re-prompt, do not create new issue
+        await sendWhatsApp(phone,
+          `Please reply with a number to confirm your maintenance request status:\n\n` +
+          `1 — Yes, resolved. Thank you.\n` +
+          `2 — No, still a problem.`
+        );
+      }
       return;
     }
     // Any other tenant message = new issue intake (Flow 1)
