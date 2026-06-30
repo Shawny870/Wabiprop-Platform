@@ -905,7 +905,27 @@ module.exports = async function handler(req, res) {
       }
     }
 
-    const messages = body?.entry?.[0]?.changes?.[0]?.value?.messages;
+    const value    = body?.entry?.[0]?.changes?.[0]?.value;
+    const messages = value?.messages;
+    const statuses = value?.statuses;
+
+    // Log delivery/read/failure status callbacks from Meta — full payload, filterable by event type
+    // These arrive asynchronously after a send and are the only way to detect silent delivery failures.
+    // Logging only — no logic change, always returns 200.
+    if (statuses && statuses.length > 0) {
+      statuses.forEach(s => {
+        console.log(`[delivery_status] id: ${s.id} | to: ${s.recipient_id} | status: ${s.status}`);
+        logToAxiom('info', 'delivery_status', {
+          message_id:   s.id,
+          recipient:    s.recipient_id,
+          status:       s.status,           // sent | delivered | read | failed
+          timestamp:    s.timestamp,
+          errors:       s.errors || null,   // populated on failed status
+          raw:          s,                  // full Meta status object for forensics
+        });
+      });
+    }
+
     console.log(`[POST] messages: ${messages?.length || 0}`);
 
     // Not a message event (delivery receipt, read receipt, status update) — ignore
