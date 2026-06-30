@@ -853,7 +853,8 @@ async function handleAgentStaleCheck(phone) {
     const formula =
       `OR({Issue Resolution Status} = 'Contractor Assigned', ` +
       `{Issue Resolution Status} = 'Contractor En Route', ` +
-      `{Issue Resolution Status} = 'Pending Confirmation')`;
+      `{Issue Resolution Status} = 'Pending Confirmation', ` +
+      `{Issue Resolution Status} = 'Awaiting Reopen Detail')`;
 
     const records = await airtableGet('WP_Issues', formula);
 
@@ -863,6 +864,10 @@ async function handleAgentStaleCheck(phone) {
     const resolveAnchor = (f, status) => {
       if (status === 'Pending Confirmation') {
         return f['Contractor Completed Timestamp'] || f['Contractor Arrived Timestamp'] || f['Date Reported'] || null;
+      }
+      // Awaiting Reopen Detail: no dedicated timestamp — fall back to Date Reported
+      if (status === 'Awaiting Reopen Detail') {
+        return f['Date Reported'] || null;
       }
       // Contractor Assigned + Contractor En Route
       return f['Contractor Arrived Timestamp'] || f['Date Reported'] || null;
