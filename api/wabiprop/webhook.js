@@ -758,6 +758,102 @@ async function handleAgentReport(phone, agentRecord) {
   await sendWhatsApp(phone, `[STUB] REPORT command received. Flow 6 not yet built.`);
 }
 
+// ─── AGENT TOOL: STATUS WP-N ─────────────────────────────────────────────────
+// Trigger: agent sends "STATUS WP-N" (e.g. "STATUS WP-56")
+// Reads:   WP_Issues filtered by Issue Ref
+// Sends:   live issue state back to agent
+
+async function handleAgentStatusCheck(phone, issueRefNum) {
+  console.log(`[STATUS] Agent status check — WP-${issueRefNum}`);
+  try {
+    const records = await airtableGet('WP_Issues', `{Issue Ref} = ${issueRefNum}`);
+    if (records.length === 0) {
+      await sendWhatsApp(phone, `WP-${issueRefNum} not found.`);
+      return;
+    }
+    const f = records[0].fields;
+    const fmt = v => v || '—';
+    const ts  = iso => iso ? new Date(iso).toLocaleString('en-ZA', { timeZone: 'Africa/Johannesburg', hour12: false }) : '—';
+
+    const msg =
+      `WP-${issueRefNum} Status\n\n` +
+      `Status:      ${fmt(f['Issue Resolution Status'])}\n` +
+      `Contractor:  ${fmt(f['Contractor Name'])}\n` +
+      `Tenant:      ${fmt(f['Tenant Whatsapp Number'])}\n` +
+      `Reported:    ${ts(f['Date Reported'])}\n` +
+      `En Route:    ${ts(f['Contractor Arrived Timestamp'])}\n` +
+      `Completed:   ${ts(f['Contractor Completed Timestamp'])}\n` +
+      `Resolved:    ${fmt(f['Date Resolved'])}\n` +
+      `Satisfaction:${fmt(f['Satisfaction'])}\n` +
+      `Description: ${(f['Description'] || '').slice(0, 80)}`;
+
+    await sendWhatsApp(phone, msg);
+    logToAxiom('info', 'agent_status_check', { phone, issueRef: issueRefNum });
+  } catch (err) {
+    console.error(`[STATUS ERROR]`, err.message);
+    await alertShawn('Agent STATUS check', err.message, phone);
+  }
+}
+
+// ─── AGENT TOOL: STALE ───────────────────────────────────────────────────────
+// Trigger: agent sends "STALE"
+// Reads:   WP_Issues — all records in non-terminal statuses
+// Sends:   list of issues stuck for more than 4 hours with no progression
+// Logic:   Contractor Assigned → stale if Date Reported > 4h ago
+//          Contractor En Route → stale if Contractor Arrived Timestamp > 4h ago
+//          Pending Confirmation → stale if Contractor Completed Timestamp > 4h ago
+
+async function handleAgentStaleCheck(phone) {
+  console.log(`[STALE] Agent stale issue check`);
+  try {
+    const STALE_MS = 4 * 60 * 60 * 1000; // 4 hours
+    const now = Date.now();
+
+    const formula =
+      `OR({Issue Resolution Status} = 'Contractor Assigned', ` +
+      `{Issue Resolution Status} = 'Contractor En Route', ` +
+      `{Issue Resolution Status} = 'Pending Confirmation')`;
+
+    const records = await airtableGet('WP_Issues', formula);
+
+    const stale = records.filter(rec => {
+      const f = rec.fields;
+      const status = f['Issue Resolution Status'];
+      let anchor;
+      if (status === 'Contractor Assigned')  anchor = f['Date Reported'];
+      if (status === 'Contractor En Route')  anchor = f['Contractor Arrived Timestamp'];
+      if (status === 'Pending Confirmation') anchor = f['Contractor Completed Timestamp'];
+      if (!anchor) return true; // no timestamp at all = definitely stale
+      return (now - new Date(anchor).getTime()) > STALE_MS;
+    });
+
+    if (stale.length === 0) {
+      await sendWhatsApp(phone, `No stale issues. All active issues have progressed within the last 4 hours.`);
+      return;
+    }
+
+    const lines = stale.map(rec => {
+      const f = rec.fields;
+      const status = f['Issue Resolution Status'];
+      let anchor;
+      if (status === 'Contractor Assigned')  anchor = f['Date Reported'];
+      if (status === 'Contractor En Route')  anchor = f['Contractor Arrived Timestamp'];
+      if (status === 'Pending Confirmation') anchor = f['Contractor Completed Timestamp'];
+      const hoursAgo = anchor ? ((now - new Date(anchor).getTime()) / 3600000).toFixed(1) : '?';
+      return `WP-${f['Issue Ref']} — ${status} — ${hoursAgo}h ago (${f['Contractor Name'] || 'no contractor'})`;
+    });
+
+    await sendWhatsApp(phone,
+      `⚠️ Stale issues (stuck > 4h):\n\n${lines.join('\n')}`
+    );
+
+    logToAxiom('info', 'agent_stale_check', { phone, staleCount: stale.length, refs: stale.map(r => r.fields['Issue Ref']) });
+  } catch (err) {
+    console.error(`[STALE ERROR]`, err.message);
+    await alertShawn('Agent STALE check', err.message, phone);
+  }
+}
+
 // ─── V2-4 — AGENT BRIEFING ───────────────────────────────────────────────────
 // STUB — V2
 
@@ -801,13 +897,24 @@ async function routeMessage(phone, messageText) {
       await handleAgentReport(phone, record);
       return;
     }
+    // "STATUS WP-N" — live issue state lookup
+    const statusMatch = textLower.match(/^status\s+wp-?(\d+)$/);
+    if (statusMatch) {
+      await handleAgentStatusCheck(phone, parseInt(statusMatch[1], 10));
+      return;
+    }
+    // "STALE" — scan for issues stuck > 4 hours
+    if (textLower === 'stale') {
+      await handleAgentStaleCheck(phone);
+      return;
+    }
     if (textLower.startsWith('briefing ')) {
       await handleAgentBriefing(phone, text, record);
       return;
     }
     // Agent sent something unrecognised
     await sendWhatsApp(phone,
-      `Hi! Commands available:\n- Reply *1* — assign contractor to latest open issue\n- *REPORT* — list all open issues\n- *BRIEFING [owner name]* — generate owner intelligence briefing`
+      `Hi! Commands available:\n- *1* — assign contractor to latest open issue\n- *STATUS WP-N* — check any issue live\n- *STALE* — find issues stuck > 4 hours\n- *REPORT* — list all open issues`
     );
     return;
   }
