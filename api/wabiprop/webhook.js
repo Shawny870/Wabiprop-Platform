@@ -816,14 +816,20 @@ async function handleAgentStaleCheck(phone) {
 
     const records = await airtableGet('WP_Issues', formula);
 
+    // Resolve best available anchor timestamp for each status, with fallback chain.
+    // Contractor Assigned/En Route: Contractor Arrived Timestamp → Date Reported
+    // Pending Confirmation:         Contractor Completed Timestamp → Contractor Arrived Timestamp → Date Reported
+    const resolveAnchor = (f, status) => {
+      if (status === 'Pending Confirmation') {
+        return f['Contractor Completed Timestamp'] || f['Contractor Arrived Timestamp'] || f['Date Reported'] || null;
+      }
+      // Contractor Assigned + Contractor En Route
+      return f['Contractor Arrived Timestamp'] || f['Date Reported'] || null;
+    };
+
     const stale = records.filter(rec => {
-      const f = rec.fields;
-      const status = f['Issue Resolution Status'];
-      let anchor;
-      if (status === 'Contractor Assigned')  anchor = f['Date Reported'];
-      if (status === 'Contractor En Route')  anchor = f['Contractor Arrived Timestamp'];
-      if (status === 'Pending Confirmation') anchor = f['Contractor Completed Timestamp'];
-      if (!anchor) return true; // no timestamp at all = definitely stale
+      const anchor = resolveAnchor(rec.fields, rec.fields['Issue Resolution Status']);
+      if (!anchor) return true; // no timestamp at all — definitely stale
       return (now - new Date(anchor).getTime()) > STALE_MS;
     });
 
@@ -834,13 +840,9 @@ async function handleAgentStaleCheck(phone) {
 
     const lines = stale.map(rec => {
       const f = rec.fields;
-      const status = f['Issue Resolution Status'];
-      let anchor;
-      if (status === 'Contractor Assigned')  anchor = f['Date Reported'];
-      if (status === 'Contractor En Route')  anchor = f['Contractor Arrived Timestamp'];
-      if (status === 'Pending Confirmation') anchor = f['Contractor Completed Timestamp'];
+      const anchor = resolveAnchor(f, f['Issue Resolution Status']);
       const hoursAgo = anchor ? ((now - new Date(anchor).getTime()) / 3600000).toFixed(1) : '?';
-      return `WP-${f['Issue Ref']} — ${status} — ${hoursAgo}h ago (${f['Contractor Name'] || 'no contractor'})`;
+      return `WP-${f['Issue Ref']} — ${f['Issue Resolution Status']} — ${hoursAgo}h ago (${f['Contractor Name'] || 'no contractor'})`;
     });
 
     await sendWhatsApp(phone,
