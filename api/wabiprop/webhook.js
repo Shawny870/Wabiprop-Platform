@@ -9,6 +9,20 @@
 //   P3 — Flow 2: agent assigns contractor (lookup contractor, patch issue, notify 3 parties)
 //   P4 — Separate WP_PHONE_NUMBER_ID env var (Wabiprop) from WA_PHONE_NUMBER_ID (Wabistay)
 //   P5 — Axiom HTTP logging added (fire-and-forget, dataset: wabiprop)
+//   P6 — Flow 2 hardened (FM-006/FM-007/FM-009 confirmed clean), Flow 2c added (contractor
+//        confirms receipt), Flow 3 built (contractor en route), Flow 4 + 4b + 4c built
+//        (contractor done → tenant satisfaction confirmation → close or reopen)
+//        Schema confirmed live from Meta API 30 June 2026.
+//
+// FIELD NAME REFERENCE — pulled from Airtable Meta API 30 June 2026:
+//   WP_Issues: "Issue Resolution Status", "Tenant Whatsapp Number", "Agent Whatsapp number"
+//              (lowercase 'app', lowercase 'n'), "Contractor Name", "Property Name" (READ ONLY
+//              — multipleLookupValues), "Contractor Arrived Timestamp", "Contractor Completed
+//              Timestamp", "Date Resolved", "Satisfaction", "Issue Ref", "Date Reported"
+//   WP_Tenants: "Full Name", "Whatsapp Phone Number", "Unit Address", "Property Name",
+//               "Agent WhatsApp Number" (capital W, A, N), "Owner Phone"
+//   WP_Agents: "Agent Whatsapp number" (lowercase 'app', lowercase 'n'), "Active"
+//   WP_Contractors: "Contractor Name", "Phone (whatsApp)" (lowercase 'w'), "Active"
 
 const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID;
 const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY;
@@ -77,6 +91,24 @@ async function airtableUpdate(table, recordId, fields) {
   return data;
 }
 
+// ─── AIRTABLE ISSUE LOOKUP FOR CONTRACTOR ─────────────────────────────────────
+// Used by Flows 2c, 3, 4 — finds the most recent issue in the given statuses
+// for a contractor identified by name.
+
+async function getContractorActiveIssue(contractorName, statuses) {
+  const statusFilters = statuses.map(s => `{Issue Resolution Status} = '${s}'`).join(', ');
+  const formula = `AND({Contractor Name} = '${contractorName}', OR(${statusFilters}))`;
+  const url =
+    `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent('WP_Issues')}` +
+    `?filterByFormula=${encodeURIComponent(formula)}` +
+    `&sort%5B0%5D%5Bfield%5D=Date%20Reported&sort%5B0%5D%5Bdirection%5D=desc` +
+    `&maxRecords=1`;
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${AIRTABLE_API_KEY}` } });
+  const data = await res.json();
+  if (data.error) console.error('[getContractorActiveIssue ERROR]', JSON.stringify(data.error));
+  return (data.records || [])[0] || null;
+}
+
 // ─── WHATSAPP HELPER ─────────────────────────────────────────────────────────
 
 async function sendWhatsApp(to, message) {
@@ -121,21 +153,21 @@ function formatPhone(raw) {
 // Returns { role: 'agent'|'contractor'|'tenant'|'unknown', record: <airtable record or null> }
 
 async function identifySender(phone) {
-  // Check WP_Agents — field: "Agent Whatsapp number" (note: lowercase 'app' per schema)
+  // WP_Agents — field: "Agent Whatsapp number" (lowercase 'app', lowercase 'n' — confirmed Meta API 30 Jun 2026)
   const agentRecords = await airtableGet('WP_Agents', `{Agent Whatsapp number} = '${phone}'`);
   if (agentRecords.length > 0) {
     console.log(`[Router] Identified as AGENT: ${phone}`);
     return { role: 'agent', record: agentRecords[0] };
   }
 
-  // Check WP_Contractors — field: "Phone (whatsApp)"
+  // WP_Contractors — field: "Phone (whatsApp)" (lowercase 'w', capital 'A' — confirmed Meta API 30 Jun 2026, FM-007)
   const contractorRecords = await airtableGet('WP_Contractors', `{Phone (whatsApp)} = '${phone}'`);
   if (contractorRecords.length > 0) {
     console.log(`[Router] Identified as CONTRACTOR: ${phone}`);
     return { role: 'contractor', record: contractorRecords[0] };
   }
 
-  // Check WP_Tenants — field: "Whatsapp Phone Number" (lowercase 'app' — confirmed live)
+  // WP_Tenants — field: "Whatsapp Phone Number" (confirmed Meta API 30 Jun 2026)
   const tenantRecords = await airtableGet('WP_Tenants', `{Whatsapp Phone Number} = '${phone}'`);
   if (tenantRecords.length > 0) {
     console.log(`[Router] Identified as TENANT: ${phone}`);
@@ -146,15 +178,11 @@ async function identifySender(phone) {
   return { role: 'unknown', record: null };
 }
 
-// ─── FLOW STUBS ──────────────────────────────────────────────────────────────
-// These will be replaced with full implementations in P2–P8.
-// They are stubs only — they log and send a placeholder reply.
-
 // ─── FLOW 1 — TENANT ISSUE INTAKE ───────────────────────────────────────────
-// Trigger: any text message from a registered tenant
+// Trigger: any text message from a registered tenant (not a closure response)
 // Reads:   WP_Tenants (already fetched by router — passed in as tenantRecord)
 // Writes:  WP_Issues (creates new record, Status = Open)
-// Sends:   2 WhatsApp messages — tenant acknowledgement + agent notification
+// Sends:   tenant acknowledgement + agent notification
 // Error:   logs to console + alerts Shawn, never sends tenant ack if create failed
 
 async function handleTenantIssue(phone, messageText, tenantRecord) {
@@ -163,11 +191,14 @@ async function handleTenantIssue(phone, messageText, tenantRecord) {
 
   try {
     const f = tenantRecord.fields;
+    // WP_Tenants field names — confirmed Meta API 30 Jun 2026
     const tenantName    = (f['Full Name']             || '').trim();
     const unitAddress   = (f['Unit Address']          || '').trim();
     const propertyName  = (f['Property Name']         || '').trim();
     const ownerPhone    = (f['Owner Phone']            || '').trim();
     const agentPhone    = (f['Agent WhatsApp Number'] || '').trim();
+    // Note: WP_Tenants uses "Agent WhatsApp Number" (capital W, A, N)
+    // WP_Issues uses "Agent Whatsapp number" (lowercase 'app', lowercase 'n') — different field, different casing
 
     logToAxiom('info', 'flow1_tenant_fields', {
       phone,
@@ -179,14 +210,15 @@ async function handleTenantIssue(phone, messageText, tenantRecord) {
     });
 
     // ── Step 1: create WP_Issues record ─────────────────────────────────────
+    // Property Name is NOT written here — it is a multipleLookupValues field (read-only, FM-009)
     const issueFields = {
-      'Issue Title':            `${tenantName} — ${messageText.slice(0, 60)}`,
-      'Description':            messageText,
+      'Issue Title':             `${tenantName} — ${messageText.slice(0, 60)}`,
+      'Description':             messageText,
       'Issue Resolution Status': 'Open',
-      'Urgency':                'Routine',
-      'Tenant Whatsapp Number': phone,
-      'Agent Whatsapp number':  agentPhone,
-      'Date Reported':          new Date().toISOString(),
+      'Urgency':                 'Routine',
+      'Tenant Whatsapp Number':  phone,
+      'Agent Whatsapp number':   agentPhone,
+      'Date Reported':           new Date().toISOString(),
     };
 
     logToAxiom('info', 'flow1_issue_create_attempt', { phone, issueTitle: issueFields['Issue Title'] });
@@ -255,7 +287,7 @@ async function handleTenantIssue(phone, messageText, tenantRecord) {
 // Trigger: agent sends "1"
 // Reads:   WP_Issues (most recent Open for this agent), WP_Contractors (all Active)
 // Writes:  nothing — list is stateless; selection arrives as "Assign N" command
-// Sends:   1 WhatsApp message — numbered contractor list
+// Sends:   numbered contractor list
 
 async function handleAgentShowContractors(phone, agentRecord) {
   console.log(`[Flow 2a] Show contractors — agent: ${phone}`);
@@ -296,12 +328,10 @@ async function handleAgentShowContractors(phone, agentRecord) {
       .map((c, i) => `${i + 1} - ${(c.fields['Contractor Name'] || 'Unknown').trim()}`)
       .join('\n');
 
-    const exampleNums = contractorRecords.slice(0, 3).map((_, i) => `*Assign ${i + 1}*`).join(', ');
-
     const msg =
       `Select a contractor for WP-${issueRef}:\n\n` +
       `${listLines}\n\n` +
-      `Reply ${exampleNums} to confirm.`;
+      `Reply *Assign N* (e.g. Assign 2) to confirm.`;
 
     await sendWhatsApp(phone, msg);
     console.log(`[Flow 2a] Contractor list sent for WP-${issueRef}`);
@@ -316,7 +346,9 @@ async function handleAgentShowContractors(phone, agentRecord) {
 // Trigger: agent sends "Assign N" (e.g. "Assign 2")
 // Reads:   WP_Issues (most recent Open for this agent), WP_Contractors (sorted alphabetically), WP_Tenants
 // Writes:  WP_Issues — Issue Resolution Status, Contractor Name
-// Sends:   2 WhatsApp messages — agent confirmation + contractor dispatch
+// Sends:   agent confirmation + contractor dispatch (with job receipt prompt)
+// Note:    Property Name is NOT written to WP_Issues (multipleLookupValues — read-only, FM-009)
+//          Unit Address is read from WP_Tenants, not WP_Issues (FM-006)
 
 async function handleAgentContractorSelect(phone, selection, agentRecord) {
   console.log(`[Flow 2b] Contractor select — agent: ${phone} | selection: ${selection}`);
@@ -358,9 +390,12 @@ async function handleAgentContractorSelect(phone, selection, agentRecord) {
 
     const contractor      = contractorRecords[index];
     const contractorName  = (contractor.fields['Contractor Name']  || '').trim();
+    // "Phone (whatsApp)" — lowercase 'w', confirmed Meta API 30 Jun 2026 (FM-007)
     const contractorPhone = (contractor.fields['Phone (whatsApp)'] || '').trim();
 
     // PATCH issue — assign contractor
+    // Note: "Contractor Phone" does NOT exist on WP_Issues (confirmed Meta API 30 Jun 2026)
+    //       Only Contractor Name is written here. Phone comes from WP_Contractors lookup.
     const patched = await airtableUpdate('WP_Issues', issueId, {
       'Issue Resolution Status': 'Contractor Assigned',
       'Contractor Name':         contractorName,
@@ -372,6 +407,7 @@ async function handleAgentContractorSelect(phone, selection, agentRecord) {
     console.log(`[Flow 2b] Issue patched — ${contractorName} assigned to WP-${issueRef}`);
 
     // Resolve tenant name + unit address from WP_Tenants
+    // Unit Address lives on WP_Tenants, NOT on WP_Issues (FM-006)
     let tenantName  = 'Tenant';
     let unitAddress = '';
     if (tenantPhone) {
@@ -383,18 +419,21 @@ async function handleAgentContractorSelect(phone, selection, agentRecord) {
     }
 
     // Send agent confirmation
-    await sendWhatsApp(phone, `✓ ${contractorName} assigned to WP-${issueRef}. They will be notified.`);
+    await sendWhatsApp(phone, `✓ ${contractorName} assigned to WP-${issueRef}. They will be notified now.`);
 
     // Send contractor dispatch
     if (contractorPhone) {
       const contractorMsg =
-        `New job assigned.\n\n` +
+        `New job assigned to you.\n\n` +
         `Ref: WP-${issueRef}\n` +
         `Issue: ${description}\n` +
         `Tenant: ${tenantName}\n` +
-        `Unit: ${unitAddress || 'see agent for address'}\n` +
-        `Tenant contact: ${tenantPhone}\n\n` +
-        `Reply ON MY WAY when en route.`;
+        `Unit: ${unitAddress || 'contact agent for address'}\n` +
+        `Tenant contact: ${tenantPhone || 'contact agent'}\n\n` +
+        `Reply with a number:\n` +
+        `1 — Confirm you have received this job\n` +
+        `ON MY WAY — when you are heading to the property\n` +
+        `DONE — when the job is complete`;
 
       await sendWhatsApp(contractorPhone, contractorMsg);
     }
@@ -407,40 +446,324 @@ async function handleAgentContractorSelect(phone, selection, agentRecord) {
   }
 }
 
-async function handleAgentReport(phone, agentRecord) {
-  console.log(`[Flow 6] Agent REPORT — phone: ${phone}`);
-  // P7: full implementation here
-  await sendWhatsApp(phone, `[STUB] REPORT command received. Flow 6 not yet built.`);
+// ─── FLOW 2c — CONTRACTOR CONFIRMS JOB RECEIPT ──────────────────────────────
+// Trigger: contractor replies "1" or "confirmed" after receiving dispatch
+// Reads:   WP_Issues (most recent Contractor Assigned for this contractor), WP_Tenants
+// Writes:  nothing (status is already Contractor Assigned — no state change yet)
+// Sends:   tenant notification (contractor confirmed, will contact) + agent confirmation + contractor reply
+
+async function handleContractorConfirmReceipt(phone, contractorRecord) {
+  const contractorName = (contractorRecord.fields['Contractor Name'] || '').trim();
+  console.log(`[Flow 2c] Contractor confirms receipt — phone: ${phone} | ${contractorName}`);
+  logToAxiom('info', 'flow2c_start', { phone, contractorName });
+
+  try {
+    const issue = await getContractorActiveIssue(contractorName, ['Contractor Assigned']);
+
+    if (!issue) {
+      await sendWhatsApp(phone,
+        `No assigned job found. If you received a job dispatch, contact your agent directly.`
+      );
+      return;
+    }
+
+    const issueRef    = issue.fields['Issue Ref'] || issue.id.slice(-6).toUpperCase();
+    const tenantPhone = (issue.fields['Tenant Whatsapp Number'] || '').trim();
+    const agentPhone  = (issue.fields['Agent Whatsapp number']  || '').trim();
+
+    // Get tenant name from WP_Tenants (FM-006 — tenant data lives there, not on WP_Issues)
+    let tenantName = 'The tenant';
+    if (tenantPhone) {
+      const tenantRecs = await airtableGet('WP_Tenants', `{Whatsapp Phone Number} = '${tenantPhone}'`);
+      if (tenantRecs.length > 0) tenantName = (tenantRecs[0].fields['Full Name'] || 'The tenant').trim();
+    }
+
+    // Notify tenant that contractor has confirmed and will be in touch
+    if (tenantPhone) {
+      await sendWhatsApp(tenantPhone,
+        `Update on your maintenance request (Ref: WP-${issueRef}).\n\n` +
+        `${contractorName} has confirmed your job and will contact you to arrange access.\n\n` +
+        `Please keep your phone available.`
+      );
+    }
+
+    // Confirm to agent
+    if (agentPhone) {
+      await sendWhatsApp(agentPhone,
+        `✓ WP-${issueRef}: ${contractorName} confirmed the job. ${tenantName} has been notified. Awaiting arrival.`
+      );
+    }
+
+    // Reply to contractor
+    await sendWhatsApp(phone,
+      `Confirmed. ${tenantName} has been notified that you will make contact.\n\n` +
+      `Ref: WP-${issueRef}\n\n` +
+      `Reply ON MY WAY when you are heading to the property.`
+    );
+
+    console.log(`[Flow 2c] Complete — ${contractorName} confirmed WP-${issueRef}`);
+    logToAxiom('info', 'flow2c_complete', { phone, contractorName, issueRef: String(issueRef) });
+
+  } catch (err) {
+    console.error(`[Flow 2c ERROR]`, err.message);
+    logToAxiom('error', 'flow2c_error', { phone, error: err.message });
+    await alertShawn('Flow 2c (contractor confirm receipt)', err.message, phone);
+  }
 }
 
-async function handleAgentBriefing(phone, messageText, agentRecord) {
-  console.log(`[V2-4] Agent BRIEFING — phone: ${phone} | msg: ${messageText}`);
-  // V2: full implementation here
-  await sendWhatsApp(phone, `[STUB] BRIEFING command received. V2-4 not yet built.`);
-}
+// ─── FLOW 3 — CONTRACTOR EN ROUTE ────────────────────────────────────────────
+// Trigger: contractor sends "on my way" / "omw" / "coming now" / "leaving now"
+// Reads:   WP_Issues (most recent Contractor Assigned or En Route for this contractor), WP_Tenants
+// Writes:  WP_Issues — Issue Resolution Status → Contractor En Route, Contractor Arrived Timestamp
+// Sends:   tenant notification + agent notification + contractor confirmation
 
 async function handleContractorEnRoute(phone, contractorRecord) {
-  console.log(`[Flow 3] Contractor en route — phone: ${phone}`);
-  // P4: full implementation here
-  await sendWhatsApp(phone, `[STUB] En route acknowledged. Flow 3 not yet built.`);
+  const contractorName = (contractorRecord.fields['Contractor Name'] || '').trim();
+  console.log(`[Flow 3] Contractor en route — phone: ${phone} | ${contractorName}`);
+  logToAxiom('info', 'flow3_start', { phone, contractorName });
+
+  try {
+    const issue = await getContractorActiveIssue(contractorName, ['Contractor Assigned', 'Contractor En Route']);
+
+    if (!issue) {
+      await sendWhatsApp(phone,
+        `No active job found. If you have an active job, contact your agent directly.`
+      );
+      return;
+    }
+
+    const issueId     = issue.id;
+    const issueRef    = issue.fields['Issue Ref'] || issueId.slice(-6).toUpperCase();
+    const tenantPhone = (issue.fields['Tenant Whatsapp Number'] || '').trim();
+    const agentPhone  = (issue.fields['Agent Whatsapp number']  || '').trim();
+
+    const now = new Date();
+    const timeStr = now.toLocaleTimeString('en-ZA', {
+      hour: '2-digit', minute: '2-digit', timeZone: 'Africa/Johannesburg'
+    });
+
+    // PATCH issue: status → Contractor En Route, timestamp
+    // "Contractor Arrived Timestamp" is a dateTime field on WP_Issues (confirmed Meta API 30 Jun 2026)
+    const patched = await airtableUpdate('WP_Issues', issueId, {
+      'Issue Resolution Status':     'Contractor En Route',
+      'Contractor Arrived Timestamp': now.toISOString(),
+    });
+
+    if (patched.error) throw new Error(`Issue PATCH failed: ${JSON.stringify(patched.error)}`);
+
+    // Get tenant name from WP_Tenants
+    let tenantName = 'The tenant';
+    if (tenantPhone) {
+      const tenantRecs = await airtableGet('WP_Tenants', `{Whatsapp Phone Number} = '${tenantPhone}'`);
+      if (tenantRecs.length > 0) tenantName = (tenantRecs[0].fields['Full Name'] || 'The tenant').trim();
+    }
+
+    // Notify tenant
+    if (tenantPhone) {
+      await sendWhatsApp(tenantPhone,
+        `Update on your maintenance request (Ref: WP-${issueRef}).\n\n` +
+        `${contractorName} is on the way and will arrive shortly.\n\n` +
+        `Please ensure access to the property.`
+      );
+    }
+
+    // Notify agent
+    if (agentPhone) {
+      await sendWhatsApp(agentPhone,
+        `WP-${issueRef}: ${contractorName} is en route (${timeStr}). ${tenantName} has been notified.`
+      );
+    }
+
+    // Confirm to contractor
+    await sendWhatsApp(phone,
+      `Got it — tenant has been notified you are on the way.\n\n` +
+      `Ref: WP-${issueRef}\n\n` +
+      `Reply DONE when the job is complete.`
+    );
+
+    console.log(`[Flow 3] Complete — ${contractorName} en route for WP-${issueRef}`);
+    logToAxiom('info', 'flow3_complete', { phone, contractorName, issueRef: String(issueRef) });
+
+  } catch (err) {
+    console.error(`[Flow 3 ERROR]`, err.message);
+    logToAxiom('error', 'flow3_error', { phone, error: err.message });
+    await alertShawn('Flow 3 (contractor en route)', err.message, phone);
+  }
 }
 
+// ─── FLOW 4 — CONTRACTOR REPORTS JOB DONE ────────────────────────────────────
+// Trigger: contractor sends "done" / "complete" / "finished" etc.
+// Reads:   WP_Issues (most recent Contractor Assigned or En Route for this contractor)
+// Writes:  WP_Issues — Issue Resolution Status → Pending Confirmation, Contractor Completed Timestamp
+// Sends:   tenant satisfaction prompt (1=resolved / 2=still a problem) + agent summary + contractor receipt
+
 async function handleContractorDone(phone, contractorRecord) {
-  console.log(`[Flow 4] Contractor done — phone: ${phone}`);
-  // P5: full implementation here
-  await sendWhatsApp(phone, `[STUB] Job done acknowledged. Flow 4 not yet built.`);
+  const contractorName = (contractorRecord.fields['Contractor Name'] || '').trim();
+  console.log(`[Flow 4] Contractor done — phone: ${phone} | ${contractorName}`);
+  logToAxiom('info', 'flow4_start', { phone, contractorName });
+
+  try {
+    const issue = await getContractorActiveIssue(contractorName, ['Contractor Assigned', 'Contractor En Route']);
+
+    if (!issue) {
+      await sendWhatsApp(phone,
+        `No active job found. If you have completed a job, contact your agent to confirm.`
+      );
+      return;
+    }
+
+    const issueId     = issue.id;
+    const issueRef    = issue.fields['Issue Ref'] || issueId.slice(-6).toUpperCase();
+    const tenantPhone = (issue.fields['Tenant Whatsapp Number'] || '').trim();
+    const agentPhone  = (issue.fields['Agent Whatsapp number']  || '').trim();
+
+    const now = new Date();
+
+    // PATCH issue: status → Pending Confirmation, completed timestamp
+    // "Contractor Completed Timestamp" is a dateTime field (confirmed Meta API 30 Jun 2026)
+    const patched = await airtableUpdate('WP_Issues', issueId, {
+      'Issue Resolution Status':         'Pending Confirmation',
+      'Contractor Completed Timestamp':   now.toISOString(),
+    });
+
+    if (patched.error) throw new Error(`Issue PATCH failed: ${JSON.stringify(patched.error)}`);
+
+    // Ask tenant to confirm resolution — numbered menu per Rule 11
+    if (tenantPhone) {
+      await sendWhatsApp(tenantPhone,
+        `Update on your maintenance request (Ref: WP-${issueRef}).\n\n` +
+        `${contractorName} has reported the job is complete.\n\n` +
+        `Has your issue been resolved?\n\n` +
+        `Reply with a number:\n` +
+        `1 — Yes, resolved. Thank you.\n` +
+        `2 — No, still a problem.`
+      );
+    }
+
+    // Notify agent
+    if (agentPhone) {
+      await sendWhatsApp(agentPhone,
+        `WP-${issueRef}: ${contractorName} reports job complete. Awaiting tenant confirmation.`
+      );
+    }
+
+    // Confirm to contractor
+    await sendWhatsApp(phone,
+      `Thanks. Tenant has been asked to confirm.\n\n` +
+      `Ref: WP-${issueRef}\n\n` +
+      `You will hear back if there is still a problem.`
+    );
+
+    console.log(`[Flow 4] Complete — ${contractorName} done, awaiting tenant confirmation for WP-${issueRef}`);
+    logToAxiom('info', 'flow4_complete', { phone, contractorName, issueRef: String(issueRef) });
+
+  } catch (err) {
+    console.error(`[Flow 4 ERROR]`, err.message);
+    logToAxiom('error', 'flow4_error', { phone, error: err.message });
+    await alertShawn('Flow 4 (contractor done)', err.message, phone);
+  }
 }
+
+// ─── FLOW 5 — CONTRACTOR ESCALATION ─────────────────────────────────────────
+// Trigger: contractor sends "needs assessment"
 
 async function handleContractorEscalation(phone, contractorRecord) {
   console.log(`[Flow 5] Contractor escalation — phone: ${phone}`);
-  // P6: full implementation here
-  await sendWhatsApp(phone, `[STUB] Needs assessment received. Flow 5 not yet built.`);
+  // V1 — not yet built. Stub sends help text. Build after Flow 3 + 4 pass on-device test.
+  await sendWhatsApp(phone, `[STUB] Needs assessment received. Flow 5 not yet built — contact your agent directly.`);
 }
 
-async function handleTenantClosure(phone, messageText, tenantRecord) {
-  console.log(`[Flow 4b/4c] Tenant closure response — phone: ${phone} | msg: ${messageText}`);
-  // P5: full implementation here (folded into Flow 4 build)
-  await sendWhatsApp(phone, `[STUB] Closure response received. Flow 4b/4c not yet built.`);
+// ─── FLOW 4b/4c — TENANT CLOSURE RESPONSE ───────────────────────────────────
+// Trigger: tenant replies "1"/"yes" (resolved) or "2"/"no" (still a problem)
+//          when their issue is in Pending Confirmation status
+// pendingIssue is passed directly from the router (already fetched there)
+// Reads:   pendingIssue passed from router
+// Writes:  WP_Issues — Issue Resolution Status, Date Resolved (4b), Satisfaction (4b/4c)
+// Sends:   tenant closure reply + agent notification
+
+async function handleTenantClosure(phone, messageText, tenantRecord, pendingIssue) {
+  const textLower  = messageText.trim().toLowerCase();
+  const confirmed  = textLower === '1' || textLower === 'yes';
+  const tenantName = (tenantRecord.fields['Full Name'] || 'Tenant').trim();
+
+  const issueId  = pendingIssue.id;
+  const issueRef = pendingIssue.fields['Issue Ref'] || issueId.slice(-6).toUpperCase();
+  const agentPhone = (pendingIssue.fields['Agent Whatsapp number'] || '').trim();
+
+  console.log(`[Flow 4${confirmed ? 'b' : 'c'}] Tenant closure — phone: ${phone} | ${confirmed ? 'CONFIRMED' : 'REJECTED'} | WP-${issueRef}`);
+  logToAxiom('info', `flow4${confirmed ? 'b' : 'c'}_start`, { phone, confirmed, issueRef: String(issueRef) });
+
+  try {
+    if (confirmed) {
+      // ── Flow 4b: tenant confirms issue resolved ──────────────────────────
+      // "Date Resolved" is a date field — ISO date string (no time portion)
+      // "Satisfaction" is a singleSelect — "Positive" per spec
+      const patched = await airtableUpdate('WP_Issues', issueId, {
+        'Issue Resolution Status': 'Resolved',
+        'Date Resolved':           new Date().toISOString().split('T')[0],
+        'Satisfaction':            'Positive',
+      });
+      if (patched.error) throw new Error(`Issue PATCH failed: ${JSON.stringify(patched.error)}`);
+
+      await sendWhatsApp(phone,
+        `Thank you for confirming, ${tenantName}. Your issue (Ref: WP-${issueRef}) is now closed.\n\n` +
+        `We hope everything is sorted. Don't hesitate to report any future issues.`
+      );
+
+      if (agentPhone) {
+        await sendWhatsApp(agentPhone,
+          `✅ WP-${issueRef} CLOSED — ${tenantName} confirmed issue resolved.`
+        );
+      }
+
+      console.log(`[Flow 4b] Complete — WP-${issueRef} resolved and closed`);
+      logToAxiom('info', 'flow4b_complete', { phone, issueRef: String(issueRef), result: 'resolved' });
+
+    } else {
+      // ── Flow 4c: tenant rejects, reopen issue ───────────────────────────
+      // "Satisfaction" is a singleSelect — "Negative" per spec
+      const patched = await airtableUpdate('WP_Issues', issueId, {
+        'Issue Resolution Status': 'Open',
+        'Satisfaction':            'Negative',
+      });
+      if (patched.error) throw new Error(`Issue PATCH failed: ${JSON.stringify(patched.error)}`);
+
+      await sendWhatsApp(phone,
+        `Understood, ${tenantName}. Your agent has been notified that the issue is still not resolved.\n\n` +
+        `Ref: WP-${issueRef}\n\nYour agent will follow up.`
+      );
+
+      if (agentPhone) {
+        await sendWhatsApp(agentPhone,
+          `⚠️ WP-${issueRef} REOPENED — ${tenantName} says the issue is still not resolved. Please follow up urgently.`
+        );
+      }
+
+      console.log(`[Flow 4c] Complete — WP-${issueRef} reopened`);
+      logToAxiom('info', 'flow4c_complete', { phone, issueRef: String(issueRef), result: 'reopened' });
+    }
+
+  } catch (err) {
+    console.error(`[Flow 4b/4c ERROR]`, err.message);
+    logToAxiom('error', 'flow4bc_error', { phone, error: err.message });
+    await alertShawn(`Flow 4${confirmed ? 'b' : 'c'} (tenant closure)`, err.message, phone);
+  }
+}
+
+// ─── FLOW 6 — AGENT REPORT ───────────────────────────────────────────────────
+// STUB — build after Flow 3 + 4 pass on-device test
+
+async function handleAgentReport(phone, agentRecord) {
+  console.log(`[Flow 6] Agent REPORT — phone: ${phone}`);
+  await sendWhatsApp(phone, `[STUB] REPORT command received. Flow 6 not yet built.`);
+}
+
+// ─── V2-4 — AGENT BRIEFING ───────────────────────────────────────────────────
+// STUB — V2
+
+async function handleAgentBriefing(phone, messageText, agentRecord) {
+  console.log(`[V2-4] Agent BRIEFING — phone: ${phone} | msg: ${messageText}`);
+  await sendWhatsApp(phone, `[STUB] BRIEFING command received. V2-4 not yet built.`);
 }
 
 // ─── POST ROUTER ─────────────────────────────────────────────────────────────
@@ -491,8 +814,15 @@ async function routeMessage(phone, messageText) {
 
   // ── CONTRACTOR COMMANDS ──────────────────────────────────────────────────
   if (role === 'contractor') {
-    const enRouteKeywords = ['on my way', 'omw', 'coming now', 'leaving now', 'heading there', 'on my way!'];
-    const doneKeywords = ['done', 'done!', 'complete', 'completed', 'finished', 'job done', 'all done'];
+    // "1" or "confirmed" = job receipt confirmation (Flow 2c)
+    // Must be checked first — before en-route keywords
+    if (textLower === '1' || textLower === 'confirmed' || textLower === 'confirm') {
+      await handleContractorConfirmReceipt(phone, record);
+      return;
+    }
+
+    const enRouteKeywords = ['on my way', 'omw', 'coming now', 'leaving now', 'heading there', 'on my way!', 'on my way.'];
+    const doneKeywords    = ['done', 'done!', 'complete', 'completed', 'finished', 'job done', 'all done'];
     const escalateKeywords = ['needs assessment'];
 
     if (enRouteKeywords.includes(textLower)) {
@@ -509,7 +839,7 @@ async function routeMessage(phone, messageText) {
     }
     // Contractor sent something unrecognised
     await sendWhatsApp(phone,
-      `Hi! Send one of the following:\n- *on my way* — when you are en route\n- *done* — when the job is complete\n- *needs assessment* — if owner decision is required`
+      `Hi! Send one of the following:\n- *1* — confirm you received a job\n- *on my way* — when you are en route\n- *done* — when the job is complete\n- *needs assessment* — if owner decision is required`
     );
     return;
   }
@@ -522,7 +852,8 @@ async function routeMessage(phone, messageText) {
       `AND({Tenant Whatsapp Number} = '${phone}', {Issue Resolution Status} = 'Pending Confirmation')`
     );
     if (pendingIssues.length > 0 && (textLower === 'yes' || textLower === '1' || textLower === 'no' || textLower === '2')) {
-      await handleTenantClosure(phone, text, record);
+      // Pass the pending issue directly — avoids a second Airtable lookup in handleTenantClosure
+      await handleTenantClosure(phone, text, record, pendingIssues[0]);
       return;
     }
     // Any other tenant message = new issue intake (Flow 1)
