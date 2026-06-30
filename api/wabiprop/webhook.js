@@ -720,33 +720,74 @@ async function handleTenantClosure(phone, messageText, tenantRecord, pendingIssu
       logToAxiom('info', 'flow4b_complete', { phone, issueRef: String(issueRef), result: 'resolved' });
 
     } else {
-      // ── Flow 4c: tenant rejects, reopen issue ───────────────────────────
-      // "Satisfaction" is a singleSelect — live options confirmed Meta API 30 Jun 2026: "Y", "N", "Pending"
+      // ── Flow 4c: tenant rejects — hold in Awaiting Reopen Detail ────────
+      // Do NOT reopen yet. Ask for a description first, then handleTenantReopenDetail
+      // completes the reopen once the tenant replies with their description.
+      // "Awaiting Reopen Detail" confirmed live in Meta API 30 Jun 2026 (id: selOaqvIcuYhvEHx0)
       const patched = await airtableUpdate('WP_Issues', issueId, {
-        'Issue Resolution Status': 'Open',
-        'Satisfaction':            'N',
+        'Issue Resolution Status': 'Awaiting Reopen Detail',
       });
       if (patched.error) throw new Error(`Issue PATCH failed: ${JSON.stringify(patched.error)}`);
 
       await sendWhatsApp(phone,
-        `Understood, ${tenantName}. Your agent has been notified that the issue is still not resolved.\n\n` +
-        `Ref: WP-${issueRef}\n\nYour agent will follow up.`
+        `Sorry to hear that. Please briefly describe what's still wrong (one line is fine).`
       );
 
-      if (agentPhone) {
-        await sendWhatsApp(agentPhone,
-          `⚠️ WP-${issueRef} REOPENED — ${tenantName} says the issue is still not resolved. Please follow up urgently.`
-        );
-      }
-
-      console.log(`[Flow 4c] Complete — WP-${issueRef} reopened`);
-      logToAxiom('info', 'flow4c_complete', { phone, issueRef: String(issueRef), result: 'reopened' });
+      console.log(`[Flow 4c] Awaiting reopen detail — WP-${issueRef}`);
+      logToAxiom('info', 'flow4c_awaiting_detail', { phone, issueRef: String(issueRef) });
     }
 
   } catch (err) {
     console.error(`[Flow 4b/4c ERROR]`, err.message);
     logToAxiom('error', 'flow4bc_error', { phone, error: err.message });
     await alertShawn(`Flow 4${confirmed ? 'b' : 'c'} (tenant closure)`, err.message, phone);
+  }
+}
+
+// ─── FLOW 4d — TENANT REOPEN DETAIL ─────────────────────────────────────────
+// Trigger: tenant sends any text when their issue is in "Awaiting Reopen Detail"
+// Reads:   awaitingIssue passed from router (already fetched there)
+// Writes:  WP_Issues — Issue Resolution Status → Open, Satisfaction → N,
+//          Resolution Note → tenant's description text
+// Sends:   agent alert with description + tenant acknowledgement
+
+async function handleTenantReopenDetail(phone, messageText, tenantRecord, awaitingIssue) {
+  const tenantName = (tenantRecord.fields['Full Name'] || 'Tenant').trim();
+  const description = messageText.trim();
+  const issueId    = awaitingIssue.id;
+  const issueRef   = awaitingIssue.fields['Issue Ref'] || issueId.slice(-6).toUpperCase();
+  const agentPhone = (awaitingIssue.fields['Agent Whatsapp number'] || '').trim();
+
+  console.log(`[Flow 4d] Reopen detail received — phone: ${phone} | WP-${issueRef}`);
+  logToAxiom('info', 'flow4d_start', { phone, issueRef: String(issueRef), descriptionLength: description.length });
+
+  try {
+    // "Resolution Note" is multilineText — confirmed Meta API 30 Jun 2026. No read required.
+    // "Satisfaction" live options confirmed 30 Jun 2026: "Y", "N", "Pending"
+    const patched = await airtableUpdate('WP_Issues', issueId, {
+      'Issue Resolution Status': 'Open',
+      'Satisfaction':            'N',
+      'Resolution Note':         description,
+    });
+    if (patched.error) throw new Error(`Issue PATCH failed: ${JSON.stringify(patched.error)}`);
+
+    if (agentPhone) {
+      await sendWhatsApp(agentPhone,
+        `⚠️ WP-${issueRef} REOPENED — ${tenantName} says: ${description}. Please follow up urgently.`
+      );
+    }
+
+    await sendWhatsApp(phone,
+      `Thanks, your agent has been notified with the details.`
+    );
+
+    console.log(`[Flow 4d] Complete — WP-${issueRef} reopened with description`);
+    logToAxiom('info', 'flow4d_complete', { phone, issueRef: String(issueRef), result: 'reopened_with_detail' });
+
+  } catch (err) {
+    console.error(`[Flow 4d ERROR]`, err.message);
+    logToAxiom('error', 'flow4d_error', { phone, error: err.message });
+    await alertShawn('Flow 4d (tenant reopen detail)', err.message, phone);
   }
 }
 
@@ -955,7 +996,18 @@ async function routeMessage(phone, messageText) {
 
   // ── TENANT MESSAGES ──────────────────────────────────────────────────────
   if (role === 'tenant') {
-    // Check if tenant has a pending-confirmation issue — if so, this is Flow 4b/4c
+    // Check 1: tenant has an issue awaiting their reopen description (Flow 4d)
+    // Must be checked before Pending Confirmation — any text is the description, never new-issue intake
+    const awaitingIssues = await airtableGet(
+      'WP_Issues',
+      `AND({Tenant Whatsapp Number} = '${phone}', {Issue Resolution Status} = 'Awaiting Reopen Detail')`
+    );
+    if (awaitingIssues.length > 0) {
+      await handleTenantReopenDetail(phone, text, record, awaitingIssues[0]);
+      return;
+    }
+
+    // Check 2: tenant has a pending-confirmation issue (Flow 4b/4c)
     const pendingIssues = await airtableGet(
       'WP_Issues',
       `AND({Tenant Whatsapp Number} = '${phone}', {Issue Resolution Status} = 'Pending Confirmation')`
@@ -974,7 +1026,8 @@ async function routeMessage(phone, messageText) {
       }
       return;
     }
-    // Any other tenant message = new issue intake (Flow 1)
+
+    // Check 3: any other tenant message = new issue intake (Flow 1)
     await handleTenantIssue(phone, text, record);
     return;
   }
