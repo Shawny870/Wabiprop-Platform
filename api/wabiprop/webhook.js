@@ -297,7 +297,7 @@ async function handleTenantIssue(phone, messageText, tenantRecord) {
         `Unit: ${unitAddress || 'unknown'}\n` +
         `Property: ${propertyName || 'unknown'}\n` +
         `Issue: ${messageText}\n\n` +
-        `Reply *1* to assign a contractor.`;
+        `Reply *ASSIGN WP-${issueRef}* to assign a contractor, or *1* to see all your open issues.`;
 
       logToAxiom('info', 'flow1_agent_notify_attempt', { phone, agentPhone, issueRef });
       const agentSend = await sendWhatsApp(agentPhone, agentMsg);
@@ -319,29 +319,83 @@ async function handleTenantIssue(phone, messageText, tenantRecord) {
   }
 }
 
-// ─── FLOW 2a — AGENT REQUESTS CONTRACTOR LIST ───────────────────────────────
+// ─── FLOW A1 — AGENT OPEN ISSUES LIST ───────────────────────────────────────
 // Trigger: agent sends "1"
-// Reads:   WP_Issues (most recent Open for this agent), WP_Contractors (all Active)
-// Writes:  nothing — list is stateless; selection arrives as "Assign N" command
-// Sends:   numbered contractor list
+// Reads:   WP_Issues (all Open for this agent, oldest first)
+// Writes:  nothing — stateless list; next action arrives as an "ASSIGN WP-N" command
+// Note:    Replaces the old blind "1 -> contractor list for most-recent-Open-issue"
+//          behaviour (UX-02, Menu Spec v1.1 Section 5.2). An agent managing a real
+//          portfolio can have several Open issues at once — picking "most recent"
+//          silently ignored the rest. There is no session store in this codebase
+//          (Vercel serverless — no durable in-memory state between invocations), so
+//          the fix keeps every step self-contained: the WP-N always travels with the
+//          command instead of being remembered between messages.
 
-async function handleAgentShowContractors(phone, agentRecord) {
-  console.log(`[Flow 2a] Show contractors — agent: ${phone}`);
+async function handleAgentOpenIssuesList(phone, agentRecord) {
+  console.log(`[Flow A1] Open issues list — agent: ${phone}`);
 
   try {
-    // Find most recent Open issue for this agent
-    const issueUrl =
-      `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent('WP_Issues')}` +
-      `?filterByFormula=${encodeURIComponent(`AND({Agent Whatsapp number} = '${phone}', {Issue Resolution Status} = 'Open')`)}` +
-      `&sort%5B0%5D%5Bfield%5D=Date%20Reported&sort%5B0%5D%5Bdirection%5D=desc` +
-      `&maxRecords=1`;
+    const records = await airtableGet(
+      'WP_Issues',
+      `AND({Agent Whatsapp number} = '${phone}', {Issue Resolution Status} = 'Open')`,
+      { sort: [{ field: 'Date Reported', direction: 'asc' }] }
+    );
 
-    const issueRes  = await fetch(issueUrl, { headers: { Authorization: `Bearer ${AIRTABLE_API_KEY}` } });
-    const issueData = await issueRes.json();
-    const openIssues = issueData.records || [];
+    if (records.length === 0) {
+      await sendWhatsApp(phone, `No open issues right now — nothing needs assigning.`);
+      return;
+    }
+
+    const now = Date.now();
+    const MAX_SHOWN = 10;
+    const shown = records.slice(0, MAX_SHOWN);
+
+    const lines = shown.map((rec, i) => {
+      const f = rec.fields;
+      const ref = f['Issue Ref'] || rec.id.slice(-6).toUpperCase();
+      const reportedTs = f['Date Reported'] ? new Date(f['Date Reported']).getTime() : null;
+      const ageHrs = reportedTs ? (now - reportedTs) / 3600000 : null;
+      const ageStr = ageHrs === null ? 'age unknown' : ageHrs < 24 ? `${ageHrs.toFixed(0)}h old` : `${(ageHrs / 24).toFixed(0)}d old`;
+      const title = (f['Issue Title'] || f['Description'] || 'No description').slice(0, 70);
+      return `${i + 1} — WP-${ref} · ${ageStr} · ${title}`;
+    });
+
+    const overflowNote = records.length > MAX_SHOWN
+      ? `\n\n(${records.length - MAX_SHOWN} more open — use STATUS WP-N to check a specific one.)`
+      : '';
+
+    const firstRef = shown[0].fields['Issue Ref'] || shown[0].id.slice(-6).toUpperCase();
+    await sendWhatsApp(phone,
+      `Open issues:\n\n${lines.join('\n')}${overflowNote}\n\n` +
+      `Reply *ASSIGN WP-[issue number]* to assign a contractor — e.g. ASSIGN WP-${firstRef}.`
+    );
+
+    logToAxiom('info', 'agent_open_issues_list', { phone, count: records.length });
+  } catch (err) {
+    console.error(`[Flow A1 ERROR]`, err.message);
+    await alertShawn('Flow A1 (open issues list)', err.message, phone);
+  }
+}
+
+// ─── FLOW 2a — AGENT REQUESTS CONTRACTOR LIST FOR A SPECIFIC ISSUE ──────────
+// Trigger: agent sends "ASSIGN WP-N" (e.g. "ASSIGN WP-62")
+// Reads:   WP_Issues (this agent's Open issue matching Issue Ref = N), WP_Contractors (all Active)
+// Writes:  nothing — list is stateless; selection arrives as "ASSIGN WP-N M" command
+// Note:    UX-02 fix — issue is explicit (the WP-N in the command), never blindly the
+//          "most recent Open issue for this agent".
+
+async function handleAgentShowContractors(phone, agentRecord, issueRefNum) {
+  console.log(`[Flow 2a] Show contractors — agent: ${phone} | WP-${issueRefNum}`);
+
+  try {
+    const openIssues = await airtableGet(
+      'WP_Issues',
+      `AND({Agent Whatsapp number} = '${phone}', {Issue Ref} = ${issueRefNum}, {Issue Resolution Status} = 'Open')`,
+      { maxRecords: 1 }
+    );
 
     if (openIssues.length === 0) {
-      await sendWhatsApp(phone, `No open issues found to assign.`);
+      await sendWhatsApp(phone, `WP-${issueRefNum} not found, not yours, or no longer open. Reply *1* to see your open issues.`);
       return;
     }
 
@@ -367,7 +421,7 @@ async function handleAgentShowContractors(phone, agentRecord) {
     const msg =
       `Select a contractor for WP-${issueRef}:\n\n` +
       `${listLines}\n\n` +
-      `Reply *Assign N* (e.g. Assign 2) to confirm.`;
+      `Reply *ASSIGN WP-${issueRef} N* (e.g. ASSIGN WP-${issueRef} 2) to confirm.`;
 
     await sendWhatsApp(phone, msg);
     console.log(`[Flow 2a] Contractor list sent for WP-${issueRef}`);
@@ -379,30 +433,27 @@ async function handleAgentShowContractors(phone, agentRecord) {
 }
 
 // ─── FLOW 2b — AGENT SELECTS CONTRACTOR ─────────────────────────────────────
-// Trigger: agent sends "Assign N" (e.g. "Assign 2")
-// Reads:   WP_Issues (most recent Open for this agent), WP_Contractors (sorted alphabetically), WP_Tenants
+// Trigger: agent sends "ASSIGN WP-N M" (e.g. "ASSIGN WP-62 2")
+// Reads:   WP_Issues (this agent's Open issue matching Issue Ref = N), WP_Contractors (sorted alphabetically), WP_Tenants
 // Writes:  WP_Issues — Issue Resolution Status, Contractor Name
 // Sends:   agent confirmation + contractor dispatch (with job receipt prompt)
 // Note:    Property Name is NOT written to WP_Issues (multipleLookupValues — read-only, FM-009)
 //          Unit Address is read from WP_Tenants, not WP_Issues (FM-006)
+//          UX-02 fix — issue is explicit (the WP-N in the command), never blindly the
+//          "most recent Open issue for this agent".
 
-async function handleAgentContractorSelect(phone, selection, agentRecord) {
-  console.log(`[Flow 2b] Contractor select — agent: ${phone} | selection: ${selection}`);
+async function handleAgentContractorSelect(phone, issueRefNum, selection, agentRecord) {
+  console.log(`[Flow 2b] Contractor select — agent: ${phone} | WP-${issueRefNum} | selection: ${selection}`);
 
   try {
-    // Find most recent Open issue for this agent
-    const issueUrl =
-      `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent('WP_Issues')}` +
-      `?filterByFormula=${encodeURIComponent(`AND({Agent Whatsapp number} = '${phone}', {Issue Resolution Status} = 'Open')`)}` +
-      `&sort%5B0%5D%5Bfield%5D=Date%20Reported&sort%5B0%5D%5Bdirection%5D=desc` +
-      `&maxRecords=1`;
-
-    const issueRes  = await fetch(issueUrl, { headers: { Authorization: `Bearer ${AIRTABLE_API_KEY}` } });
-    const issueData = await issueRes.json();
-    const openIssues = issueData.records || [];
+    const openIssues = await airtableGet(
+      'WP_Issues',
+      `AND({Agent Whatsapp number} = '${phone}', {Issue Ref} = ${issueRefNum}, {Issue Resolution Status} = 'Open')`,
+      { maxRecords: 1 }
+    );
 
     if (openIssues.length === 0) {
-      await sendWhatsApp(phone, `No open issues found. Nothing to assign.`);
+      await sendWhatsApp(phone, `WP-${issueRefNum} not found, not yours, or no longer open. Reply *1* to see your open issues.`);
       return;
     }
 
@@ -420,7 +471,7 @@ async function handleAgentContractorSelect(phone, selection, agentRecord) {
 
     const index = parseInt(selection, 10) - 1;  // 1-based → 0-based
     if (isNaN(index) || index < 0 || index >= contractorRecords.length) {
-      await sendWhatsApp(phone, `Invalid selection. Reply *1* to see the contractor list again.`);
+      await sendWhatsApp(phone, `Invalid selection. Reply *ASSIGN WP-${issueRef}* to see the contractor list again.`);
       return;
     }
 
@@ -1048,13 +1099,24 @@ async function routeMessage(phone, messageText) {
   // ── AGENT COMMANDS ───────────────────────────────────────────────────────
   if (role === 'agent') {
     if (text === '1') {
-      await handleAgentShowContractors(phone, record);
+      await handleAgentOpenIssuesList(phone, record);
       return;
     }
-    // "Assign N" — e.g. "Assign 2" or "assign 3"
-    const assignMatch = textLower.match(/^assign\s+([1-9]\d*)$/);
-    if (assignMatch) {
-      await handleAgentContractorSelect(phone, assignMatch[1], record);
+    // "ASSIGN WP-N M" — e.g. "ASSIGN WP-62 2" — confirm contractor M for issue N.
+    // Checked before the single-argument form below so "ASSIGN WP-62 2" is not
+    // swallowed by the shorter pattern.
+    const assignConfirmMatch = textLower.match(/^assign\s+wp-?(\d+)\s+([1-9]\d*)$/);
+    if (assignConfirmMatch) {
+      await handleAgentContractorSelect(phone, assignConfirmMatch[1], assignConfirmMatch[2], record);
+      return;
+    }
+    // "ASSIGN WP-N" — e.g. "ASSIGN WP-62" — show contractor list for that issue.
+    // Replaces the old bare "Assign N" (contractor-index-only) command — UX-02 fix
+    // means there is no longer a single implicit "most recent Open issue" to assign
+    // a bare contractor index against.
+    const assignListMatch = textLower.match(/^assign\s+wp-?(\d+)$/);
+    if (assignListMatch) {
+      await handleAgentShowContractors(phone, record, assignListMatch[1]);
       return;
     }
     if (textLower === 'report') {
@@ -1078,7 +1140,7 @@ async function routeMessage(phone, messageText) {
     }
     // Agent sent something unrecognised
     await sendWhatsApp(phone,
-      `Hi! Commands available:\n- *1* — assign contractor to latest open issue\n- *STATUS WP-[issue number]* — e.g. STATUS WP-62\n- *STALE* — find issues stuck > 4 hours\n- *REPORT* — list all open issues`
+      `Hi! Commands available:\n- *1* — see your open issues\n- *ASSIGN WP-[issue number]* — e.g. ASSIGN WP-62\n- *STATUS WP-[issue number]* — e.g. STATUS WP-62\n- *STALE* — find issues stuck > 4 hours\n- *REPORT* — list all open issues`
     );
     return;
   }
