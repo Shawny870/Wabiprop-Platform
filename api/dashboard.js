@@ -248,6 +248,11 @@ function renderDashboardShell() {
     return new Date(d.getFullYear(), d.getMonth(), 1).getTime();
   }
 
+  function formatDaysOpen(daysOpen) {
+    if (!daysOpen) return '—'; // covers null, undefined, and 0
+    return daysOpen + ' days open';
+  }
+
   // ── Render everything once data is loaded ────────────────────────────
   function renderAll(data) {
     renderUrgentBanner(data);
@@ -312,9 +317,11 @@ function renderDashboardShell() {
 
     let html = '';
     staleItems.forEach(i => {
+      const propertyLabel = i.propertyName || 'Unknown property';
+      const titleDetail = i.issueTitle || i.status;
       html += '<div class="today-focus-item bg-white rounded-md border-l-4 border-red-500 border-y border-r border-gray-200 p-3 min-h-[44px] cursor-pointer">' +
-        '<div class="text-sm font-medium text-gray-900">WP-' + i.issueRef + ' &mdash; ' + i.status + '</div>' +
-        '<div class="text-xs text-gray-500">' + i.tenantName + ' &middot; ' + i.daysOpen + ' days open</div>' +
+        '<div class="text-sm font-medium text-gray-900">' + propertyLabel + ' &mdash; ' + titleDetail + '</div>' +
+        '<div class="text-xs text-gray-500">' + i.tenantName + ' &middot; ' + i.status + ' &middot; ' + formatDaysOpen(i.daysOpen) + '</div>' +
         '</div>';
     });
     leaseItems.forEach(p => {
@@ -405,7 +412,7 @@ function renderDashboardShell() {
       return;
     }
     resultsEl.innerHTML = results.map(i =>
-      '<div class="text-sm border-b border-gray-100 py-2"><span class="font-medium">WP-' + i.issueRef + '</span> &middot; ' + i.status + ' &middot; ' + i.daysOpen + 'd open</div>'
+      '<div class="text-sm border-b border-gray-100 py-2"><span class="font-medium">WP-' + i.issueRef + '</span> &middot; ' + i.status + ' &middot; ' + formatDaysOpen(i.daysOpen) + '</div>'
     ).join('');
   }
 

@@ -8,10 +8,14 @@
 //
 // FIELD NAME REFERENCE — confirmed live from Airtable Meta API 1 Jul 2026:
 //   WP_Issues:      "Issue Ref", "Issue Resolution Status", "Date Reported",
-//                   "Linked Property", "Tenant Whatsapp Number", "Contractor Name",
-//                   "Resolution Note"
+//                   "Tenant Whatsapp Number", "Contractor Name", "Resolution Note",
+//                   "Issue Title". NOTE: "Linked Property" exists on this table but
+//                   is empty on every live record sampled (confirmed via direct
+//                   record fetch, not just schema) — Flow 1 never writes it. Property
+//                   association is resolved via the tenant instead — see below.
 //   WP_Properties:  "Property Name", "Full Address", "Owner Name" (+ built-in "id")
-//   WP_Tenants:     "Full Name", "Whatsapp Phone Number"
+//   WP_Tenants:     "Full Name", "Whatsapp Phone Number", "Property Name"
+//                   (denormalised — populated by scripts/seed-links.js)
 //   WP_Leases:      "Lease End Date", "Days Until Expiry", "Property" (NOT "Linked
 //                   Property" — this table names its link field differently),
 //                   "Lease Status"
@@ -209,21 +213,28 @@ module.exports = async function handler(req, res) {
       });
     });
 
-    // Group issues by linked property record ID
-    const issuesByPropertyId = new Map();
+    // Resolve each issue's property via its tenant, not "Linked Property" (confirmed
+    // empty on every live WP_Issues record — see field reference above). Every issue
+    // reliably carries Tenant Whatsapp Number (already used for tenant-name masking
+    // below), and WP_Tenants.Property Name is a denormalised field seeded by
+    // scripts/seed-links.js.
+    const issuePropertyName = new Map(); // issue.id -> resolved property name (or null)
     issues.forEach(iss => {
-      const propIds = iss.fields['Linked Property'] || [];
-      propIds.forEach(pid => {
-        if (!issuesByPropertyId.has(pid)) issuesByPropertyId.set(pid, []);
-        issuesByPropertyId.get(pid).push(iss);
-      });
+      const phone = (iss.fields['Tenant Whatsapp Number'] || '').trim();
+      const tenantRec = phone ? tenantByPhone.get(phone) : null;
+      const propertyName = tenantRec ? (tenantRec.fields['Property Name'] || null) : null;
+      issuePropertyName.set(iss.id, propertyName);
     });
 
-    // Property name lookup by record ID — resolves propertyName onto each
-    // issue object below, for client-side property filtering.
-    const propertyNameById = new Map();
-    properties.forEach(p => {
-      propertyNameById.set(p.id, p.fields['Property Name'] || 'Unknown property');
+    // Group issues by resolved property name — no reliable record-ID link exists
+    // from issue to property, so grouping is by name (matches WP_Properties.Property
+    // Name exactly, since both are populated by the same seed-links.js pass).
+    const issuesByPropertyName = new Map();
+    issues.forEach(iss => {
+      const propertyName = issuePropertyName.get(iss.id);
+      if (!propertyName) return;
+      if (!issuesByPropertyName.has(propertyName)) issuesByPropertyName.set(propertyName, []);
+      issuesByPropertyName.get(propertyName).push(iss);
     });
 
     const now = Date.now();
@@ -235,7 +246,8 @@ module.exports = async function handler(req, res) {
 
     // ── Per-property health scores ──────────────────────────────────────
     const propertyCards = properties.map(prop => {
-      const propIssues = issuesByPropertyId.get(prop.id) || [];
+      const propName = prop.fields['Property Name'] || 'Unknown property';
+      const propIssues = issuesByPropertyName.get(propName) || [];
       const propOpenIssues = propIssues.filter(iss => isActive(iss.fields['Issue Resolution Status']));
       const propStaleIssues = propOpenIssues.filter(iss => isStale(iss.fields));
 
@@ -279,10 +291,6 @@ module.exports = async function handler(req, res) {
       const tenantFullName = tenantRec ? tenantRec.fields['Full Name'] : '';
       const reported = f['Date Reported'];
       const daysOpen = reported ? Math.floor((now - new Date(reported).getTime()) / 86400000) : null;
-      const linkedPropertyIds = f['Linked Property'] || [];
-      const propertyName = linkedPropertyIds.length > 0
-        ? (propertyNameById.get(linkedPropertyIds[0]) || null)
-        : null;
 
       return {
         issueRef: f['Issue Ref'] || null,
@@ -294,7 +302,12 @@ module.exports = async function handler(req, res) {
         stale: isStale(f),
         dateReported: f['Date Reported'] || null,
         active: isActive(f['Issue Resolution Status']),
-        propertyName,
+        propertyName: issuePropertyName.get(iss.id) || null,
+        // Strip the "TenantName — " prefix that handleTenantIssue (Flow 1) embeds
+        // in Issue Title, leaving only the description after the first em-dash.
+        issueTitle: f['Issue Title']
+          ? f['Issue Title'].replace(/^[^—]+—\s*/, '').trim()
+          : null,
       };
     });
 
