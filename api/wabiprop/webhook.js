@@ -367,7 +367,7 @@ async function handleAgentOpenIssuesList(phone, agentRecord) {
     const firstRef = shown[0].fields['Issue Ref'] || shown[0].id.slice(-6).toUpperCase();
     await sendWhatsApp(phone,
       `Open issues:\n\n${lines.join('\n')}${overflowNote}\n\n` +
-      `Reply *ASSIGN WP-[issue number]* to assign a contractor — e.g. ASSIGN WP-${firstRef}.`
+      `Reply *ASSIGN WP-[issue number]* to assign a contractor, or *ATTEND WP-[issue number]* to handle it yourself — e.g. ASSIGN WP-${firstRef} or ATTEND WP-${firstRef}.`
     );
 
     logToAxiom('info', 'agent_open_issues_list', { phone, count: records.length });
@@ -530,6 +530,133 @@ async function handleAgentContractorSelect(phone, issueRefNum, selection, agentR
   } catch (err) {
     console.error(`[Flow 2b ERROR]`, err.message);
     await alertShawn('Flow 2b (contractor select)', err.message, phone);
+  }
+}
+
+// ─── FLOW A1-3b / A2 (part 1) — AGENT MARKS THEMSELVES ATTENDING ───────────
+// Trigger: agent sends "ATTEND WP-N" (e.g. "ATTEND WP-70")
+// Reads:   WP_Issues (this agent's Open issue matching Issue Ref = N), WP_Tenants
+// Writes:  WP_Issues — Issue Resolution Status -> Agent Attending, Handling Method -> Agent
+// Sends:   tenant notification (agent handling personally) + agent confirmation
+// Note:    Same flat WP-N-in-command pattern as ASSIGN WP-N (Group 4) — no session
+//          store exists to remember a prior list selection between messages.
+
+async function handleAgentAttend(phone, issueRefNum, agentRecord) {
+  console.log(`[Flow A1-3b] Agent attending — agent: ${phone} | WP-${issueRefNum}`);
+
+  try {
+    const openIssues = await airtableGet(
+      'WP_Issues',
+      `AND({Agent Whatsapp number} = '${phone}', {Issue Ref} = ${issueRefNum}, {Issue Resolution Status} = 'Open')`,
+      { maxRecords: 1 }
+    );
+
+    if (openIssues.length === 0) {
+      await sendWhatsApp(phone, `WP-${issueRefNum} not found, not yours, or no longer open. Reply *1* to see your open issues.`);
+      return;
+    }
+
+    const issue       = openIssues[0];
+    const issueId     = issue.id;
+    const issueRef    = issue.fields['Issue Ref'] || issueId.slice(-6).toUpperCase();
+    const tenantPhone = (issue.fields['Tenant Whatsapp Number'] || '').trim();
+
+    // "Agent" confirmed live option on Handling Method (Meta API)
+    const patched = await airtableUpdate('WP_Issues', issueId, {
+      'Issue Resolution Status': 'Agent Attending',
+      'Handling Method':         'Agent',
+    });
+    if (patched.error) throw new Error(`Issue PATCH failed: ${JSON.stringify(patched.error)}`);
+
+    let tenantName = 'Tenant';
+    if (tenantPhone) {
+      const tenantRecords = await airtableGet('WP_Tenants', `{Whatsapp Phone Number} = '${tenantPhone}'`);
+      if (tenantRecords.length > 0) {
+        tenantName = (tenantRecords[0].fields['Full Name'] || 'Tenant').trim();
+      }
+      await sendWhatsApp(tenantPhone,
+        `Hi ${tenantName}, your agent is personally handling your maintenance request (Ref: WP-${issueRef}). We'll be in touch shortly.`
+      );
+    }
+
+    await sendWhatsApp(phone, `WP-${issueRef} marked as Agent Attending. ${tenantName} has been notified.\n\nWhen done, reply *ATTENDED WP-${issueRef}* to ask the tenant to confirm.`);
+
+    console.log(`[Flow A1-3b] Complete — WP-${issueRef} marked Agent Attending`);
+    logToAxiom('info', 'agent_attend', { phone, issueRef: String(issueRef) });
+
+  } catch (err) {
+    console.error(`[Flow A1-3b ERROR]`, err.message);
+    await alertShawn('Flow A1-3b (agent attend)', err.message, phone);
+  }
+}
+
+// ─── FLOW A2 (part 2) — ATTENDED WP-N CLOSURE COMMAND ───────────────────────
+// Trigger: agent sends "ATTENDED WP-N [optional note]" (e.g. "ATTENDED WP-70 fixed the lock")
+// Reads:   WP_Issues (this agent's issue matching Issue Ref = N, status Agent Attending), WP_Tenants
+// Writes:  WP_Issues — Issue Resolution Status -> Pending Confirmation, Resolution Note, Closed By -> Agent
+// Sends:   tenant 1/2 confirmation prompt (reuses the same Pending Confirmation state
+//          and handleTenantClosure the contractor-done flow already uses) + agent confirmation
+// Note:    Requires the issue to already be in Agent Attending (i.e. ATTEND WP-N was sent
+//          first) — ATTENDED is the closure of an announced-attending state, not a
+//          standalone one-shot. Goes straight to the final Pending Confirmation state in
+//          one PATCH, matching the existing handleContractorDone pattern — the Menu Spec's
+//          literal "write Resolved, then overwrite with Pending Confirmation" two-step read
+//          as documentation shorthand, not an intentional interim write.
+
+async function handleAgentAttended(phone, issueRefNum, note, agentRecord) {
+  console.log(`[Flow A2] Agent attended closure — agent: ${phone} | WP-${issueRefNum}`);
+
+  try {
+    const attendingIssues = await airtableGet(
+      'WP_Issues',
+      `AND({Agent Whatsapp number} = '${phone}', {Issue Ref} = ${issueRefNum}, {Issue Resolution Status} = 'Agent Attending')`,
+      { maxRecords: 1 }
+    );
+
+    if (attendingIssues.length === 0) {
+      await sendWhatsApp(phone, `WP-${issueRefNum} not found, not yours, or not currently marked as Agent Attending. Reply *ATTEND WP-${issueRefNum}* first, or *1* to see your open issues.`);
+      return;
+    }
+
+    const issue       = attendingIssues[0];
+    const issueId     = issue.id;
+    const issueRef    = issue.fields['Issue Ref'] || issueId.slice(-6).toUpperCase();
+    const tenantPhone = (issue.fields['Tenant Whatsapp Number'] || '').trim();
+
+    const resolutionNote = note ? `Agent attended. ${note}` : `Agent attended.`;
+
+    // "Agent" confirmed live option on Closed By (Meta API)
+    const patched = await airtableUpdate('WP_Issues', issueId, {
+      'Issue Resolution Status': 'Pending Confirmation',
+      'Resolution Note':         resolutionNote,
+      'Closed By':               'Agent',
+    });
+    if (patched.error) throw new Error(`Issue PATCH failed: ${JSON.stringify(patched.error)}`);
+
+    let tenantName = 'Tenant';
+    if (tenantPhone) {
+      const tenantRecords = await airtableGet('WP_Tenants', `{Whatsapp Phone Number} = '${tenantPhone}'`);
+      if (tenantRecords.length > 0) {
+        tenantName = (tenantRecords[0].fields['Full Name'] || 'Tenant').trim();
+      }
+      await sendWhatsApp(tenantPhone,
+        `Update on your maintenance request (Ref: WP-${issueRef}).\n\n` +
+        `Your agent has attended to this personally.${note ? ` Note: ${note}` : ''}\n\n` +
+        `Has your issue been resolved?\n\n` +
+        `Reply with a number:\n` +
+        `1 — Yes, resolved. Thank you.\n` +
+        `2 — No, still a problem.`
+      );
+    }
+
+    await sendWhatsApp(phone, `WP-${issueRef} marked as attended. ${tenantName} has been asked to confirm resolution.`);
+
+    console.log(`[Flow A2] Complete — WP-${issueRef} awaiting tenant confirmation`);
+    logToAxiom('info', 'agent_attended', { phone, issueRef: String(issueRef) });
+
+  } catch (err) {
+    console.error(`[Flow A2 ERROR]`, err.message);
+    await alertShawn('Flow A2 (agent attended)', err.message, phone);
   }
 }
 
@@ -922,7 +1049,8 @@ async function handleTenantConfirmReopen(phone, messageText, tenantRecord, confi
           `⚠️ WP-${issueRef} REOPENED\n\n` +
           `${tenantFirstName} says:\n${accumulated}\n\n` +
           `Reply with:\n` +
-          `• *1* — reply to get contractor list, then pick a number to reassign\n` +
+          `• *ASSIGN WP-${issueRef}* — reassign to a contractor\n` +
+          `• *ATTEND WP-${issueRef}* — handle it yourself\n` +
           `• *STATUS WP-${issueRef}* — view full issue detail\n` +
           `• *STALE* — find all stuck issues\n` +
           `• *REPORT* — list all open issues`
@@ -1119,6 +1247,20 @@ async function routeMessage(phone, messageText) {
       await handleAgentShowContractors(phone, record, assignListMatch[1]);
       return;
     }
+    // "ATTEND WP-N" — e.g. "ATTEND WP-70" — agent takes this issue on personally
+    const attendMatch = textLower.match(/^attend\s+wp-?(\d+)$/);
+    if (attendMatch) {
+      await handleAgentAttend(phone, attendMatch[1], record);
+      return;
+    }
+    // "ATTENDED WP-N [note]" — e.g. "ATTENDED WP-70 fixed the lock" — closure command.
+    // Checked before ATTEND above only matters for exact-string collisions, which the
+    // \s+wp- boundary already prevents ("attend" will never match "attended ...").
+    const attendedMatch = text.match(/^attended\s+wp-?(\d+)(?:\s+([\s\S]+))?$/i);
+    if (attendedMatch) {
+      await handleAgentAttended(phone, attendedMatch[1], (attendedMatch[2] || '').trim(), record);
+      return;
+    }
     if (textLower === 'report') {
       await handleAgentReport(phone, record);
       return;
@@ -1140,7 +1282,7 @@ async function routeMessage(phone, messageText) {
     }
     // Agent sent something unrecognised
     await sendWhatsApp(phone,
-      `Hi! Commands available:\n- *1* — see your open issues\n- *ASSIGN WP-[issue number]* — e.g. ASSIGN WP-62\n- *STATUS WP-[issue number]* — e.g. STATUS WP-62\n- *STALE* — find issues stuck > 4 hours\n- *REPORT* — list all open issues`
+      `Hi! Commands available:\n- *1* — see your open issues\n- *ASSIGN WP-[issue number]* — e.g. ASSIGN WP-62\n- *ATTEND WP-[issue number]* — handle it yourself, e.g. ATTEND WP-62\n- *ATTENDED WP-[issue number]* — close it out once you're done, e.g. ATTENDED WP-62\n- *STATUS WP-[issue number]* — e.g. STATUS WP-62\n- *STALE* — find issues stuck > 4 hours\n- *REPORT* — list all open issues`
     );
     return;
   }
