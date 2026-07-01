@@ -281,6 +281,8 @@ module.exports = async function handler(req, res) {
         contractorName: f['Contractor Name'] || null,
         daysOpen,
         stale: isStale(f),
+        dateReported: f['Date Reported'] || null,
+        active: isActive(f['Issue Resolution Status']),
       };
     });
 
