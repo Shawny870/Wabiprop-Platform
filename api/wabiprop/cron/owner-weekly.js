@@ -19,17 +19,19 @@
 //   field, reliably populated by seed-links.js and already used by the dashboard) --
 //   NOT via any linked-record traversal. Both metrics below key off that tenant set.
 //
-// AMBIGUITIES FLAGGED FOR ENGINEER SIGN-OFF (see chat report):
-//   1. "Outstanding maintenance spend" is read here as "total Cost logged against
-//      Resolved/Closed issues in the period" -- there is no field distinguishing
-//      paid vs. unpaid maintenance cost, so "outstanding" cannot mean a true unpaid
-//      balance without new schema.
+// SIGNED OFF (Engineer, same session):
+//   1. Copy says "Maintenance spend this month: R{amount}" -- NOT "Outstanding" --
+//      since no field distinguishes paid vs. unpaid maintenance cost. Do not
+//      reintroduce "outstanding" wording without adding that field first.
 //   2. WP_Payments has two near-identical period fields ("Payment Period(Month/Year)"
 //      and "Period (month/year)") -- this cron reads "Payment Period(Month/Year)".
-//      Confirm that's the one tomorrow's seed data will actually populate.
+//      Tomorrow's seed data must populate that exact field, not the other one.
 //   3. Owner-to-property matching depends on WP_Properties."Owner Whatsapp" holding
 //      the exact same phone string as WP_Owner."Landlord Whatsapp" for the same
-//      person -- a silent-drift risk if the two fields are ever entered differently.
+//      person -- known fragility, logged, no fix scheduled. Same class of risk as
+//      the Property Name string-match dependency from the dashboard build.
+//   4. This endpoint is unauthenticated -- logged, add a CRON_SECRET gate before
+//      real launch, not required for pilot testing.
 
 const { airtableGet, sendWhatsApp, logToAxiom, alertShawn } = require('../_lib/cronHelpers');
 
@@ -108,7 +110,7 @@ module.exports = async function handler(req, res) {
           `RENTAL INCOME (${monthName})\n` +
           `Collected: R${rentalIncome.toFixed(2)}\n\n` +
           `MAINTENANCE SPEND (${monthName})\n` +
-          `Outstanding: R${maintenanceSpend.toFixed(2)}\n\n` +
+          `Maintenance spend this month: R${maintenanceSpend.toFixed(2)}\n\n` +
           `Questions? Reply to this message.`;
 
         const sendResult = await sendWhatsApp(ownerPhone, msg);
