@@ -219,6 +219,13 @@ module.exports = async function handler(req, res) {
       });
     });
 
+    // Property name lookup by record ID — resolves propertyName onto each
+    // issue object below, for client-side property filtering.
+    const propertyNameById = new Map();
+    properties.forEach(p => {
+      propertyNameById.set(p.id, p.fields['Property Name'] || 'Unknown property');
+    });
+
     const now = Date.now();
     const quarterStart = currentQuarterStartMs();
 
@@ -272,6 +279,10 @@ module.exports = async function handler(req, res) {
       const tenantFullName = tenantRec ? tenantRec.fields['Full Name'] : '';
       const reported = f['Date Reported'];
       const daysOpen = reported ? Math.floor((now - new Date(reported).getTime()) / 86400000) : null;
+      const linkedPropertyIds = f['Linked Property'] || [];
+      const propertyName = linkedPropertyIds.length > 0
+        ? (propertyNameById.get(linkedPropertyIds[0]) || null)
+        : null;
 
       return {
         issueRef: f['Issue Ref'] || null,
@@ -283,6 +294,7 @@ module.exports = async function handler(req, res) {
         stale: isStale(f),
         dateReported: f['Date Reported'] || null,
         active: isActive(f['Issue Resolution Status']),
+        propertyName,
       };
     });
 
