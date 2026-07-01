@@ -10,6 +10,7 @@
     { "source": "/dashboard", "destination": "/api/dashboard" }
   ],
   "crons": [
-    { "path": "/api/wabiprop/cron/owner-weekly", "schedule": "0 5 * * 1" }
+    { "path": "/api/wabiprop/cron/owner-weekly", "schedule": "0 5 * * 1" },
+    { "path": "/api/wabiprop/cron/agent-morning-summary", "schedule": "0 5 * * *" }
   ]
 }
