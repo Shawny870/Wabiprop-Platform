@@ -367,7 +367,7 @@ async function handleAgentOpenIssuesList(phone, agentRecord) {
     const firstRef = shown[0].fields['Issue Ref'] || shown[0].id.slice(-6).toUpperCase();
     await sendWhatsApp(phone,
       `Open issues:\n\n${lines.join('\n')}${overflowNote}\n\n` +
-      `Reply *ASSIGN WP-[issue number]* to assign a contractor, or *ATTEND WP-[issue number]* to handle it yourself — e.g. ASSIGN WP-${firstRef} or ATTEND WP-${firstRef}.`
+      `Reply *ASSIGN WP-[issue number]* to assign a contractor, *ATTEND WP-[issue number]* to handle it yourself, or *OWNER WP-[issue number]* to send it to the owner — e.g. ASSIGN WP-${firstRef}, ATTEND WP-${firstRef}, or OWNER WP-${firstRef}.`
     );
 
     logToAxiom('info', 'agent_open_issues_list', { phone, count: records.length });
@@ -657,6 +657,101 @@ async function handleAgentAttended(phone, issueRefNum, note, agentRecord) {
   } catch (err) {
     console.error(`[Flow A2 ERROR]`, err.message);
     await alertShawn('Flow A2 (agent attended)', err.message, phone);
+  }
+}
+
+// ─── FLOW A1-3c / A3 — AGENT ESCALATES ISSUE TO OWNER ───────────────────────
+// Trigger: agent sends "OWNER WP-N" (e.g. "OWNER WP-70")
+// Reads:   WP_Issues (this agent's Open issue matching Issue Ref = N), WP_Tenants (for
+//          Owner Phone, Property Name, Unit Address), WP_Owner (Landlord Whatsapp lookup
+//          for the owner's name — plain notification only, no reply handling this session)
+// Writes:  WP_Issues — Issue Resolution Status -> Owner Handling, Handling Method -> Owner
+// Sends:   plain owner notification (no interactive 1/2/3 menu — explicitly deferred by
+//          CEO for this session) + agent confirmation
+// Note:    Same flat WP-N-in-command pattern as ASSIGN WP-N / ATTEND WP-N. Owner phone is
+//          not a field on WP_Issues (confirmed live Meta API) — resolved the same way
+//          Flow 1 already does, via the denormalised Owner Phone field on WP_Tenants.
+//          Approval Status is intentionally NOT written here — that field only has
+//          meaning once an owner reply is processed, which is out of scope this session.
+
+async function handleAgentEscalateToOwner(phone, issueRefNum, agentRecord) {
+  console.log(`[Flow A1-3c] Agent escalates to owner — agent: ${phone} | WP-${issueRefNum}`);
+
+  try {
+    const openIssues = await airtableGet(
+      'WP_Issues',
+      `AND({Agent Whatsapp number} = '${phone}', {Issue Ref} = ${issueRefNum}, {Issue Resolution Status} = 'Open')`,
+      { maxRecords: 1 }
+    );
+
+    if (openIssues.length === 0) {
+      await sendWhatsApp(phone, `WP-${issueRefNum} not found, not yours, or no longer open. Reply *1* to see your open issues.`);
+      return;
+    }
+
+    const issue       = openIssues[0];
+    const issueId     = issue.id;
+    const issueRef    = issue.fields['Issue Ref'] || issueId.slice(-6).toUpperCase();
+    const description = (issue.fields['Description']            || '').trim();
+    const tenantPhone = (issue.fields['Tenant Whatsapp Number'] || '').trim();
+
+    // "Owner" confirmed live option on Handling Method (Meta API).
+    // "Owner Handling" replaces the old deprecated "Owner Decision" status value.
+    const patched = await airtableUpdate('WP_Issues', issueId, {
+      'Issue Resolution Status': 'Owner Handling',
+      'Handling Method':         'Owner',
+    });
+    if (patched.error) throw new Error(`Issue PATCH failed: ${JSON.stringify(patched.error)}`);
+
+    // Resolve owner phone + property context via WP_Tenants (Owner Phone is not on
+    // WP_Issues — same denormalised-field pattern Flow 1 already uses, FM-006 style)
+    let ownerPhone  = '';
+    let ownerName   = 'the owner';
+    let unitAddress = '';
+    let propertyName = '';
+    let agentName   = (agentRecord.fields['Agent Name'] || 'Your agent').trim();
+
+    if (tenantPhone) {
+      const tenantRecords = await airtableGet('WP_Tenants', `{Whatsapp Phone Number} = '${tenantPhone}'`);
+      if (tenantRecords.length > 0) {
+        const tf = tenantRecords[0].fields;
+        ownerPhone   = (tf['Owner Phone']    || '').trim();
+        unitAddress  = (tf['Unit Address']   || '').trim();
+        propertyName = (tf['Property Name']  || '').trim();
+      }
+    }
+
+    if (ownerPhone) {
+      const ownerRecords = await airtableGet('WP_Owner', `{Landlord Whatsapp} = '${ownerPhone}'`);
+      if (ownerRecords.length > 0) {
+        const fullName = (ownerRecords[0].fields['Full Name of Landlord'] || '').trim();
+        if (fullName) ownerName = fullName.split(/\s+/)[0];
+      }
+
+      await sendWhatsApp(ownerPhone,
+        `Your agent has flagged an issue at ${propertyName || unitAddress || 'your property'} for your attention.\n\n` +
+        `Ref: WP-${issueRef}\n` +
+        `Unit: ${unitAddress || 'unknown'}\n` +
+        `Issue: ${description}\n\n` +
+        `${agentName} will follow up with you directly.`
+      );
+      console.log(`[Flow A1-3c] Owner notified — WP-${issueRef}`);
+    } else {
+      console.warn(`[Flow A1-3c] No owner phone found for WP-${issueRef} — status set, owner NOT notified`);
+      logToAxiom('warn', 'agent_escalate_no_owner_phone', { phone, issueRef: String(issueRef) });
+    }
+
+    await sendWhatsApp(phone,
+      ownerPhone
+        ? `WP-${issueRef} assigned to owner. ${ownerName} has been notified.`
+        : `WP-${issueRef} marked as Owner Handling, but no owner phone number was found on file — please follow up with the owner directly.`
+    );
+
+    logToAxiom('info', 'agent_escalate_to_owner', { phone, issueRef: String(issueRef), ownerNotified: Boolean(ownerPhone) });
+
+  } catch (err) {
+    console.error(`[Flow A1-3c ERROR]`, err.message);
+    await alertShawn('Flow A1-3c (agent escalate to owner)', err.message, phone);
   }
 }
 
@@ -1051,6 +1146,7 @@ async function handleTenantConfirmReopen(phone, messageText, tenantRecord, confi
           `Reply with:\n` +
           `• *ASSIGN WP-${issueRef}* — reassign to a contractor\n` +
           `• *ATTEND WP-${issueRef}* — handle it yourself\n` +
+          `• *OWNER WP-${issueRef}* — send it to the owner\n` +
           `• *STATUS WP-${issueRef}* — view full issue detail\n` +
           `• *STALE* — find all stuck issues\n` +
           `• *REPORT* — list all open issues`
@@ -1261,6 +1357,12 @@ async function routeMessage(phone, messageText) {
       await handleAgentAttended(phone, attendedMatch[1], (attendedMatch[2] || '').trim(), record);
       return;
     }
+    // "OWNER WP-N" — e.g. "OWNER WP-70" — escalate this issue to the property owner
+    const ownerMatch = textLower.match(/^owner\s+wp-?(\d+)$/);
+    if (ownerMatch) {
+      await handleAgentEscalateToOwner(phone, ownerMatch[1], record);
+      return;
+    }
     if (textLower === 'report') {
       await handleAgentReport(phone, record);
       return;
@@ -1282,7 +1384,7 @@ async function routeMessage(phone, messageText) {
     }
     // Agent sent something unrecognised
     await sendWhatsApp(phone,
-      `Hi! Commands available:\n- *1* — see your open issues\n- *ASSIGN WP-[issue number]* — e.g. ASSIGN WP-62\n- *ATTEND WP-[issue number]* — handle it yourself, e.g. ATTEND WP-62\n- *ATTENDED WP-[issue number]* — close it out once you're done, e.g. ATTENDED WP-62\n- *STATUS WP-[issue number]* — e.g. STATUS WP-62\n- *STALE* — find issues stuck > 4 hours\n- *REPORT* — list all open issues`
+      `Hi! Commands available:\n- *1* — see your open issues\n- *ASSIGN WP-[issue number]* — e.g. ASSIGN WP-62\n- *ATTEND WP-[issue number]* — handle it yourself, e.g. ATTEND WP-62\n- *ATTENDED WP-[issue number]* — close it out once you're done, e.g. ATTENDED WP-62\n- *OWNER WP-[issue number]* — send it to the owner, e.g. OWNER WP-62\n- *STATUS WP-[issue number]* — e.g. STATUS WP-62\n- *STALE* — find issues stuck > 4 hours\n- *REPORT* — list all open issues`
     );
     return;
   }
