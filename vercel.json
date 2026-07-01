@@ -8,5 +8,8 @@
   },
   "rewrites": [
     { "source": "/dashboard", "destination": "/api/dashboard" }
+  ],
+  "crons": [
+    { "path": "/api/wabiprop/cron/owner-weekly", "schedule": "0 5 * * 1" }
   ]
 }
