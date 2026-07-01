@@ -20,9 +20,12 @@
 //              — multipleLookupValues), "Contractor Arrived Timestamp", "Contractor Completed
 //              Timestamp", "Date Resolved", "Satisfaction", "Issue Ref", "Date Reported"
 //   WP_Tenants: "Full Name", "Whatsapp Phone Number", "Unit Address", "Property Name",
-//               "Agent WhatsApp Number" (capital W, A, N), "Owner Phone"
+//               "Agent WhatsApp Number" (capital W, A, N), "Owner Phone",
+//               "Last Message Timestamp" (dateTime — confirmed live Meta API 1 Jul 2026)
 //   WP_Agents: "Agent Whatsapp number" (lowercase 'app', lowercase 'n'), "Active"
 //   WP_Contractors: "Contractor Name", "Phone (whatsApp)" (lowercase 'w'), "Active"
+//   WP_Owner (singular, NOT "WP_Owners"): "Full Name of Landlord", "Landlord Whatsapp"
+//              (lowercase 'w') — confirmed live Meta API 1 Jul 2026
 
 const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID;
 const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY;
@@ -192,6 +195,23 @@ async function identifySender(phone) {
 
   console.log(`[Router] UNKNOWN sender: ${phone}`);
   return { role: 'unknown', record: null };
+}
+
+// ─── TENANT MAIN MENU ─────────────────────────────────────────────────────────
+// Menu Spec v1.1 Section 4.1 — shown on any fresh tenant inbound with no active
+// mid-flow state. Phase 2 scope: display only. Replying 1/2/3 loops back to this
+// same menu until Phase 3 wires up Flow T1 (and later Phases 4/5 for T2/T3).
+
+async function showTenantMainMenu(phone, tenantRecord) {
+  const fullName = (tenantRecord.fields['Full Name'] || '').trim();
+  const firstName = fullName.split(/\s+/)[0] || 'there';
+  await sendWhatsApp(phone,
+    `Hi ${firstName}! How can we help you today?\n\n` +
+    `Reply with a number:\n` +
+    `1 — Report a maintenance issue\n` +
+    `2 — Request a call from your agent\n` +
+    `3 — Other enquiry`
+  );
 }
 
 // ─── FLOW 1 — TENANT ISSUE INTAKE ───────────────────────────────────────────
@@ -1097,6 +1117,26 @@ async function routeMessage(phone, messageText) {
 
   // ── TENANT MESSAGES ──────────────────────────────────────────────────────
   if (role === 'tenant') {
+    // Session timeout check — Menu Spec v1.1 Section 3, NEW.
+    // "Last Message Timestamp" confirmed live Meta API 1 Jul 2026 (dateTime, WP_Tenants).
+    // Soft skip only — timeout never mutates any WP_Issues status (confirmed with Engineer).
+    // Last Message Timestamp is updated unconditionally on every inbound tenant message,
+    // before any routing decision, regardless of what follows.
+    const lastMsg = record.fields['Last Message Timestamp'];
+    const twoHoursAgo = Date.now() - (2 * 60 * 60 * 1000);
+    const sessionExpired = Boolean(lastMsg) && new Date(lastMsg).getTime() < twoHoursAgo;
+
+    await airtableUpdate('WP_Tenants', record.id, {
+      'Last Message Timestamp': new Date().toISOString(),
+    });
+
+    if (sessionExpired) {
+      console.log(`[Session] Tenant session expired (>2hrs) — showing main menu fresh: ${phone}`);
+      logToAxiom('info', 'tenant_session_expired', { phone });
+      await showTenantMainMenu(phone, record);
+      return;
+    }
+
     // Check 1: tenant is in the YES/NO confirmation loop after sending reopen description (Flow 4e)
     const confirmingIssues = await airtableGet(
       'WP_Issues',
@@ -1141,8 +1181,26 @@ async function routeMessage(phone, messageText) {
       return;
     }
 
-    // Check 4: any other tenant message = new issue intake (Flow 1)
-    await handleTenantIssue(phone, text, record);
+    // Check 4: tenant has a call request being handled (Flow T2 — NEW, built Phase 4).
+    // No status transition on any reply here in Phase 2 — same re-prompt every time,
+    // matching the Phase 2 scope confirmed for the main menu (option replies loop back
+    // until the later phase wires up the actual handler).
+    const callRequestedIssues = await airtableGet(
+      'WP_Issues',
+      `AND({Tenant Whatsapp Number} = '${phone}', {Issue Resolution Status} = 'Call Requested')`,
+      { sort: [{ field: 'Date Reported', direction: 'desc' }], maxRecords: 1 }
+    );
+    if (callRequestedIssues.length > 0) {
+      await sendWhatsApp(phone,
+        `Your call request is being handled — your agent will be in touch shortly. Is there anything else urgent? Reply 1 to report a new issue.`
+      );
+      return;
+    }
+
+    // Check 5: any other tenant message = tenant main menu (Menu Spec v1.1 — replaces
+    // straight-to-Flow-1 intake from V1). Flow T1 wiring for option 1 is Phase 3 —
+    // handleTenantIssue (Flow 1) is intentionally unreachable from here until then.
+    await showTenantMainMenu(phone, record);
     return;
   }
 
