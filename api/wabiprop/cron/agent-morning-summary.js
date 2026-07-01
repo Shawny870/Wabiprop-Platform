@@ -4,14 +4,17 @@
 // Manual trigger: GET https://wabiprop-platform.vercel.app/api/wabiprop/cron/agent-morning-summary
 //
 // Content per Brief (narrower than Menu Spec Section 5.6's fuller Flow A5 template):
-// open issues count, stale issues count, "anything awaiting agent action". Brief
-// explicitly says reuse the EXISTING STALE logic -- so this duplicates the same
-// resolveAnchor/4-hour-threshold approach from handleAgentStaleCheck in webhook.js,
-// not a different "48hrs" threshold. The Menu Spec's own template text says
-// "({staleCount} stale >48hrs)" but the live STALE command it's supposed to match
-// has always used a 4-hour threshold (confirmed in code + Failure Modes OI-010) --
-// that's a stale inconsistency in the doc, not something to reproduce here. Copy
-// below says ">4h" to match what the number actually measures.
+// open issues count, stale issues count, "anything awaiting agent action".
+//
+// STALE THRESHOLD -- DELIBERATELY DIFFERENT FROM THE ON-DEMAND STALE COMMAND:
+// This cron uses 48 hours, not the 4-hour threshold handleAgentStaleCheck (webhook.js)
+// uses for the on-demand STALE command. Engineer decision: a daily digest that
+// re-flags the same 5-hour-old issue every morning for two days straight is noise,
+// not signal, against the "N items need attention" pitch -- the summary should
+// surface genuinely neglected issues, not everything mid-flow. The anchor-resolution
+// logic (which timestamp counts as "last progress" per status) is still duplicated
+// from handleAgentStaleCheck unchanged -- only the threshold constant differs.
+// STALE itself is untouched and stays at 4 hours.
 //
 // NOT included (deliberately, matching Brief's narrower scope, unlike Menu Spec's
 // fuller template): leases expiring, rent overdue. Those depend on Groups 10/11
@@ -24,10 +27,11 @@
 
 const { airtableGet, sendWhatsApp, logToAxiom, alertShawn } = require('../_lib/cronHelpers');
 
-const STALE_MS = 4 * 60 * 60 * 1000; // 4 hours -- matches handleAgentStaleCheck exactly
+const STALE_MS = 48 * 60 * 60 * 1000; // 48 hours -- intentionally NOT the 4h STALE-command threshold
 
-// Duplicated from handleAgentStaleCheck (webhook.js) rather than imported --
-// same "don't touch the live webhook" reasoning as the rest of this cron layer.
+// Anchor-resolution logic duplicated from handleAgentStaleCheck (webhook.js) rather
+// than imported -- same "don't touch the live webhook" reasoning as the rest of
+// this cron layer. Only the threshold constant above differs from the original.
 function resolveAnchor(f, status) {
   if (status === 'Pending Confirmation') {
     return f['Contractor Completed Timestamp'] || f['Contractor Arrived Timestamp'] || f['Date Reported'] || null;
@@ -87,7 +91,7 @@ module.exports = async function handler(req, res) {
 
         const msg =
           `Good morning ${agentFirstName}. Here is your summary for ${today}:\n\n` +
-          `Open issues: ${openIssues.length} (${staleCount} stale >4h)\n` +
+          `Open issues: ${openIssues.length} (${staleCount} stale >48h)\n` +
           `Call requests pending: ${callRequested.length}\n\n` +
           `Reply 1 to see your open issues.`;
 
