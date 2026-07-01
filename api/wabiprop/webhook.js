@@ -746,48 +746,114 @@ async function handleTenantClosure(phone, messageText, tenantRecord, pendingIssu
 
 // ─── FLOW 4d — TENANT REOPEN DETAIL ─────────────────────────────────────────
 // Trigger: tenant sends any text when their issue is in "Awaiting Reopen Detail"
-// Reads:   awaitingIssue passed from router (already fetched there)
-// Writes:  WP_Issues — Issue Resolution Status → Open, Satisfaction → N,
-//          Resolution Note → tenant's description text
-// Sends:   agent alert with description + tenant acknowledgement
+// Reads:   awaitingIssue passed from router (already fetched — Resolution Note
+//          read from that record to support multi-turn accumulation on YES loops)
+// Writes:  WP_Issues — Issue Resolution Status → Confirming Reopen Detail,
+//          Resolution Note → accumulated description (append if existing)
+// Sends:   YES/NO prompt to tenant
 
 async function handleTenantReopenDetail(phone, messageText, tenantRecord, awaitingIssue) {
-  const tenantName = (tenantRecord.fields['Full Name'] || 'Tenant').trim();
-  const description = messageText.trim();
-  const issueId    = awaitingIssue.id;
-  const issueRef   = awaitingIssue.fields['Issue Ref'] || issueId.slice(-6).toUpperCase();
-  const agentPhone = (awaitingIssue.fields['Agent Whatsapp number'] || '').trim();
+  const issueId  = awaitingIssue.id;
+  const issueRef = awaitingIssue.fields['Issue Ref'] || issueId.slice(-6).toUpperCase();
+  const newText  = messageText.trim();
+
+  // Accumulate: existing Resolution Note + new text (supports YES loop iterations)
+  // No separate Airtable read needed — awaitingIssue record is fresh from router fetch
+  const existing    = (awaitingIssue.fields['Resolution Note'] || '').trim();
+  const accumulated = existing ? `${existing}\n${newText}` : newText;
 
   console.log(`[Flow 4d] Reopen detail received — phone: ${phone} | WP-${issueRef}`);
-  logToAxiom('info', 'flow4d_start', { phone, issueRef: String(issueRef), descriptionLength: description.length });
+  logToAxiom('info', 'flow4d_detail_received', { phone, issueRef: String(issueRef) });
 
   try {
-    // "Resolution Note" is multilineText — confirmed Meta API 30 Jun 2026. No read required.
-    // "Satisfaction" live options confirmed 30 Jun 2026: "Y", "N", "Pending"
+    // "Confirming Reopen Detail" confirmed live in Meta API 1 Jul 2026 (id: selffi9Ef4YLESe0s)
     const patched = await airtableUpdate('WP_Issues', issueId, {
-      'Issue Resolution Status': 'Open',
-      'Satisfaction':            'N',
-      'Resolution Note':         description,
+      'Issue Resolution Status': 'Confirming Reopen Detail',
+      'Resolution Note':         accumulated,
     });
     if (patched.error) throw new Error(`Issue PATCH failed: ${JSON.stringify(patched.error)}`);
 
-    if (agentPhone) {
-      await sendWhatsApp(agentPhone,
-        `⚠️ WP-${issueRef} REOPENED — ${tenantName} says: ${description}. Please follow up urgently.`
-      );
-    }
-
     await sendWhatsApp(phone,
-      `Thanks, your agent has been notified with the details.`
+      `Got it. Would you like to add anything else? Reply YES to add more, or NO to send this to your agent.`
     );
 
-    console.log(`[Flow 4d] Complete — WP-${issueRef} reopened with description`);
-    logToAxiom('info', 'flow4d_complete', { phone, issueRef: String(issueRef), result: 'reopened_with_detail' });
+    logToAxiom('info', 'flow4d_awaiting_confirm', { phone, issueRef: String(issueRef) });
 
   } catch (err) {
     console.error(`[Flow 4d ERROR]`, err.message);
     logToAxiom('error', 'flow4d_error', { phone, error: err.message });
     await alertShawn('Flow 4d (tenant reopen detail)', err.message, phone);
+  }
+}
+
+// ─── FLOW 4e — TENANT CONFIRM REOPEN ─────────────────────────────────────────
+// Trigger: tenant replies YES/NO when issue is in "Confirming Reopen Detail"
+// YES → loop back to Awaiting Reopen Detail, prompt for more detail
+// NO  → finalise: PATCH Open + Satisfaction N, notify agent, close out tenant
+// Reads:   confirmingIssue passed from router (Resolution Note already accumulated)
+// Writes:  WP_Issues — Issue Resolution Status, and on NO: Satisfaction + Resolution Note
+// Sends:   agent alert (NO only) + tenant acknowledgement or re-prompt
+
+async function handleTenantConfirmReopen(phone, messageText, tenantRecord, confirmingIssue) {
+  const tenantName  = (tenantRecord.fields['Full Name'] || 'Tenant').trim();
+  const textLower   = messageText.trim().toLowerCase();
+  const issueId     = confirmingIssue.id;
+  const issueRef    = confirmingIssue.fields['Issue Ref'] || issueId.slice(-6).toUpperCase();
+  const agentPhone  = (confirmingIssue.fields['Agent Whatsapp number'] || '').trim();
+  const accumulated = (confirmingIssue.fields['Resolution Note'] || '').trim();
+
+  const wantsMore = textLower === 'yes' || textLower === 'more';
+  const wantsDone = textLower === 'no' || textLower === 'done' || textLower === 'send';
+
+  console.log(`[Flow 4e] Confirm reopen — phone: ${phone} | WP-${issueRef} | reply: ${textLower}`);
+  logToAxiom('info', 'flow4e_start', { phone, issueRef: String(issueRef), reply: textLower });
+
+  try {
+    if (wantsMore) {
+      // Loop: go back to Awaiting Reopen Detail — next message will append via handleTenantReopenDetail
+      const patched = await airtableUpdate('WP_Issues', issueId, {
+        'Issue Resolution Status': 'Awaiting Reopen Detail',
+      });
+      if (patched.error) throw new Error(`Issue PATCH failed: ${JSON.stringify(patched.error)}`);
+
+      await sendWhatsApp(phone, `Please add the extra detail.`);
+      logToAxiom('info', 'flow4e_loop_more', { phone, issueRef: String(issueRef) });
+
+    } else if (wantsDone) {
+      // Finalise: reopen issue, write accumulated description, notify agent
+      // "Satisfaction" live options confirmed 30 Jun 2026: "Y", "N", "Pending"
+      const patched = await airtableUpdate('WP_Issues', issueId, {
+        'Issue Resolution Status': 'Open',
+        'Satisfaction':            'N',
+        'Resolution Note':         accumulated,
+      });
+      if (patched.error) throw new Error(`Issue PATCH failed: ${JSON.stringify(patched.error)}`);
+
+      if (agentPhone) {
+        await sendWhatsApp(agentPhone,
+          `⚠️ WP-${issueRef} REOPENED — ${tenantName} says: ${accumulated}. Please follow up urgently.`
+        );
+      }
+
+      await sendWhatsApp(phone,
+        `Thanks, your agent has been notified with the details. If you have anything further to add, please contact your agent directly.`
+      );
+
+      console.log(`[Flow 4e] Complete — WP-${issueRef} reopened with accumulated description`);
+      logToAxiom('info', 'flow4e_complete', { phone, issueRef: String(issueRef), result: 'reopened_with_detail' });
+
+    } else {
+      // Unrecognised reply — re-prompt, do not change issue state
+      await sendWhatsApp(phone,
+        `Please reply YES to add more detail, or NO to send your description to your agent.`
+      );
+      logToAxiom('info', 'flow4e_reprompt', { phone, issueRef: String(issueRef) });
+    }
+
+  } catch (err) {
+    console.error(`[Flow 4e ERROR]`, err.message);
+    logToAxiom('error', 'flow4e_error', { phone, error: err.message });
+    await alertShawn('Flow 4e (tenant confirm reopen)', err.message, phone);
   }
 }
 
@@ -854,7 +920,8 @@ async function handleAgentStaleCheck(phone) {
       `OR({Issue Resolution Status} = 'Contractor Assigned', ` +
       `{Issue Resolution Status} = 'Contractor En Route', ` +
       `{Issue Resolution Status} = 'Pending Confirmation', ` +
-      `{Issue Resolution Status} = 'Awaiting Reopen Detail')`;
+      `{Issue Resolution Status} = 'Awaiting Reopen Detail', ` +
+      `{Issue Resolution Status} = 'Confirming Reopen Detail')`;
 
     const records = await airtableGet('WP_Issues', formula);
 
@@ -865,8 +932,8 @@ async function handleAgentStaleCheck(phone) {
       if (status === 'Pending Confirmation') {
         return f['Contractor Completed Timestamp'] || f['Contractor Arrived Timestamp'] || f['Date Reported'] || null;
       }
-      // Awaiting Reopen Detail: no dedicated timestamp — fall back to Date Reported
-      if (status === 'Awaiting Reopen Detail') {
+      // Awaiting Reopen Detail / Confirming Reopen Detail: no dedicated timestamp — fall back to Date Reported
+      if (status === 'Awaiting Reopen Detail' || status === 'Confirming Reopen Detail') {
         return f['Date Reported'] || null;
       }
       // Contractor Assigned + Contractor En Route
@@ -1001,8 +1068,18 @@ async function routeMessage(phone, messageText) {
 
   // ── TENANT MESSAGES ──────────────────────────────────────────────────────
   if (role === 'tenant') {
-    // Check 1: tenant has an issue awaiting their reopen description (Flow 4d)
-    // Must be checked before Pending Confirmation — any text is the description, never new-issue intake
+    // Check 1: tenant is in the YES/NO confirmation loop after sending reopen description (Flow 4e)
+    const confirmingIssues = await airtableGet(
+      'WP_Issues',
+      `AND({Tenant Whatsapp Number} = '${phone}', {Issue Resolution Status} = 'Confirming Reopen Detail')`
+    );
+    if (confirmingIssues.length > 0) {
+      await handleTenantConfirmReopen(phone, text, record, confirmingIssues[0]);
+      return;
+    }
+
+    // Check 2: tenant has an issue awaiting their reopen description (Flow 4d)
+    // Any text is the description — never new-issue intake
     const awaitingIssues = await airtableGet(
       'WP_Issues',
       `AND({Tenant Whatsapp Number} = '${phone}', {Issue Resolution Status} = 'Awaiting Reopen Detail')`
@@ -1012,7 +1089,7 @@ async function routeMessage(phone, messageText) {
       return;
     }
 
-    // Check 2: tenant has a pending-confirmation issue (Flow 4b/4c)
+    // Check 3: tenant has a pending-confirmation issue (Flow 4b/4c)
     const pendingIssues = await airtableGet(
       'WP_Issues',
       `AND({Tenant Whatsapp Number} = '${phone}', {Issue Resolution Status} = 'Pending Confirmation')`
@@ -1032,7 +1109,7 @@ async function routeMessage(phone, messageText) {
       return;
     }
 
-    // Check 3: any other tenant message = new issue intake (Flow 1)
+    // Check 4: any other tenant message = new issue intake (Flow 1)
     await handleTenantIssue(phone, text, record);
     return;
   }
