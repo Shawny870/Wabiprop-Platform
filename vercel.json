@@ -5,5 +5,8 @@
       "memory": 256,
       "maxDuration": 10
     }
-  }
+  },
+  "rewrites": [
+    { "source": "/dashboard", "destination": "/api/dashboard" }
+  ]
 }
