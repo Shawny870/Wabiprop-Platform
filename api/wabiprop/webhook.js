@@ -157,8 +157,8 @@ function formatPhone(raw) {
 }
 
 // ─── SENDER IDENTIFICATION ───────────────────────────────────────────────────
-// Router checks Agents → Contractors → Tenants in that order.
-// Returns { role: 'agent'|'contractor'|'tenant'|'unknown', record: <airtable record or null> }
+// Router checks Agents → Contractors → Tenants → Owner in that order.
+// Returns { role: 'agent'|'contractor'|'tenant'|'owner'|'unknown', record: <airtable record or null> }
 
 async function identifySender(phone) {
   // WP_Agents — field: "Agent Whatsapp number" (lowercase 'app', lowercase 'n' — confirmed Meta API 30 Jun 2026)
@@ -180,6 +180,14 @@ async function identifySender(phone) {
   if (tenantRecords.length > 0) {
     console.log(`[Router] Identified as TENANT: ${phone}`);
     return { role: 'tenant', record: tenantRecords[0] };
+  }
+
+  // WP_Owner — table is singular "WP_Owner", NOT "WP_Owners" (confirmed Meta API 1 Jul 2026)
+  // field: "Landlord Whatsapp" (lowercase 'w' — confirmed Meta API 1 Jul 2026)
+  const ownerRecords = await airtableGet('WP_Owner', `{Landlord Whatsapp} = '${phone}'`);
+  if (ownerRecords.length > 0) {
+    console.log(`[Router] Identified as OWNER: ${phone}`);
+    return { role: 'owner', record: ownerRecords[0] };
   }
 
   console.log(`[Router] UNKNOWN sender: ${phone}`);
@@ -1004,10 +1012,16 @@ async function routeMessage(phone, messageText) {
   logToAxiom('info', 'sender_identified', { phone, role });
 
   // ── UNKNOWN SENDER ──────────────────────────────────────────────────────
+  // Menu Spec v1.1 Section 3 — access-denied message + WP_Leads capture.
+  // Field names confirmed live Meta API 1 Jul 2026: "Phone Number", "Lead Type" (both singleLineText)
   if (role === 'unknown') {
     await sendWhatsApp(phone,
-      `Sorry, we don't recognise this number. Please contact your agent to get registered.`
+      `Hi, this service is for registered tenants and property owners only. Please contact your rental agent to be added to the system.`
     );
+    await airtableCreate('WP_Leads', {
+      'Phone Number': phone,
+      'Lead Type':    'Wabiprop',
+    });
     return;
   }
 
@@ -1129,6 +1143,22 @@ async function routeMessage(phone, messageText) {
 
     // Check 4: any other tenant message = new issue intake (Flow 1)
     await handleTenantIssue(phone, text, record);
+    return;
+  }
+
+  // ── OWNER COMMANDS ───────────────────────────────────────────────────────
+  // Phase 1 scope — main menu only (stub). Option handling (1-4) is a later phase.
+  if (role === 'owner') {
+    const ownerName = (record.fields['Full Name of Landlord'] || '').trim();
+    const ownerFirstName = ownerName.split(/\s+/)[0] || 'there';
+    await sendWhatsApp(phone,
+      `Hi ${ownerFirstName}! Property owner menu:\n\n` +
+      `1 — My properties\n` +
+      `2 — Active issues\n` +
+      `3 — Financials\n` +
+      `4 — Weekly summary\n\n` +
+      `Reply with number.`
+    );
     return;
   }
 }
