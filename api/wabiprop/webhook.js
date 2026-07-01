@@ -47,8 +47,16 @@ function logToAxiom(level, event, detail = {}) {
 
 // ─── AIRTABLE HELPERS ────────────────────────────────────────────────────────
 
-async function airtableGet(table, filterFormula) {
-  const url = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(table)}?filterByFormula=${encodeURIComponent(filterFormula)}`;
+async function airtableGet(table, filterFormula, options = {}) {
+  let url = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(table)}?filterByFormula=${encodeURIComponent(filterFormula)}`;
+  if (options.sort) {
+    options.sort.forEach((s, i) => {
+      url += `&sort%5B${i}%5D%5Bfield%5D=${encodeURIComponent(s.field)}&sort%5B${i}%5D%5Bdirection%5D=${encodeURIComponent(s.direction)}`;
+    });
+  }
+  if (options.maxRecords) {
+    url += `&maxRecords=${options.maxRecords}`;
+  }
   console.log(`[Airtable GET] ${table} | ${filterFormula}`);
   const res = await fetch(url, {
     headers: { Authorization: `Bearer ${AIRTABLE_API_KEY}` }
@@ -796,6 +804,7 @@ async function handleTenantReopenDetail(phone, messageText, tenantRecord, awaiti
 
 async function handleTenantConfirmReopen(phone, messageText, tenantRecord, confirmingIssue) {
   const tenantName  = (tenantRecord.fields['Full Name'] || 'Tenant').trim();
+  const tenantFirstName = tenantName.split(/\s+/)[0] || tenantName;
   const textLower   = messageText.trim().toLowerCase();
   const issueId     = confirmingIssue.id;
   const issueRef    = confirmingIssue.fields['Issue Ref'] || issueId.slice(-6).toUpperCase();
@@ -831,7 +840,13 @@ async function handleTenantConfirmReopen(phone, messageText, tenantRecord, confi
 
       if (agentPhone) {
         await sendWhatsApp(agentPhone,
-          `⚠️ WP-${issueRef} REOPENED — ${tenantName} says: ${accumulated}. Please follow up urgently.`
+          `⚠️ WP-${issueRef} REOPENED\n\n` +
+          `${tenantFirstName} says:\n${accumulated}\n\n` +
+          `Reply with:\n` +
+          `• *1* — reply to get contractor list, then pick a number to reassign\n` +
+          `• *STATUS WP-${issueRef}* — view full issue detail\n` +
+          `• *STALE* — find all stuck issues\n` +
+          `• *REPORT* — list all open issues`
         );
       }
 
@@ -1029,7 +1044,7 @@ async function routeMessage(phone, messageText) {
     }
     // Agent sent something unrecognised
     await sendWhatsApp(phone,
-      `Hi! Commands available:\n- *1* — assign contractor to latest open issue\n- *STATUS WP-N* — check any issue live\n- *STALE* — find issues stuck > 4 hours\n- *REPORT* — list all open issues`
+      `Hi! Commands available:\n- *1* — assign contractor to latest open issue\n- *STATUS WP-[issue number]* — e.g. STATUS WP-62\n- *STALE* — find issues stuck > 4 hours\n- *REPORT* — list all open issues`
     );
     return;
   }
@@ -1071,7 +1086,8 @@ async function routeMessage(phone, messageText) {
     // Check 1: tenant is in the YES/NO confirmation loop after sending reopen description (Flow 4e)
     const confirmingIssues = await airtableGet(
       'WP_Issues',
-      `AND({Tenant Whatsapp Number} = '${phone}', {Issue Resolution Status} = 'Confirming Reopen Detail')`
+      `AND({Tenant Whatsapp Number} = '${phone}', {Issue Resolution Status} = 'Confirming Reopen Detail')`,
+      { sort: [{ field: 'Date Reported', direction: 'desc' }], maxRecords: 1 }
     );
     if (confirmingIssues.length > 0) {
       await handleTenantConfirmReopen(phone, text, record, confirmingIssues[0]);
@@ -1082,7 +1098,8 @@ async function routeMessage(phone, messageText) {
     // Any text is the description — never new-issue intake
     const awaitingIssues = await airtableGet(
       'WP_Issues',
-      `AND({Tenant Whatsapp Number} = '${phone}', {Issue Resolution Status} = 'Awaiting Reopen Detail')`
+      `AND({Tenant Whatsapp Number} = '${phone}', {Issue Resolution Status} = 'Awaiting Reopen Detail')`,
+      { sort: [{ field: 'Date Reported', direction: 'desc' }], maxRecords: 1 }
     );
     if (awaitingIssues.length > 0) {
       await handleTenantReopenDetail(phone, text, record, awaitingIssues[0]);
@@ -1092,7 +1109,8 @@ async function routeMessage(phone, messageText) {
     // Check 3: tenant has a pending-confirmation issue (Flow 4b/4c)
     const pendingIssues = await airtableGet(
       'WP_Issues',
-      `AND({Tenant Whatsapp Number} = '${phone}', {Issue Resolution Status} = 'Pending Confirmation')`
+      `AND({Tenant Whatsapp Number} = '${phone}', {Issue Resolution Status} = 'Pending Confirmation')`,
+      { sort: [{ field: 'Date Reported', direction: 'desc' }], maxRecords: 1 }
     );
     if (pendingIssues.length > 0) {
       if (textLower === 'yes' || textLower === '1' || textLower === 'no' || textLower === '2') {
