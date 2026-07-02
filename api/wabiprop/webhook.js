@@ -388,6 +388,10 @@ async function handleTenantIssue(phone, messageText, tenantRecord) {
 // not assuming it.
 
 const TENANT_ISSUE_INTAKE_PLACEHOLDER = '(awaiting description)';
+// Distinct placeholder for Flow T3 (Group 3) — same technique, different marker
+// string, so Check 5 in routeMessage can tell a pending issue-report apart from
+// a pending general enquiry without needing a new Issue Resolution Status value.
+const TENANT_ENQUIRY_PLACEHOLDER = '(awaiting enquiry details)';
 
 async function startTenantIssueIntake(phone, tenantRecord) {
   console.log(`[Flow T1] Start issue intake — phone: ${phone}`);
@@ -538,6 +542,110 @@ async function handleTenantCallRequest(phone, tenantRecord) {
     console.error(`[Flow T2 ERROR]`, err.message);
     logToAxiom('error', 'flow_t2_error', { phone, error: err.message });
     await alertShawn('Flow T2 (call request)', err.message, phone);
+  }
+}
+
+// ─── FLOW T3 — TENANT OTHER ENQUIRY (Group 3, Menu Phase 5) ─────────────────
+// Trigger (start):    tenant replies "3" to the main menu, with no active
+//                      mid-flow state
+// Trigger (complete):  tenant's next message, once a pending enquiry exists
+// Reads:   WP_Tenants (already fetched by router — passed in as tenantRecord)
+// Writes:  WP_Issues (creates, then updates the same record)
+// Sends:   agent forward + tenant confirmation
+//
+// TWO-TURN OR ONE-SHOT? — reasoning, not a silent pick, per instruction:
+// This DOES need the same two-turn technique Flow T1 (Group 1) built, not
+// Flow T2's (Group 2) one-shot shape. The reason is the trigger content, not
+// the destination: "3" carries no enquiry text with it — the tenant's actual
+// question only exists in their SECOND message, which (like Flow T1's
+// description) is bare free text with no identifying token. Flow T2 avoided
+// this because "2" alone is a complete, self-contained request with nothing
+// further to say. So this reuses Flow T1's placeholder-issue pattern exactly,
+// with its own distinct marker (TENANT_ENQUIRY_PLACEHOLDER) so Check 5 in
+// routeMessage can tell "pending issue report" and "pending enquiry" apart
+// without a new Issue Resolution Status value.
+//
+// STATUS CHOICE — flagged judgment call: once the enquiry text is forwarded,
+// this sets Issue Resolution Status = Closed immediately, NOT Open. Reasoning:
+// "no categorization, no sub-menu" (per Brief) means there's no ASSIGN/ATTEND/
+// OWNER command that fits a general question — those are maintenance-shaped
+// actions. Leaving it Open would put non-maintenance enquiries into Flow A1's
+// open-issues list and STALE's stuck-issue scan with no way to close them
+// (same "no HANDLED command yet" gap flagged for Group 9's Call Requested).
+// Closed is an imperfect label (nothing was "resolved" by the system, just
+// relayed) but keeps the issue list clean of things it can't actually act on.
+// If visibility/trackability matters more than list cleanliness, this is a
+// one-line change back to Open.
+
+async function startTenantEnquiry(phone, tenantRecord) {
+  console.log(`[Flow T3] Start enquiry — phone: ${phone}`);
+
+  try {
+    const f = tenantRecord.fields;
+    const tenantName = (f['Full Name'] || '').trim();
+    const agentPhone = (f['Agent WhatsApp Number'] || '').trim();
+
+    const created = await airtableCreate('WP_Issues', {
+      'Issue Title':             `${tenantName} — ${TENANT_ENQUIRY_PLACEHOLDER}`,
+      'Description':             TENANT_ENQUIRY_PLACEHOLDER,
+      'Issue Resolution Status': 'Open',
+      'Category':                'General',
+      'Urgency':                 'Routine',
+      'Tenant Whatsapp Number':  phone,
+      'Agent Whatsapp number':   agentPhone,
+      'Date Reported':           new Date().toISOString(),
+    });
+    if (!created.id) throw new Error(`Placeholder enquiry create failed: ${JSON.stringify(created.error || created)}`);
+
+    await sendWhatsApp(phone, `Please describe your enquiry and your agent will get back to you.`);
+
+    logToAxiom('info', 'flow_t3_enquiry_started', { phone, issueId: created.id });
+    console.log(`[Flow T3] Placeholder enquiry ${created.id} created — awaiting details`);
+
+  } catch (err) {
+    console.error(`[Flow T3 ERROR — start]`, err.message);
+    logToAxiom('error', 'flow_t3_start_error', { phone, error: err.message });
+    await alertShawn('Flow T3 (start enquiry)', err.message, phone);
+  }
+}
+
+async function completeTenantEnquiry(phone, messageText, tenantRecord, placeholderIssue) {
+  const issueId = placeholderIssue.id;
+  console.log(`[Flow T3] Complete enquiry — phone: ${phone}`);
+
+  try {
+    const f = tenantRecord.fields;
+    const tenantName = (f['Full Name'] || '').trim();
+    const agentPhone = (placeholderIssue.fields['Agent Whatsapp number'] || '').trim();
+
+    const patched = await airtableUpdate('WP_Issues', issueId, {
+      'Issue Title':             `${tenantName} — ${messageText.slice(0, 60)}`,
+      'Description':             messageText,
+      'Issue Resolution Status': 'Closed', // see file header — flagged, not obviously correct
+    });
+    if (patched.error) throw new Error(`Issue PATCH failed: ${JSON.stringify(patched.error)}`);
+
+    const issueRef = placeholderIssue.fields['Issue Ref'] || issueId.slice(-6).toUpperCase();
+
+    await sendWhatsApp(phone, `Thanks, your agent has been notified and will be in touch.`);
+
+    if (agentPhone) {
+      await sendWhatsApp(agentPhone,
+        `💬 ${tenantName} sent an enquiry:\n\n"${messageText}"\n\n` +
+        `Ref: WP-${issueRef} · Reply directly to ${phone} to respond.`
+      );
+    } else {
+      console.warn(`[Flow T3] No agent phone on tenant record — skipping agent notification`);
+      logToAxiom('warn', 'flow_t3_no_agent_phone', { phone, tenantName });
+    }
+
+    console.log(`[Flow T3] Complete — Ref: WP-${issueRef} | Tenant: ${tenantName}`);
+    logToAxiom('info', 'flow_t3_complete', { phone, issueRef: String(issueRef), tenantName });
+
+  } catch (err) {
+    console.error(`[Flow T3 ERROR — complete]`, err.message);
+    logToAxiom('error', 'flow_t3_complete_error', { phone, error: err.message });
+    await alertShawn('Flow T3 (complete enquiry)', err.message, phone);
   }
 }
 
@@ -1952,37 +2060,51 @@ async function routeMessage(phone, messageText) {
       return;
     }
 
-    // Check 5: tenant has a placeholder issue awaiting its real description
-    // (Group 1, Menu Phase 3 — see startTenantIssueIntake/completeTenantIssueIntake
-    // header comment for why this exists instead of a session-state marker).
+    // Check 5: tenant has a pending placeholder issue awaiting its real text --
+    // either Flow T1 (issue report, Group 1) or Flow T3 (enquiry, Group 3).
+    // Single query against both markers rather than two near-identical checks;
+    // see TENANT_ISSUE_INTAKE_PLACEHOLDER / TENANT_ENQUIRY_PLACEHOLDER and the
+    // startTenantIssueIntake / startTenantEnquiry header comments for why this
+    // exists instead of a session-state marker.
     const placeholderIssues = await airtableGet(
       'WP_Issues',
-      `AND({Tenant Whatsapp Number} = '${phone}', {Issue Resolution Status} = 'Open', {Description} = '${TENANT_ISSUE_INTAKE_PLACEHOLDER}')`,
+      `AND({Tenant Whatsapp Number} = '${phone}', {Issue Resolution Status} = 'Open', OR({Description} = '${TENANT_ISSUE_INTAKE_PLACEHOLDER}', {Description} = '${TENANT_ENQUIRY_PLACEHOLDER}'))`,
       { sort: [{ field: 'Date Reported', direction: 'desc' }], maxRecords: 1 }
     );
     if (placeholderIssues.length > 0) {
-      // Guard: a bare menu digit here is almost certainly a mis-tap, not a real
-      // description — re-prompt instead of logging "1" as the issue text.
+      const isEnquiry = placeholderIssues[0].fields['Description'] === TENANT_ENQUIRY_PLACEHOLDER;
+      // Guard: a bare menu digit here is almost certainly a mis-tap, not real
+      // content — re-prompt instead of logging "1"/"2"/"3" as the answer.
       if (text === '1' || text === '2' || text === '3') {
-        await sendWhatsApp(phone, `Please describe the issue in one or two sentences.`);
+        await sendWhatsApp(phone, isEnquiry
+          ? `Please describe your enquiry and your agent will get back to you.`
+          : `Please describe the issue in one or two sentences.`
+        );
         return;
       }
-      await completeTenantIssueIntake(phone, text, record, placeholderIssues[0]);
+      if (isEnquiry) {
+        await completeTenantEnquiry(phone, text, record, placeholderIssues[0]);
+      } else {
+        await completeTenantIssueIntake(phone, text, record, placeholderIssues[0]);
+      }
       return;
     }
 
     // Check 6: tenant replied to the main menu with no active mid-flow state
     // above. 1 -> Flow T1 (issue intake, Group 1). 2 -> Flow T2 (call request,
-    // Group 2). Option 3 (Flow T3) is not wired yet (Group 3, held) — falls
-    // through to the menu, matching the confirmed Phase 2 end state. Any other
-    // message = tenant main menu (Menu Spec v1.1 — replaces straight-to-Flow-1
-    // intake from V1).
+    // Group 2). 3 -> Flow T3 (other enquiry, Group 3). Any other message =
+    // tenant main menu (Menu Spec v1.1 — replaces straight-to-Flow-1 intake
+    // from V1).
     if (text === '1') {
       await startTenantIssueIntake(phone, record);
       return;
     }
     if (text === '2') {
       await handleTenantCallRequest(phone, record);
+      return;
+    }
+    if (text === '3') {
+      await startTenantEnquiry(phone, record);
       return;
     }
     await showTenantMainMenu(phone, record);
