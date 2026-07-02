@@ -471,6 +471,76 @@ async function completeTenantIssueIntake(phone, messageText, tenantRecord, place
   }
 }
 
+// ─── FLOW T2 — TENANT REQUESTS A CALL (Group 2, Menu Phase 4) ──────────────
+// Trigger: tenant replies "2" to the main menu, with no active mid-flow state
+// Reads:   WP_Tenants (already fetched by router — passed in as tenantRecord)
+// Writes:  WP_Issues (creates new record, Status = Call Requested)
+// Sends:   tenant confirmation + agent notification
+//
+// One-shot, unlike Flow T1 — per Brief and explicit instruction: "No
+// callback-time capture. No new conversational state beyond this single
+// exchange." No reason is asked for or collected, so this needs none of Flow
+// T1's placeholder-record technique — "2" is the complete trigger in a single
+// message, same flat-command shape as Groups 4-6's commands.
+//
+// Router-side note: "Call Requested" was already in the mid-flow check set
+// (Check 4) before this flow existed (commit 8ebd505) — confirmed still true
+// this session. That check's re-prompt path is untouched; this only adds the
+// trigger that creates the Call Requested record in the first place.
+//
+// Composes correctly with Group 1's placeholder guard without any extra work:
+// if a tenant has a pending Flow T1 placeholder issue and sends "2" instead of
+// their description, Check 5 (Group 1) already intercepts bare "1"/"2"/"3" in
+// that state and re-prompts for the description rather than falling through
+// here — a mid-report tenant can't accidentally abandon it by hitting 2.
+
+async function handleTenantCallRequest(phone, tenantRecord) {
+  console.log(`[Flow T2] Call request — phone: ${phone}`);
+
+  try {
+    const f = tenantRecord.fields;
+    const tenantName      = (f['Full Name']             || '').trim();
+    const tenantFirstName = tenantName.split(/\s+/)[0] || 'A tenant';
+    const agentPhone      = (f['Agent WhatsApp Number']  || '').trim();
+
+    const created = await airtableCreate('WP_Issues', {
+      'Issue Title':             `${tenantName} — call requested`,
+      'Description':             'Tenant requested a call back.',
+      'Issue Resolution Status': 'Call Requested',
+      'Urgency':                 'Routine',
+      'Tenant Whatsapp Number':  phone,
+      'Agent Whatsapp number':   agentPhone,
+      'Date Reported':           new Date().toISOString(),
+    });
+    if (!created.id) throw new Error(`Call request issue create failed: ${JSON.stringify(created.error || created)}`);
+
+    const issueRef = created.fields?.['Issue Ref'] || created.id.slice(-6).toUpperCase();
+
+    await sendWhatsApp(phone, `Thanks — your agent will call you shortly.`);
+
+    if (agentPhone) {
+      // Core wording matches what was specified exactly; Ref: WP-{N} appended
+      // for consistency with every other agent notification in this file (so
+      // STATUS WP-N works on it later) -- a small addition, flagging it as
+      // such rather than folding it in silently.
+      await sendWhatsApp(agentPhone,
+        `📞 ${tenantFirstName} (${phone}) has requested a call. Ref: WP-${issueRef}`
+      );
+    } else {
+      console.warn(`[Flow T2] No agent phone on tenant record — skipping agent notification`);
+      logToAxiom('warn', 'flow_t2_no_agent_phone', { phone, tenantName });
+    }
+
+    console.log(`[Flow T2] Complete — Ref: WP-${issueRef} | Tenant: ${tenantName}`);
+    logToAxiom('info', 'flow_t2_complete', { phone, issueRef: String(issueRef), tenantName });
+
+  } catch (err) {
+    console.error(`[Flow T2 ERROR]`, err.message);
+    logToAxiom('error', 'flow_t2_error', { phone, error: err.message });
+    await alertShawn('Flow T2 (call request)', err.message, phone);
+  }
+}
+
 // ─── FLOW A1 — AGENT OPEN ISSUES LIST ───────────────────────────────────────
 // Trigger: agent sends "1"
 // Reads:   WP_Issues (all Open for this agent, oldest first)
@@ -1901,13 +1971,18 @@ async function routeMessage(phone, messageText) {
       return;
     }
 
-    // Check 6: tenant replied "1" to the main menu with no active mid-flow state
-    // above — start Flow T1 intake. Any other message = tenant main menu (Menu
-    // Spec v1.1 — replaces straight-to-Flow-1 intake from V1). Options 2/3 are
-    // not wired yet (Groups 2/3, held) — they fall through to the menu, matching
-    // the confirmed Phase 2 end state.
+    // Check 6: tenant replied to the main menu with no active mid-flow state
+    // above. 1 -> Flow T1 (issue intake, Group 1). 2 -> Flow T2 (call request,
+    // Group 2). Option 3 (Flow T3) is not wired yet (Group 3, held) — falls
+    // through to the menu, matching the confirmed Phase 2 end state. Any other
+    // message = tenant main menu (Menu Spec v1.1 — replaces straight-to-Flow-1
+    // intake from V1).
     if (text === '1') {
       await startTenantIssueIntake(phone, record);
+      return;
+    }
+    if (text === '2') {
+      await handleTenantCallRequest(phone, record);
       return;
     }
     await showTenantMainMenu(phone, record);
