@@ -565,17 +565,15 @@ async function handleTenantCallRequest(phone, tenantRecord) {
 // routeMessage can tell "pending issue report" and "pending enquiry" apart
 // without a new Issue Resolution Status value.
 //
-// STATUS CHOICE — flagged judgment call: once the enquiry text is forwarded,
-// this sets Issue Resolution Status = Closed immediately, NOT Open. Reasoning:
-// "no categorization, no sub-menu" (per Brief) means there's no ASSIGN/ATTEND/
-// OWNER command that fits a general question — those are maintenance-shaped
-// actions. Leaving it Open would put non-maintenance enquiries into Flow A1's
-// open-issues list and STALE's stuck-issue scan with no way to close them
-// (same "no HANDLED command yet" gap flagged for Group 9's Call Requested).
-// Closed is an imperfect label (nothing was "resolved" by the system, just
-// relayed) but keeps the issue list clean of things it can't actually act on.
-// If visibility/trackability matters more than list cleanliness, this is a
-// one-line change back to Open.
+// STATUS CHOICE — reconciled post-session: sets Issue Resolution Status = Open
+// once the enquiry text is forwarded, NOT Closed. Originally shipped as Closed
+// (reasoning: no ASSIGN/ATTEND/OWNER command fits a general question, so an
+// Open enquiry would sit in Flow A1's list and STALE's scan with no way to
+// close it — same "no HANDLED command yet" gap as Group 9's Call Requested).
+// CEO decision: visibility matters more than list cleanliness — accept that
+// gap for now rather than hide enquiries from the agent's view. If a HANDLED
+// WP-N command (Menu Spec Phase 11 Polish) ever lands, this status choice
+// should be revisited alongside Group 9's Call Requested for the same reason.
 
 async function startTenantEnquiry(phone, tenantRecord) {
   console.log(`[Flow T3] Start enquiry — phone: ${phone}`);
@@ -621,7 +619,7 @@ async function completeTenantEnquiry(phone, messageText, tenantRecord, placehold
     const patched = await airtableUpdate('WP_Issues', issueId, {
       'Issue Title':             `${tenantName} — ${messageText.slice(0, 60)}`,
       'Description':             messageText,
-      'Issue Resolution Status': 'Closed', // see file header — flagged, not obviously correct
+      'Issue Resolution Status': 'Open', // reconciled post-session — see file header
     });
     if (patched.error) throw new Error(`Issue PATCH failed: ${JSON.stringify(patched.error)}`);
 
