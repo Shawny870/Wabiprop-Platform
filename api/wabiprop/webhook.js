@@ -1319,6 +1319,212 @@ async function handleAgentBriefing(phone, messageText, agentRecord) {
   await sendWhatsApp(phone, `[STUB] BRIEFING command received. V2-4 not yet built.`);
 }
 
+// ─── GROUP 12 — TENANT SELF-REGISTRATION (agent-confirm, not immediate-link) ─
+// Trigger (unregistered number): "CODE {code}" (e.g. "CODE WP-1234")
+// Trigger (agent):               "APPROVE {code} [Full Name]" / "REJECT {code}"
+// Reads:   WP_Units (Registration Code match), WP_Properties (Property Name,
+//          Agent Phone, Owner Whatsapp -- for the agent/tenant notifications and
+//          for denormalising onto the new WP_Tenants record)
+// Writes:  WP_Units.Registered Tenant Phone (claim marker) -> cleared on reject;
+//          WP_Tenants (new record) -> created only on agent APPROVE
+//
+// DESIGN NOTE -- why the tenant's name is NOT collected at CODE time:
+// The only two fields approved for this flow are WP_Units."Registration Code"
+// and WP_Units."Registered Tenant Phone" -- there is no field to hold a tenant's
+// name during the pending window, and adding one would need CEO sign-off (Rule
+// 10) that wasn't sought. Rather than stop the whole group over it, the flow is
+// shaped so nothing extra needs to persist: "Registered Tenant Phone" is both
+// the claim marker AND the only thing carried across the pending window. The
+// agent -- who already has this tenant's name from their own lease paperwork --
+// supplies it fresh in the APPROVE command itself. This also means the
+// registering number is NEVER auto-recognised as a tenant (identifySender has
+// no "pending" concept, only match/no-match) -- a WP_Tenants record, and
+// therefore live tenant access, only exists after explicit agent approval.
+// This is the "Pending state, ping the agent to approve, not immediate-link"
+// design that was signed off.
+//
+// Registration Code matching is case-insensitive (LOWER() on both sides) --
+// friendlier for a code copied off a printed notice. The code itself must be a
+// single whitespace-free token (the command parser splits on the first space),
+// so codes containing spaces will not match correctly -- worth knowing before
+// codes are generated/printed for units.
+//
+// Invalid-code attempts do NOT create a WP_Leads record (unlike the generic
+// unknown-sender fallback) -- a mistyped registration code is a distinct,
+// deliberate self-registration attempt, not the same signal as a random
+// unrecognised message, and logging every typo into the sales-CRM-ish WP_Leads
+// table would be noise. Flagging this as a judgment call, not obviously correct.
+
+async function resolvePropertyContext(unitRecord) {
+  const propertyIds = unitRecord.fields['Property'] || [];
+  if (propertyIds.length === 0) return {};
+  const propertyRecords = await airtableGet('WP_Properties', `RECORD_ID() = '${propertyIds[0]}'`, { maxRecords: 1 });
+  if (propertyRecords.length === 0) return {};
+  const pf = propertyRecords[0].fields;
+  return {
+    propertyName: (pf['Property Name']   || '').trim(),
+    agentPhone:   (pf['Agent Phone']     || '').trim(),
+    ownerPhone:   (pf['Owner Whatsapp']  || '').trim(),
+  };
+}
+
+async function handleTenantSelfRegister(phone, code) {
+  console.log(`[Group 12] Self-registration attempt — phone: ${phone} | code: ${code}`);
+
+  try {
+    const escapedCode = code.replace(/'/g, "\\'");
+    const units = await airtableGet('WP_Units', `LOWER({Registration Code}) = LOWER('${escapedCode}')`, { maxRecords: 1 });
+
+    if (units.length === 0) {
+      await sendWhatsApp(phone, `That registration code wasn't recognized. Please check the code (e.g. WP-1234) and try again, or contact your agent.`);
+      logToAxiom('info', 'tenant_register_code_not_found', { phone, code });
+      return;
+    }
+
+    const unit = units[0];
+    const existingPhone = (unit.fields['Registered Tenant Phone'] || '').trim();
+
+    if (existingPhone === phone) {
+      await sendWhatsApp(phone, `Your registration for this unit is still pending your agent's approval.`);
+      return;
+    }
+    if (existingPhone) {
+      await sendWhatsApp(phone, `This registration code has already been used. If you believe this is a mistake, please contact your agent.`);
+      logToAxiom('warn', 'tenant_register_code_already_claimed', { phone, code, unitId: unit.id });
+      return;
+    }
+
+    const { propertyName, agentPhone, ownerPhone } = await resolvePropertyContext(unit);
+    const unitName = (unit.fields['Unit Name'] || 'your unit').trim();
+
+    const patched = await airtableUpdate('WP_Units', unit.id, { 'Registered Tenant Phone': phone });
+    if (patched.error) throw new Error(`Unit PATCH failed: ${JSON.stringify(patched.error)}`);
+
+    await sendWhatsApp(phone,
+      `Thanks! Your registration for ${unitName}${propertyName ? `, ${propertyName}` : ''} has been sent to your agent for approval. You'll get a message once it's confirmed.`
+    );
+
+    if (agentPhone) {
+      await sendWhatsApp(agentPhone,
+        `📋 New tenant registration pending approval.\n\n` +
+        `Phone: ${phone}\n` +
+        `Unit: ${unitName}${propertyName ? `, ${propertyName}` : ''}\n` +
+        `Code: ${code}\n\n` +
+        `Reply *APPROVE ${code} [Tenant Full Name]* to confirm — e.g. APPROVE ${code} Ayanda Khumalo.\n` +
+        `Reply *REJECT ${code}* to decline.`
+      );
+    } else {
+      console.warn(`[Group 12] No agent phone resolved for unit ${unit.id} — registration claimed but agent not notified`);
+      logToAxiom('warn', 'tenant_register_no_agent_phone', { phone, code, unitId: unit.id });
+    }
+
+    logToAxiom('info', 'tenant_register_pending', { phone, code, unitId: unit.id, agentNotified: Boolean(agentPhone) });
+
+  } catch (err) {
+    console.error(`[Group 12 ERROR — self-register]`, err.message);
+    await alertShawn('Group 12 (tenant self-register)', err.message, phone);
+  }
+}
+
+async function handleAgentApproveRegistration(phone, code, fullName, agentRecord) {
+  console.log(`[Group 12] Agent approve — agent: ${phone} | code: ${code} | name: ${fullName}`);
+
+  try {
+    const escapedCode = code.replace(/'/g, "\\'");
+    const units = await airtableGet(
+      'WP_Units',
+      `AND(LOWER({Registration Code}) = LOWER('${escapedCode}'), {Registered Tenant Phone} != '')`,
+      { maxRecords: 1 }
+    );
+
+    if (units.length === 0) {
+      await sendWhatsApp(phone, `No pending registration found for code ${code}. It may already be approved, rejected, or the code is wrong.`);
+      return;
+    }
+
+    const unit = units[0];
+    const { propertyName, agentPhone: unitAgentPhone, ownerPhone } = await resolvePropertyContext(unit);
+
+    // Ownership check -- only the agent assigned to this unit's property may approve
+    if (unitAgentPhone && unitAgentPhone !== phone) {
+      await sendWhatsApp(phone, `Code ${code} belongs to a property assigned to a different agent. Cannot approve.`);
+      logToAxiom('warn', 'tenant_register_approve_wrong_agent', { phone, code, unitId: unit.id });
+      return;
+    }
+
+    const pendingPhone = (unit.fields['Registered Tenant Phone'] || '').trim();
+    const unitName = (unit.fields['Unit Name'] || 'unit').trim();
+
+    const created = await airtableCreate('WP_Tenants', {
+      'Full Name':                fullName,
+      'Whatsapp Phone Number':    pendingPhone,
+      'Units':                    [unit.id],
+      'Tenant Status':            'Active',
+      'Property Name':            propertyName || '',
+      'Agent WhatsApp Number':    unitAgentPhone || phone,
+      'Owner Phone':              ownerPhone || '',
+    });
+    if (!created.id) throw new Error(`WP_Tenants create failed: ${JSON.stringify(created.error || created)}`);
+
+    await sendWhatsApp(phone, `✅ ${fullName} registered as tenant for ${unitName}. They can now report issues via WhatsApp.`);
+
+    const tenantFirstName = fullName.trim().split(/\s+/)[0] || fullName;
+    await sendWhatsApp(pendingPhone,
+      `Hi ${tenantFirstName}, you're all set! You can now report maintenance issues, request a call, or ask a question any time — just message this number.`
+    );
+
+    logToAxiom('info', 'tenant_register_approved', { phone, code, unitId: unit.id, tenantId: created.id, pendingPhone });
+    console.log(`[Group 12] Approved — WP_Tenants ${created.id} created for ${pendingPhone}`);
+
+  } catch (err) {
+    console.error(`[Group 12 ERROR — approve]`, err.message);
+    await alertShawn('Group 12 (agent approve registration)', err.message, phone);
+  }
+}
+
+async function handleAgentRejectRegistration(phone, code, agentRecord) {
+  console.log(`[Group 12] Agent reject — agent: ${phone} | code: ${code}`);
+
+  try {
+    const escapedCode = code.replace(/'/g, "\\'");
+    const units = await airtableGet(
+      'WP_Units',
+      `AND(LOWER({Registration Code}) = LOWER('${escapedCode}'), {Registered Tenant Phone} != '')`,
+      { maxRecords: 1 }
+    );
+
+    if (units.length === 0) {
+      await sendWhatsApp(phone, `No pending registration found for code ${code}.`);
+      return;
+    }
+
+    const unit = units[0];
+    const { agentPhone: unitAgentPhone } = await resolvePropertyContext(unit);
+
+    if (unitAgentPhone && unitAgentPhone !== phone) {
+      await sendWhatsApp(phone, `Code ${code} belongs to a property assigned to a different agent. Cannot reject.`);
+      return;
+    }
+
+    const pendingPhone = (unit.fields['Registered Tenant Phone'] || '').trim();
+
+    const patched = await airtableUpdate('WP_Units', unit.id, { 'Registered Tenant Phone': '' });
+    if (patched.error) throw new Error(`Unit PATCH failed: ${JSON.stringify(patched.error)}`);
+
+    await sendWhatsApp(phone, `Registration for code ${code} declined. The code is now available again.`);
+
+    if (pendingPhone) {
+      await sendWhatsApp(pendingPhone, `Your registration request could not be confirmed. Please contact your agent directly if you believe this is a mistake.`);
+    }
+
+    logToAxiom('info', 'tenant_register_rejected', { phone, code, unitId: unit.id, pendingPhone });
+
+  } catch (err) {
+    console.error(`[Group 12 ERROR — reject]`, err.message);
+    await alertShawn('Group 12 (agent reject registration)', err.message, phone);
+  }
+}
+
 // ─── POST ROUTER ─────────────────────────────────────────────────────────────
 
 async function routeMessage(phone, messageText) {
@@ -1334,6 +1540,14 @@ async function routeMessage(phone, messageText) {
   // Menu Spec v1.1 Section 3 — access-denied message + WP_Leads capture.
   // Field names confirmed live Meta API 1 Jul 2026: "Phone Number", "Lead Type" (both singleLineText)
   if (role === 'unknown') {
+    // Group 12 — "CODE {code}" self-registration, checked before the generic
+    // access-denied fallback below. See handleTenantSelfRegister for full design.
+    const codeMatch = text.match(/^code\s+(\S+)$/i);
+    if (codeMatch) {
+      await handleTenantSelfRegister(phone, codeMatch[1]);
+      return;
+    }
+
     await sendWhatsApp(phone,
       `Hi, this service is for registered tenants and property owners only. Please contact your rental agent to be added to the system.`
     );
@@ -1387,6 +1601,19 @@ async function routeMessage(phone, messageText) {
       await handleAgentEscalateToOwner(phone, ownerMatch[1], record);
       return;
     }
+    // "APPROVE {code} {Full Name}" — e.g. "APPROVE WP-1234 Ayanda Khumalo" — Group 12
+    // Case preserved on the name (text, not textLower); code matched case-insensitively.
+    const approveMatch = text.match(/^approve\s+(\S+)\s+([\s\S]+)$/i);
+    if (approveMatch) {
+      await handleAgentApproveRegistration(phone, approveMatch[1], approveMatch[2].trim(), record);
+      return;
+    }
+    // "REJECT {code}" — e.g. "REJECT WP-1234" — Group 12
+    const rejectMatch = text.match(/^reject\s+(\S+)$/i);
+    if (rejectMatch) {
+      await handleAgentRejectRegistration(phone, rejectMatch[1], record);
+      return;
+    }
     if (textLower === 'report') {
       await handleAgentReport(phone, record);
       return;
@@ -1408,7 +1635,7 @@ async function routeMessage(phone, messageText) {
     }
     // Agent sent something unrecognised
     await sendWhatsApp(phone,
-      `Hi! Commands available:\n- *1* — see your open issues\n- *ASSIGN WP-[issue number]* — e.g. ASSIGN WP-62\n- *ATTEND WP-[issue number]* — handle it yourself, e.g. ATTEND WP-62\n- *ATTENDED WP-[issue number]* — close it out once you're done, e.g. ATTENDED WP-62\n- *OWNER WP-[issue number]* — send it to the owner, e.g. OWNER WP-62\n- *STATUS WP-[issue number]* — e.g. STATUS WP-62\n- *STALE* — find issues stuck > 4 hours\n- *REPORT* — list all open issues`
+      `Hi! Commands available:\n- *1* — see your open issues\n- *ASSIGN WP-[issue number]* — e.g. ASSIGN WP-62\n- *ATTEND WP-[issue number]* — handle it yourself, e.g. ATTEND WP-62\n- *ATTENDED WP-[issue number]* — close it out once you're done, e.g. ATTENDED WP-62\n- *OWNER WP-[issue number]* — send it to the owner, e.g. OWNER WP-62\n- *APPROVE [code] [Tenant Name]* — confirm a pending tenant registration\n- *REJECT [code]* — decline a pending tenant registration\n- *STATUS WP-[issue number]* — e.g. STATUS WP-62\n- *STALE* — find issues stuck > 4 hours\n- *REPORT* — list all open issues`
     );
     return;
   }
