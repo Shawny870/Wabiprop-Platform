@@ -1,56 +1,53 @@
 // api/wabiprop/cron/lease-reminders.js
-// Group 11 (Builder Brief, 2 Jul 2026) — Tenant lease expiry reminders cron.
+// Group 11 (Builder Brief, 2 Jul 2026) — Agent-facing lease expiry digest cron.
 // Schedule: Daily 06:30 SAST = 04:30 UTC (vercel.json: "30 4 * * *") -- offset 30min
 // after rent-reminders (04:00 UTC) rather than the same instant.
 // Manual trigger: GET https://wabiprop-platform.vercel.app/api/wabiprop/cron/lease-reminders
 //
-// Structure and in-memory join deliberately reused from Group 10 (rent-reminders.js)
-// per instruction, not re-derived: fetch eligible leases + active tenants once each,
-// join in memory, respect opt-out flags, same pagination-safe airtableGet.
+// RECONCILED POST-SESSION: originally shipped tenant-facing (one message per
+// tenant, mirroring Group 10 exactly). CEO decision: switch to agent-facing --
+// renewal/vacate decisions are agent work, and 7/3/1 days is too short a lead
+// time for a tenant-facing renewal prompt to be useful (see the "every prior
+// doc used 60/30/14 or 90/60/30/7 day lead times" note this was originally
+// flagged with). Structure below is a genuine rework, not a copy-paste
+// recipient swap -- see "WHAT CHANGED" below.
 //
-// QUERY SIMPLIFICATION vs. Group 10 -- flagging why: WP_Leases."Days Until Expiry"
-// is a live formula field, confirmed via Meta API as
-// DATETIME_DIFF({Lease End Date}, TODAY(), 'days') -- Airtable recalculates it
-// server-side on every read. That means the entire 7/3/1-day filter can live
-// directly in the Airtable formula (OR({Days Until Expiry}=7, ...)), unlike Group
-// 10, which needed JS-side date math with month-end clamping because
-// "Rent Due Day" is a recurring day-of-month with no absolute date to filter on.
-// Leases have one absolute expiry date, so this is the simpler, more direct case --
-// used Days Until Expiry rather than computing from Lease End Date by hand.
+// Structure and in-memory join still reused from Group 10 (rent-reminders.js):
+// fetch eligible leases + active tenants once each, join in memory, same
+// pagination-safe airtableGet. Days Until Expiry query simplification (see
+// original commit 8562ba6 for the DATETIME_DIFF confirmation) is unchanged.
 //
-// RECIPIENT -- PROPOSED, NOT silently decided: this sends to the TENANT, mirroring
-// Group 10 exactly (informational, no interactive menu). Two things worth weighing
-// before treating this as final:
-//   1. Every prior doc that specced lease-expiry reminders (Master Build Spec
-//      Section 3.6, Product Reference V2 features, Demo Bible Scene 3) used a much
-//      longer lead time -- 60/30/14 days (agent-facing) or 90/60/30/7 days
-//      (tenant-facing) -- because renewing a lease normally needs weeks of notice.
-//      7/3/1 days out is very short for an actual renewal decision; it works fine
-//      as "reuse Group 10's mechanical pattern" but may be too late to be useful
-//      as an actual renewal-decision prompt.
-//   2. An AGENT-facing digest ("N leases expiring this week") is arguably more
-//      actionable than tenant-facing, since renewal/vacate decisions are agent
-//      work per those same docs. Structurally trivial to add later (agent phone is
-//      already denormalised on WP_Tenants) if tenant-facing turns out to be the
-//      wrong call.
-// Going with tenant-facing now since it's the most direct "port" of Group 10's
-// structure, which is what was asked for -- flagging rather than second-guessing
-// the 7/3/1 numbers or silently switching to agent-facing.
-//
-// OPT-OUT FIELDS -- deliberately NOT identical to Group 10: respects
-// "Stop Flag (Opted Out)" (a general opt-out, by name) but NOT
-// "Payment Reminder Opt-Out" -- that field is scoped to payment reminders
-// specifically per its own name, and blindly reusing it here would let a tenant
-// who only opted out of rent nagging also lose lease-expiry notice, which isn't
-// the same request. Flagging this deviation from a literal copy of Group 10.
+// WHAT CHANGED from the tenant-facing version:
+//   1. Recipient: was one WhatsApp send per tenant; now one compiled digest
+//      per agent, covering every lease of theirs crossing a 7/3/1-day mark.
+//   2. Agent resolution: WP_Leases has no direct Agent field. Resolved via
+//      each lease's first linked, Active tenant's "Agent WhatsApp Number" --
+//      same denormalised-field convention used everywhere else in this
+//      session (Flow 1, Groups 5/6/12), not a new lookup pattern. If a lease
+//      has multiple tenants, only the first Active one is used to identify
+//      both the agent and the display name shown in the digest -- co-tenants
+//      with a different agent (shouldn't happen; agent is a property-level
+//      assignment) or a different display name are not separately listed.
+//      Flagging as a simplification, not verified impossible.
+//   3. New WP_Agents fetch (Active = TRUE()), matching Group 8's pattern, so
+//      the digest can greet the agent by name rather than a bare "Hi agent".
+//   4. Opt-out fields DROPPED entirely (Stop Flag (Opted Out) no longer
+//      checked). That field governs whether to message the TENANT -- since
+//      this cron no longer contacts tenants at all, it's not applicable to
+//      what's being sent. An opted-out tenant's lease still appears in their
+//      agent's digest, which is a deliberate behaviour change worth knowing:
+//      previously such a tenant's lease produced no message to anyone;
+//      now it does (to the agent, not the tenant).
+//   5. Message format: NOT Group 8's compact stat-line style ("Open issues:
+//      N (...)"), even though that was suggested as a reusable pattern.
+//      Judgment call, flagged: a bare count ("3 leases expiring soon") isn't
+//      actionable without knowing which tenant/unit/date, so this follows
+//      Flow A1's numbered-list style instead, sorted soonest-first. Group 8's
+//      greeting convention ("Good morning {name}. ...") is reused; its
+//      count-only body is not, since it doesn't fit content that needs to be
+//      followed up per-item rather than just reviewed as a total.
 
 const { airtableGet, sendWhatsApp, logToAxiom, alertShawn } = require('../_lib/cronHelpers');
-
-const REMINDER_COPY = {
-  7: (name, dateStr) => `Hi ${name}, your lease is expiring in 7 days (${dateStr}). Please contact your agent to discuss renewal or moving out.`,
-  3: (name, dateStr) => `Hi ${name}, your lease is expiring in 3 days (${dateStr}). Please contact your agent if you haven't already.`,
-  1: (name, dateStr) => `Hi ${name}, your lease expires tomorrow (${dateStr}). Please contact your agent as soon as possible if you haven't already.`,
-};
 
 module.exports = async function handler(req, res) {
   console.log('[Cron: lease-reminders] Starting run');
@@ -62,9 +59,18 @@ module.exports = async function handler(req, res) {
       `AND(OR({Lease Status} = 'Active', {Lease Status} = 'Month-to-Month'), OR({Days Until Expiry} = 7, {Days Until Expiry} = 3, {Days Until Expiry} = 1))`
     );
     const tenants = await airtableGet('WP_Tenants', `{Tenant Status} = 'Active'`);
-    const tenantById = new Map(tenants.map(t => [t.id, t]));
+    const agents  = await airtableGet('WP_Agents', `{Active} = TRUE()`);
 
-    console.log(`[Cron: lease-reminders] ${leases.length} lease(s) at a 7/3/1-day mark, ${tenants.length} active tenant(s)`);
+    const tenantById = new Map(tenants.map(t => [t.id, t]));
+    const agentNameByPhone = new Map(
+      agents.map(a => [(a.fields['Agent Whatsapp number'] || '').trim(), (a.fields['Agent Name'] || '').trim()])
+    );
+
+    console.log(`[Cron: lease-reminders] ${leases.length} lease(s) at a 7/3/1-day mark, ${tenants.length} active tenant(s), ${agents.length} active agent(s)`);
+
+    // Group eligible leases by agent phone -- one digest per agent, not one
+    // message per lease/tenant.
+    const digestByAgent = new Map();
 
     for (const lease of leases) {
       const daysUntil = Number(lease.fields['Days Until Expiry']);
@@ -73,34 +79,60 @@ module.exports = async function handler(req, res) {
         ? new Date(endDate).toLocaleDateString('en-ZA', { timeZone: 'UTC', day: 'numeric', month: 'long' })
         : 'soon';
 
+      // First Active, resolvable tenant identifies the agent + display info
+      // for this lease (see file header re: co-tenant simplification).
       const tenantIds = lease.fields['Tenants'] || [];
-      for (const tenantId of tenantIds) {
-        const tenant = tenantById.get(tenantId);
-        if (!tenant) continue; // not Active, or not found -- skip silently, not an error
+      const tenant = tenantIds.map(id => tenantById.get(id)).find(Boolean);
 
-        const optedOut = Boolean(tenant.fields['Stop Flag (Opted Out)']);
-        const phone = (tenant.fields['Whatsapp Phone Number'] || '').trim();
-        if (optedOut || !phone) {
-          results.push({ leaseId: lease.id, tenantId, skipped: true, reason: optedOut ? 'opted out' : 'no phone' });
-          continue;
-        }
-
-        const tenantName = (tenant.fields['Full Name'] || 'there').trim().split(/\s+/)[0] || 'there';
-        const msg = REMINDER_COPY[daysUntil](tenantName, dateStr);
-
-        const sendResult = await sendWhatsApp(phone, msg);
-        logToAxiom(sendResult.error ? 'error' : 'info', 'lease_reminder_sent', {
-          leaseId: lease.id, tenantId, phone, daysUntil, endDate,
-          metaError: sendResult.error ? JSON.stringify(sendResult.error) : null,
-        });
-
-        results.push({ leaseId: lease.id, tenantId, phone, daysUntil, sent: !sendResult.error });
-        console.log(`[Cron: lease-reminders] Sent ${daysUntil}-day reminder to ${phone} (lease ${lease.id})`);
+      if (!tenant) {
+        results.push({ leaseId: lease.id, skipped: true, reason: 'no Active tenant found to resolve agent from' });
+        continue;
       }
+
+      const agentPhone = (tenant.fields['Agent WhatsApp Number'] || '').trim();
+      if (!agentPhone) {
+        results.push({ leaseId: lease.id, skipped: true, reason: 'no agent phone on tenant record' });
+        continue;
+      }
+
+      const tenantName   = (tenant.fields['Full Name']    || 'Tenant').trim();
+      const propertyName = (tenant.fields['Property Name'] || '').trim();
+      const unitAddress  = (tenant.fields['Unit Address']  || '').trim();
+
+      if (!digestByAgent.has(agentPhone)) digestByAgent.set(agentPhone, []);
+      digestByAgent.get(agentPhone).push({
+        leaseId: lease.id, tenantName, location: propertyName || unitAddress || 'unknown property',
+        daysUntil, dateStr,
+      });
+    }
+
+    for (const [agentPhone, entries] of digestByAgent.entries()) {
+      entries.sort((a, b) => a.daysUntil - b.daysUntil); // most urgent (1 day) first
+
+      const agentName = agentNameByPhone.get(agentPhone) || '';
+      const agentFirstName = agentName.split(/\s+/)[0] || 'there';
+
+      const lines = entries.map((e, i) =>
+        `${i + 1} — ${e.tenantName} · ${e.location} · expires ${e.dateStr} (${e.daysUntil} day${e.daysUntil === 1 ? '' : 's'})`
+      );
+
+      const msg =
+        `Good morning ${agentFirstName}. ${entries.length} lease${entries.length === 1 ? '' : 's'} crossing a renewal-decision point:\n\n` +
+        `${lines.join('\n')}\n\n` +
+        `Reach out directly to discuss renewal or moving out.`;
+
+      const sendResult = await sendWhatsApp(agentPhone, msg);
+      logToAxiom(sendResult.error ? 'error' : 'info', 'lease_reminder_digest_sent', {
+        agentPhone, leaseCount: entries.length,
+        metaError: sendResult.error ? JSON.stringify(sendResult.error) : null,
+      });
+
+      results.push({ agentPhone, leaseCount: entries.length, sent: !sendResult.error });
+      console.log(`[Cron: lease-reminders] Sent digest to ${agentPhone} — ${entries.length} lease(s)`);
     }
 
     console.log('[Cron: lease-reminders] Run complete', JSON.stringify(results));
-    return res.status(200).json({ ok: true, leasesAtThreshold: leases.length, results });
+    return res.status(200).json({ ok: true, leasesAtThreshold: leases.length, agentsNotified: digestByAgent.size, results });
 
   } catch (err) {
     console.error('[Cron: lease-reminders ERROR]', err.message);
