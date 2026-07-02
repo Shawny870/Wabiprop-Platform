@@ -23,20 +23,43 @@ function logToAxiom(level, event, detail = {}) {
   }).catch(err => console.error('[Axiom ERROR]', err.message));
 }
 
+// Follows Airtable's offset-based pagination past the 100-record-per-request
+// default -- same fix, same reasoning as the twin copy in webhook.js. See that
+// file's comment for the full explanation; kept identical here deliberately.
 async function airtableGet(table, filterFormula, options = {}) {
-  let url = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(table)}?filterByFormula=${encodeURIComponent(filterFormula)}`;
+  let baseUrl = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(table)}?filterByFormula=${encodeURIComponent(filterFormula)}`;
   if (options.sort) {
     options.sort.forEach((s, i) => {
-      url += `&sort%5B${i}%5D%5Bfield%5D=${encodeURIComponent(s.field)}&sort%5B${i}%5D%5Bdirection%5D=${encodeURIComponent(s.direction)}`;
+      baseUrl += `&sort%5B${i}%5D%5Bfield%5D=${encodeURIComponent(s.field)}&sort%5B${i}%5D%5Bdirection%5D=${encodeURIComponent(s.direction)}`;
     });
   }
   if (options.maxRecords) {
-    url += `&maxRecords=${options.maxRecords}`;
+    baseUrl += `&maxRecords=${options.maxRecords}`;
   }
-  const res = await fetch(url, { headers: { Authorization: `Bearer ${AIRTABLE_API_KEY}` } });
-  const data = await res.json();
-  if (data.error) console.error(`[Airtable ERROR] ${table}:`, JSON.stringify(data.error));
-  return data.records || [];
+
+  let allRecords = [];
+  let offset = null;
+  let page = 0;
+  const MAX_PAGES = 50; // safety cap -- 50 x 100 = 5,000 records; stops a malformed offset from looping forever
+
+  do {
+    const url = offset ? `${baseUrl}&offset=${encodeURIComponent(offset)}` : baseUrl;
+    const res = await fetch(url, { headers: { Authorization: `Bearer ${AIRTABLE_API_KEY}` } });
+    const data = await res.json();
+    if (data.error) {
+      console.error(`[Airtable ERROR] ${table}:`, JSON.stringify(data.error));
+      break; // stop paging on error -- return whatever was accumulated, matching prior error-tolerant behaviour
+    }
+    allRecords = allRecords.concat(data.records || []);
+    offset = data.offset || null;
+    page++;
+  } while (offset && page < MAX_PAGES);
+
+  if (offset && page >= MAX_PAGES) {
+    console.warn(`[Airtable GET] ${table} — hit MAX_PAGES safety cap (${MAX_PAGES}) with more data still available.`);
+  }
+
+  return allRecords;
 }
 
 async function airtableUpdate(table, recordId, fields) {
