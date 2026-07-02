@@ -223,8 +223,9 @@ async function identifySender(phone) {
 
 // ─── TENANT MAIN MENU ─────────────────────────────────────────────────────────
 // Menu Spec v1.1 Section 4.1 — shown on any fresh tenant inbound with no active
-// mid-flow state. Phase 2 scope: display only. Replying 1/2/3 loops back to this
-// same menu until Phase 3 wires up Flow T1 (and later Phases 4/5 for T2/T3).
+// mid-flow state. Option 1 is wired to Flow T1 as of Group 1 (Menu Phase 3) —
+// see startTenantIssueIntake in routeMessage. Options 2/3 (Flow T2/T3, Groups
+// 2/3) are not built yet and still loop back to this same menu.
 
 async function showTenantMainMenu(phone, tenantRecord) {
   const fullName = (tenantRecord.fields['Full Name'] || '').trim();
@@ -244,6 +245,14 @@ async function showTenantMainMenu(phone, tenantRecord) {
 // Writes:  WP_Issues (creates new record, Status = Open)
 // Sends:   tenant acknowledgement + agent notification
 // Error:   logs to console + alerts Shawn, never sends tenant ack if create failed
+//
+// SUPERSEDED for the tenant-menu path by startTenantIssueIntake /
+// completeTenantIssueIntake below (Group 1, Menu Phase 3) — the menu requires a
+// two-step "ask for a description, then receive it" exchange that this one-shot
+// function (message = description, in a single call) can't provide. Left in
+// place rather than removed (Rule 21 — no unauthorised removal without sign-off);
+// it had zero call sites before Group 1 and has zero now. Flagging for Engineer:
+// worth a deliberate decision on whether to delete it in a future pass.
 
 async function handleTenantIssue(phone, messageText, tenantRecord) {
   console.log(`[Flow 1] Tenant intake — phone: ${phone}`);
@@ -340,6 +349,125 @@ async function handleTenantIssue(phone, messageText, tenantRecord) {
     logToAxiom('error', 'flow1_error', { phone, error: err.message });
     await alertShawn('Flow 1 (tenant intake)', err.message, phone);
     // Do not send tenant acknowledgement — issue was not confirmed created
+  }
+}
+
+// ─── FLOW T1 — TENANT ISSUE INTAKE FROM MENU OPTION 1 (Group 1, Menu Phase 3) ─
+// Trigger (start):    tenant replies "1" to the main menu, with no placeholder
+//                      issue already pending
+// Trigger (complete):  tenant's next message, once a placeholder issue exists
+//
+// ARCHITECTURE NOTE — the thing Group 4-6's flat-command pattern didn't need,
+// flagged explicitly per instruction:
+// Menu Spec Flow T1 requires a genuine two-turn exchange — "1" -> "please
+// describe your issue" -> [tenant's next message] -> issue created. Every flat
+// command built in Groups 4-6 (ASSIGN WP-N, ATTEND WP-N, OWNER WP-N, CODE,
+// APPROVE, REJECT) carries its own identifying context (a WP-N or a code) in
+// every message, so no memory of the prior turn was ever needed. This flow's
+// second turn is bare free text with NO identifying token in it at all — the
+// same structural problem the *existing* Checks 1-3 already solve for
+// continuing an existing issue (state lives on the WP_Issues record itself, via
+// Issue Resolution Status, not in any session store). But those three states
+// only cover ALREADY-CREATED issues; there was no durable marker for "a new
+// issue was started but not yet described" because no such issue exists yet
+// to carry a status.
+//
+// SOLUTION — no new schema, reuses the existing pattern instead of requesting
+// a new Issue Resolution Status option: create the WP_Issues record immediately
+// on "1", with status Open (an existing, valid value) and a recognisable
+// placeholder in Description ("(awaiting description)"). The router's new
+// Check 5 (below, in routeMessage) looks for exactly that placeholder on an
+// Open issue for this tenant — durable, Airtable-backed, same shape as every
+// other mid-flow check in this file. The agent is NOT notified when the
+// placeholder is created — only once a real description lands — so a tenant
+// who presses 1 and never follows up doesn't generate a false alert.
+//
+// If this isn't the right tradeoff (e.g. a real Issue Resolution Status option
+// like "Awaiting Description" is preferred instead), that's a schema change
+// requiring the usual Airtable-UI sign-off (Rule 10) — flagging the option,
+// not assuming it.
+
+const TENANT_ISSUE_INTAKE_PLACEHOLDER = '(awaiting description)';
+
+async function startTenantIssueIntake(phone, tenantRecord) {
+  console.log(`[Flow T1] Start issue intake — phone: ${phone}`);
+
+  try {
+    const f = tenantRecord.fields;
+    const tenantName = (f['Full Name'] || '').trim();
+    const agentPhone = (f['Agent WhatsApp Number'] || '').trim();
+
+    const created = await airtableCreate('WP_Issues', {
+      'Issue Title':             `${tenantName} — ${TENANT_ISSUE_INTAKE_PLACEHOLDER}`,
+      'Description':             TENANT_ISSUE_INTAKE_PLACEHOLDER,
+      'Issue Resolution Status': 'Open',
+      'Urgency':                 'Routine',
+      'Tenant Whatsapp Number':  phone,
+      'Agent Whatsapp number':   agentPhone,
+      'Date Reported':           new Date().toISOString(),
+    });
+    if (!created.id) throw new Error(`Placeholder issue create failed: ${JSON.stringify(created.error || created)}`);
+
+    await sendWhatsApp(phone, `Please describe the issue in one or two sentences.`);
+
+    logToAxiom('info', 'flow_t1_intake_started', { phone, issueId: created.id });
+    console.log(`[Flow T1] Placeholder issue ${created.id} created — awaiting description`);
+
+  } catch (err) {
+    console.error(`[Flow T1 ERROR — start]`, err.message);
+    logToAxiom('error', 'flow_t1_start_error', { phone, error: err.message });
+    await alertShawn('Flow T1 (start issue intake)', err.message, phone);
+  }
+}
+
+async function completeTenantIssueIntake(phone, messageText, tenantRecord, placeholderIssue) {
+  const issueId = placeholderIssue.id;
+  console.log(`[Flow T1] Complete issue intake — phone: ${phone}`);
+
+  try {
+    const f = tenantRecord.fields;
+    const tenantName   = (f['Full Name']    || '').trim();
+    const unitAddress  = (f['Unit Address'] || '').trim();
+    const propertyName = (f['Property Name'] || '').trim();
+    const agentPhone   = (placeholderIssue.fields['Agent Whatsapp number'] || '').trim();
+
+    const patched = await airtableUpdate('WP_Issues', issueId, {
+      'Issue Title':   `${tenantName} — ${messageText.slice(0, 60)}`,
+      'Description':   messageText,
+    });
+    if (patched.error) throw new Error(`Issue PATCH failed: ${JSON.stringify(patched.error)}`);
+
+    const issueRef = placeholderIssue.fields['Issue Ref'] || issueId.slice(-6).toUpperCase();
+
+    await sendWhatsApp(phone,
+      `Hi ${tenantName}, your maintenance request has been received.\n\n` +
+      `Reference: WP-${issueRef}\n` +
+      `Issue: ${messageText.slice(0, 80)}${messageText.length > 80 ? '...' : ''}\n\n` +
+      `Your agent has been notified and will be in touch shortly. Please do not resend this message.`
+    );
+
+    if (agentPhone) {
+      await sendWhatsApp(agentPhone,
+        `🔧 New maintenance issue logged.\n\n` +
+        `Ref: WP-${issueRef}\n` +
+        `Tenant: ${tenantName}\n` +
+        `Unit: ${unitAddress || 'unknown'}\n` +
+        `Property: ${propertyName || 'unknown'}\n` +
+        `Issue: ${messageText}\n\n` +
+        `Reply *ASSIGN WP-${issueRef}* to assign a contractor, or *1* to see all your open issues.`
+      );
+    } else {
+      console.warn(`[Flow T1] No agent phone on tenant record — skipping agent notification`);
+      logToAxiom('warn', 'flow_t1_no_agent_phone', { phone, tenantName });
+    }
+
+    console.log(`[Flow T1] Complete — Ref: WP-${issueRef} | Tenant: ${tenantName}`);
+    logToAxiom('info', 'flow_t1_complete', { phone, issueRef: String(issueRef), tenantName });
+
+  } catch (err) {
+    console.error(`[Flow T1 ERROR — complete]`, err.message);
+    logToAxiom('error', 'flow_t1_complete_error', { phone, error: err.message });
+    await alertShawn('Flow T1 (complete issue intake)', err.message, phone);
   }
 }
 
@@ -1754,9 +1882,34 @@ async function routeMessage(phone, messageText) {
       return;
     }
 
-    // Check 5: any other tenant message = tenant main menu (Menu Spec v1.1 — replaces
-    // straight-to-Flow-1 intake from V1). Flow T1 wiring for option 1 is Phase 3 —
-    // handleTenantIssue (Flow 1) is intentionally unreachable from here until then.
+    // Check 5: tenant has a placeholder issue awaiting its real description
+    // (Group 1, Menu Phase 3 — see startTenantIssueIntake/completeTenantIssueIntake
+    // header comment for why this exists instead of a session-state marker).
+    const placeholderIssues = await airtableGet(
+      'WP_Issues',
+      `AND({Tenant Whatsapp Number} = '${phone}', {Issue Resolution Status} = 'Open', {Description} = '${TENANT_ISSUE_INTAKE_PLACEHOLDER}')`,
+      { sort: [{ field: 'Date Reported', direction: 'desc' }], maxRecords: 1 }
+    );
+    if (placeholderIssues.length > 0) {
+      // Guard: a bare menu digit here is almost certainly a mis-tap, not a real
+      // description — re-prompt instead of logging "1" as the issue text.
+      if (text === '1' || text === '2' || text === '3') {
+        await sendWhatsApp(phone, `Please describe the issue in one or two sentences.`);
+        return;
+      }
+      await completeTenantIssueIntake(phone, text, record, placeholderIssues[0]);
+      return;
+    }
+
+    // Check 6: tenant replied "1" to the main menu with no active mid-flow state
+    // above — start Flow T1 intake. Any other message = tenant main menu (Menu
+    // Spec v1.1 — replaces straight-to-Flow-1 intake from V1). Options 2/3 are
+    // not wired yet (Groups 2/3, held) — they fall through to the menu, matching
+    // the confirmed Phase 2 end state.
+    if (text === '1') {
+      await startTenantIssueIntake(phone, record);
+      return;
+    }
     await showTenantMainMenu(phone, record);
     return;
   }
