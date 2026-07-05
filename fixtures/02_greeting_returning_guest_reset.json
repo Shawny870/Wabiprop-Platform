@@ -1,0 +1,25 @@
+{
+  "name": "greeting: known guest in NEW state is reset to AWAITING_DETAILS, no duplicate record",
+  "seed": {
+    "WS_Rooms": [
+      { "id": "recR1", "fields": { "Room Name": "Room 1", "Status": "Available" } }
+    ],
+    "WS_Rates": [
+      { "id": "recRATE1", "fields": { "Rate Name": "Standard Overnight", "Rate Type": "Per Night", "Amount": 350, "Active": true } }
+    ],
+    "WS_Guests": [
+      { "id": "recG1", "fields": { "Guest Name": "John Smith", "Phone Number": "27821234567", "Session State": "NEW" } }
+    ],
+    "WS_Cleaners": []
+  },
+  "message": { "from": "27821234567", "text": "hello" },
+  "expect": {
+    "status": 200,
+    "writes": [
+      { "op": "update", "table": "WS_Guests", "id": "recG1", "fields": { "Session State": "AWAITING_DETAILS" } }
+    ],
+    "sends": [
+      { "to": "27821234567", "includes": ["Welcome to Villa Liza Guest Lodge", "*1 room* available"] }
+    ]
+  }
+}

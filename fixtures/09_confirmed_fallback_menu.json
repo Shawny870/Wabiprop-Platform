@@ -1,0 +1,17 @@
+{
+  "name": "CONFIRMED fallback: unrecognised input re-shows the numbered menu (F9), no writes",
+  "seed": {
+    "WS_Guests": [
+      { "id": "recG1", "fields": { "Guest Name": "John Smith", "Phone Number": "27821234567", "Session State": "CONFIRMED" } }
+    ],
+    "WS_Cleaners": []
+  },
+  "message": { "from": "27821234567", "text": "what time is breakfast?" },
+  "expect": {
+    "status": 200,
+    "writes": [],
+    "sends": [
+      { "to": "27821234567", "includes": ["Hi John Smith", "1 - I'm at the gate", "2 - Cancel my booking"] }
+    ]
+  }
+}

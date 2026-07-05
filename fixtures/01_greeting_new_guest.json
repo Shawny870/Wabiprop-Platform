@@ -1,0 +1,43 @@
+{
+  "name": "greeting: unknown number gets rates + overnight instructions, guest record created (F10)",
+  "seed": {
+    "WS_Rooms": [
+      { "id": "recR1", "fields": { "Room Name": "Room 1", "Status": "Available" } },
+      { "id": "recR2", "fields": { "Room Name": "Room 2", "Status": "Available" } },
+      { "id": "recR3", "fields": { "Room Name": "Room 3", "Status": "Available" } }
+    ],
+    "WS_Rates": [
+      { "id": "recRATE1", "fields": { "Rate Name": "Standard Overnight", "Rate Type": "Per Night", "Amount": 350, "Active": true } }
+    ],
+    "WS_Guests": [],
+    "WS_Cleaners": []
+  },
+  "message": { "from": "27821234567", "text": "Hi" },
+  "expect": {
+    "status": 200,
+    "writes": [
+      {
+        "op": "create", "table": "WS_Guests",
+        "fields": {
+          "Guest Name": "Unknown",
+          "Phone Number": "27821234567",
+          "Guest Type": "WhatsApp",
+          "Session State": "AWAITING_DETAILS",
+          "First Visit": "re:^\\d{4}-\\d{2}-\\d{2}$"
+        }
+      }
+    ],
+    "sends": [
+      {
+        "to": "27821234567",
+        "includes": [
+          "Welcome to Villa Liza Guest Lodge",
+          "*3 rooms* available",
+          "Standard Overnight: R350 per night",
+          "overnight booking",
+          "reply HOURLY"
+        ]
+      }
+    ]
+  }
+}

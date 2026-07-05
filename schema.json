@@ -1,0 +1,286 @@
+{
+  "baseId": "appgtVqX1dK88lpRT",
+  "scope": "WS_",
+  "tables": {
+    "WS_Rooms": {
+      "id": "tblHb9hGcz32APep9",
+      "fields": {
+        "Room Name": {
+          "id": "fldkcC8Fu5h2AgWnO",
+          "type": "singleLineText"
+        },
+        "Room Number": {
+          "id": "fldhzjwOtStiwZAfk",
+          "type": "number"
+        },
+        "Status": {
+          "id": "fldgDQAn40U9tNnCl",
+          "type": "singleSelect"
+        },
+        "Bed Type": {
+          "id": "fldIuD7hsQ4iYvpDR",
+          "type": "singleSelect"
+        },
+        "Notes": {
+          "id": "fldBW49ggamOvM7Px",
+          "type": "multilineText"
+        },
+        "WS_Bookings": {
+          "id": "fldoDII7TBNvNpU4R",
+          "type": "multipleRecordLinks"
+        },
+        "Current Rate": {
+          "id": "fldDoxJess7uLpPwZ",
+          "type": "multipleRecordLinks"
+        },
+        "WS_Cleaners": {
+          "id": "fldGTqjGoNnU5cAYe",
+          "type": "multipleRecordLinks"
+        }
+      }
+    },
+    "WS_Guests": {
+      "id": "tblVtAAJW9cLQh2wB",
+      "fields": {
+        "Guest Name": {
+          "id": "fldF2TsG5ROVV5W6J",
+          "type": "singleLineText"
+        },
+        "Phone Number": {
+          "id": "fldLa51kLbUqePiCT",
+          "type": "phoneNumber"
+        },
+        "ID Number": {
+          "id": "fldQda5tRZbqqpNi8",
+          "type": "singleLineText"
+        },
+        "Guest Type": {
+          "id": "fldSfwH2ZCTUrEi6Y",
+          "type": "singleSelect"
+        },
+        "First Visit": {
+          "id": "fldycfTqZfyV3MvT5",
+          "type": "date"
+        },
+        "Notes": {
+          "id": "fld1ETcOIEdx4ZNPX",
+          "type": "multilineText"
+        },
+        "WS_Bookings": {
+          "id": "fldhkF3W6512oMUED",
+          "type": "multipleRecordLinks"
+        },
+        "Session State": {
+          "id": "fldazcX64BU7Yl7JY",
+          "type": "singleSelect"
+        }
+      }
+    },
+    "WS_Bookings": {
+      "id": "tblHtwG483E9kXoad",
+      "fields": {
+        "Booking Ref": {
+          "id": "fldGIRJoWfmeDsF6G",
+          "type": "singleLineText"
+        },
+        "Guest": {
+          "id": "fldt1fUOiXyzRZ84m",
+          "type": "multipleRecordLinks"
+        },
+        "Room": {
+          "id": "fld5qtyGYrIc5KeKR",
+          "type": "multipleRecordLinks"
+        },
+        "Check In": {
+          "id": "fldS3IgeAIQinW9v3",
+          "type": "dateTime"
+        },
+        "Check Out": {
+          "id": "fld8DoXBUSQWl6cbM",
+          "type": "dateTime"
+        },
+        "Booking Type": {
+          "id": "fldBbfx3iOeJjniJm",
+          "type": "singleSelect"
+        },
+        "Source": {
+          "id": "fldTgDTwRDKh6YPbf",
+          "type": "singleSelect"
+        },
+        "Status": {
+          "id": "fldf2NiwNNUaDR2Zv",
+          "type": "singleSelect"
+        },
+        "Nights": {
+          "id": "fldgqHtyMWRs9lvBh",
+          "type": "formula"
+        },
+        "Amount Due": {
+          "id": "fld6LlM1SuBxNCtsS",
+          "type": "currency"
+        },
+        "Amount Paid": {
+          "id": "fld8opbm9LP7Kq57V",
+          "type": "currency"
+        },
+        "Payment Method": {
+          "id": "fld57tOf0j4UictwO",
+          "type": "singleSelect"
+        },
+        "Payment Status": {
+          "id": "fldGEbc8DIIxAlspk",
+          "type": "singleSelect"
+        },
+        "Notes": {
+          "id": "fldn5xj8nRC8bkwPE",
+          "type": "multilineText"
+        },
+        "Special Requests": {
+          "id": "fldGTnxER9qDFGKyq",
+          "type": "multilineText"
+        },
+        "Logged By": {
+          "id": "fldori7er07XgUULO",
+          "type": "singleSelect"
+        },
+        "ETA": {
+          "id": "fldLKd5RUSQmksBM4",
+          "type": "singleLineText"
+        },
+        "Checkout Confirmed": {
+          "id": "fldjyjsiSRtxXMg3g",
+          "type": "checkbox"
+        },
+        "Rate Applied": {
+          "id": "fldnPZfDS1XIMtNwk",
+          "type": "multipleRecordLinks"
+        },
+        "Checked In At": {
+          "id": "fldjFVJkr3n9lMbkj",
+          "type": "dateTime"
+        }
+      }
+    },
+    "WS_Rates": {
+      "id": "tblgZbjxaFmHmmmvF",
+      "fields": {
+        "Rate Name": {
+          "id": "fldr0Ca7iDrgBeZwd",
+          "type": "singleLineText"
+        },
+        "Rate Type": {
+          "id": "fldfwc7iP0fCSvb9O",
+          "type": "singleSelect"
+        },
+        "Amount": {
+          "id": "fldeTm0oD9w7S0bqD",
+          "type": "currency"
+        },
+        "Active": {
+          "id": "fldstYH1XQ5zBk9gh",
+          "type": "checkbox"
+        },
+        "Applies To": {
+          "id": "fldxdm25II9cZsKZS",
+          "type": "singleSelect"
+        },
+        "Notes": {
+          "id": "fld5BeF4qjm3jd9WX",
+          "type": "multilineText"
+        },
+        "WS_Rooms": {
+          "id": "fldXXXJvx3cq5Ws5N",
+          "type": "multipleRecordLinks"
+        },
+        "WS_Bookings": {
+          "id": "fldGFHxoq3ZMFSrJq",
+          "type": "multipleRecordLinks"
+        }
+      }
+    },
+    "WS_Cleaners": {
+      "id": "tblPtPjwUcAHkQ6l8",
+      "fields": {
+        "Cleaner Name": {
+          "id": "fldnRYvgt5RZPU32s",
+          "type": "singleLineText"
+        },
+        "Phone Number": {
+          "id": "fldyKMHTkW94IZN90",
+          "type": "phoneNumber"
+        },
+        "Assigned Rooms": {
+          "id": "flduxMfajS6KIOKsV",
+          "type": "multipleRecordLinks"
+        },
+        "Active": {
+          "id": "fldiN0izbqMGD4H3F",
+          "type": "checkbox"
+        },
+        "Notes": {
+          "id": "fldlOPboO0Fg2QWAV",
+          "type": "multilineText"
+        }
+      }
+    },
+    "WS_Owners": {
+      "id": "tblXcRPkDsGo1TkT9",
+      "fields": {
+        "Owner Name": {
+          "id": "fldADtjESf8zHdsFd",
+          "type": "singleLineText"
+        },
+        "Phone Number": {
+          "id": "fldEStdfamuwlKx85",
+          "type": "singleLineText"
+        },
+        "Email": {
+          "id": "fld7jeApZLmAL8dr4",
+          "type": "singleLineText"
+        },
+        "Allow Anonymous Bookings": {
+          "id": "fldWm9kwxMeTziF5n",
+          "type": "checkbox"
+        },
+        "WS_Properties": {
+          "id": "fldqD3MKT8lHl7eWU",
+          "type": "multipleRecordLinks"
+        }
+      }
+    },
+    "WS_Properties": {
+      "id": "tblC4eIDzUvngU0Ek",
+      "fields": {
+        "Property Name": {
+          "id": "fldtjcenPZMnc3XiC",
+          "type": "singleLineText"
+        },
+        "Owner": {
+          "id": "fld1eX1KVYtzTSgVc",
+          "type": "multipleRecordLinks"
+        },
+        "Anonymous Override Active": {
+          "id": "fldA1yo4GioIe1Qwn",
+          "type": "checkbox"
+        },
+        "Allow Anonymous Overnight": {
+          "id": "fldOHkiYp5kpFH9pI",
+          "type": "checkbox"
+        },
+        "Allow Anonymous Hourly": {
+          "id": "fldvkOG5jx7C1iNwK",
+          "type": "checkbox"
+        },
+        "Max Anonymous Hourly Duration": {
+          "id": "fldBf83JB6wPqoZtY",
+          "type": "number"
+        },
+        "Notify Phone": {
+          "id": "fldAFnFZW4HasRXVt",
+          "type": "singleLineText"
+        }
+      }
+    }
+  },
+  "pulledAt": "2026-07-05T15:58:12.271Z"
+}
