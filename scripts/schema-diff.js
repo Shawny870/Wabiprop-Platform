@@ -5,6 +5,10 @@
 //   node scripts/schema-diff.js           compare live base to schema.json (exit 1 on drift)
 //   node scripts/schema-diff.js --write   (re)generate schema.json from the live base
 //
+// ⚠ --write is a SHAWN-ONLY command, run after a deliberate schema change.
+//   Claude sessions must NEVER run --write to clear a failing diff: a failing
+//   diff means STOP, report the drift, and wait (CLAUDE.md session ritual step 2).
+//
 // Scope: Wabistay tables only (WS_ prefix). Field names in code must come from
 // schema.json — never typed from memory (CLAUDE.md hard rule).
 
