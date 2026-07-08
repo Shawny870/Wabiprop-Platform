@@ -38,7 +38,10 @@ async function airtableGet(table, filterFormula) {
   // F6: log HTTP status so we can see 401/403/404 in logs
   console.log(`[Airtable GET STATUS] ${table} | HTTP ${res.status}`);
   const data = await res.json();
-  if (data.error) console.error(`[Airtable ERROR] ${table}:`, JSON.stringify(data.error));
+  if (data.error) {
+    console.error(`[Airtable ERROR] ${table}:`, JSON.stringify(data.error));
+    logToAxiom('error', 'airtable_get_error', { table, filterFormula, status: res.status, error: JSON.stringify(data.error) });
+  }
   return data.records || [];
 }
 
@@ -54,7 +57,10 @@ async function airtableCreate(table, fields) {
   });
   console.log(`[Airtable CREATE STATUS] ${table} | HTTP ${res.status}`);
   const data = await res.json();
-  if (data.error) console.error(`[Airtable CREATE ERROR] ${table}:`, JSON.stringify(data.error));
+  if (data.error) {
+    console.error(`[Airtable CREATE ERROR] ${table}:`, JSON.stringify(data.error));
+    logToAxiom('error', 'airtable_create_error', { table, status: res.status, error: JSON.stringify(data.error) });
+  }
   return data;
 }
 
@@ -70,7 +76,10 @@ async function airtableUpdate(table, recordId, fields) {
   });
   console.log(`[Airtable UPDATE STATUS] ${table} | HTTP ${res.status}`);
   const data = await res.json();
-  if (data.error) console.error(`[Airtable UPDATE ERROR] ${table}:`, JSON.stringify(data.error));
+  if (data.error) {
+    console.error(`[Airtable UPDATE ERROR] ${table}:`, JSON.stringify(data.error));
+    logToAxiom('error', 'airtable_update_error', { table, recordId, status: res.status, error: JSON.stringify(data.error) });
+  }
   return data;
 }
 
@@ -105,7 +114,10 @@ async function sendWhatsApp(to, message) {
   });
   console.log(`[WhatsApp SEND STATUS] HTTP ${res.status}`);
   const data = await res.json();
-  if (data.error) console.error(`[WhatsApp SEND ERROR]:`, JSON.stringify(data.error));
+  if (data.error) {
+    console.error(`[WhatsApp SEND ERROR]:`, JSON.stringify(data.error));
+    logToAxiom('error', 'whatsapp_send_error', { to, status: res.status, error: JSON.stringify(data.error) });
+  }
   return data;
 }
 
@@ -162,6 +174,7 @@ async function handleMessage(from, messageText) {
       if (cleaningRooms.length > 0) {
         const room = cleaningRooms[0];
         await airtableUpdate('WS_Rooms', room.id, { 'Status': 'Available' });
+        logToAxiom('info', 'state_transition', { phone, roomId: room.id, roomName: room.fields['Room Name'], from: 'Cleaning', to: 'Available', reason: 'cleaner_done' });
         await sendWhatsApp(phone, `Thank you! ${room.fields['Room Name']} is marked as clean and available. ✅`);
         if (OWNER_PHONE) {
           await sendWhatsApp(OWNER_PHONE, `✅ ${room.fields['Room Name']} has been cleaned and is now available for new bookings.`);
@@ -296,6 +309,7 @@ async function handleMessage(from, messageText) {
       });
     }
     await airtableUpdate('WS_Guests', guest.id, { 'Session State': 'CONFIRMED' });
+    logToAxiom('info', 'state_transition', { phone, guestId: guest.id, from: 'AWAITING_ETA', to: 'CONFIRMED', eta });
     await sendWhatsApp(phone,
       `Perfect! We'll have your room ready for you. 🛏️\n\nSee you at *${eta}*.\n\nWhen you arrive, reply with a number:\n1 - I'm at the gate\n2 - Cancel my booking\n\nWe look forward to hosting you at Villa Liza! 🌟`
     );
@@ -341,6 +355,7 @@ async function handleMessage(from, messageText) {
 
       // Step 5: set session → CHECKED_IN
       await airtableUpdate('WS_Guests', guest.id, { 'Session State': 'CHECKED_IN' });
+      logToAxiom('info', 'state_transition', { phone, guestId: guest.id, from: 'CONFIRMED', to: 'CHECKED_IN', assignedRoom: assignedRoomName || null });
 
       // Step 6: notify party
       if (notifyPhone) {
@@ -370,6 +385,7 @@ async function handleMessage(from, messageText) {
         await airtableUpdate('WS_Bookings', bookings[0].id, { 'Status': 'Cancelled' });
       }
       await airtableUpdate('WS_Guests', guest.id, { 'Session State': 'NEW' });
+      logToAxiom('info', 'state_transition', { phone, guestId: guest.id, from: 'CONFIRMED', to: 'NEW', reason: 'cancel' });
       await sendWhatsApp(phone, `Your booking has been cancelled. No problem at all — we hope to see you another time. 👋`);
       return;
     }
@@ -431,6 +447,7 @@ When you're ready to leave, reply with a number:
         }
       }
       await airtableUpdate('WS_Guests', guest.id, { 'Session State': 'NEW' });
+      logToAxiom('info', 'state_transition', { phone, guestId: guest.id, from: 'CHECKED_IN', to: 'NEW', reason: 'checkout', roomName });
       await sendWhatsApp(phone,
         `Thank you for staying with us at Villa Liza! 🌟\n\nWe hope you enjoyed your stay. You're welcome back anytime.\n\nSafe travels! 👋`
       );
