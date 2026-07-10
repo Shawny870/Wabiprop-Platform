@@ -92,6 +92,10 @@ async function airtableGetBookingsByGuestId(guestId, status) {
 
 async function sendWhatsApp(to, message) {
   console.log(`[WhatsApp SEND] to: ${to} | msg: ${message.slice(0, 80)}...`);
+  const maskedToken = WA_ACCESS_TOKEN
+    ? `${WA_ACCESS_TOKEN.slice(0, 10)}...${WA_ACCESS_TOKEN.slice(-4)}`
+    : 'unset';
+  console.log(`[WhatsApp SEND TOKEN] ${maskedToken}`);
   // F3: was v19.0 — now v25.0 to match webhook subscription version
   const res = await fetch(`https://graph.facebook.com/v25.0/${WA_PHONE_NUMBER_ID}/messages`, {
     method: 'POST',
@@ -108,6 +112,7 @@ async function sendWhatsApp(to, message) {
   });
   console.log(`[WhatsApp SEND STATUS] HTTP ${res.status}`);
   const data = await res.json();
+  console.log(`[WhatsApp SEND RESPONSE]`, JSON.stringify(data));
   if (data.error) {
     console.error(`[WhatsApp SEND ERROR]:`, JSON.stringify(data.error));
     logToAxiom('error', 'whatsapp_send_error', { to, status: res.status, error: JSON.stringify(data.error) });
