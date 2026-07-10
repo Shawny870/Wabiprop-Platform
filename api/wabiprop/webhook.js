@@ -50,24 +50,48 @@ function logToAxiom(level, event, detail = {}) {
 
 // ─── AIRTABLE HELPERS ────────────────────────────────────────────────────────
 
+// Follows Airtable's offset-based pagination past the 100-record-per-request
+// default so tables larger than 100 records (e.g. Tenants/Issues/Properties once
+// Jojo + Rochelle are both onboarded, ~120+ properties combined) return everything
+// that matches, not just the first page. Behaviour for options.maxRecords is
+// unchanged -- Airtable never returns an offset once that cap is reached, so the
+// loop below naturally runs once for any existing maxRecords:1 caller.
 async function airtableGet(table, filterFormula, options = {}) {
-  let url = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(table)}?filterByFormula=${encodeURIComponent(filterFormula)}`;
+  let baseUrl = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(table)}?filterByFormula=${encodeURIComponent(filterFormula)}`;
   if (options.sort) {
     options.sort.forEach((s, i) => {
-      url += `&sort%5B${i}%5D%5Bfield%5D=${encodeURIComponent(s.field)}&sort%5B${i}%5D%5Bdirection%5D=${encodeURIComponent(s.direction)}`;
+      baseUrl += `&sort%5B${i}%5D%5Bfield%5D=${encodeURIComponent(s.field)}&sort%5B${i}%5D%5Bdirection%5D=${encodeURIComponent(s.direction)}`;
     });
   }
   if (options.maxRecords) {
-    url += `&maxRecords=${options.maxRecords}`;
+    baseUrl += `&maxRecords=${options.maxRecords}`;
   }
-  console.log(`[Airtable GET] ${table} | ${filterFormula}`);
-  const res = await fetch(url, {
-    headers: { Authorization: `Bearer ${AIRTABLE_API_KEY}` }
-  });
-  console.log(`[Airtable GET STATUS] ${table} | HTTP ${res.status}`);
-  const data = await res.json();
-  if (data.error) console.error(`[Airtable ERROR] ${table}:`, JSON.stringify(data.error));
-  return data.records || [];
+
+  let allRecords = [];
+  let offset = null;
+  let page = 0;
+  const MAX_PAGES = 50; // safety cap -- 50 x 100 = 5,000 records; stops a malformed offset from looping forever
+
+  do {
+    const url = offset ? `${baseUrl}&offset=${encodeURIComponent(offset)}` : baseUrl;
+    console.log(`[Airtable GET] ${table} | page ${page + 1} | ${filterFormula}`);
+    const res = await fetch(url, { headers: { Authorization: `Bearer ${AIRTABLE_API_KEY}` } });
+    console.log(`[Airtable GET STATUS] ${table} | HTTP ${res.status}`);
+    const data = await res.json();
+    if (data.error) {
+      console.error(`[Airtable ERROR] ${table}:`, JSON.stringify(data.error));
+      break; // stop paging on error -- return whatever was accumulated, matching prior error-tolerant behaviour
+    }
+    allRecords = allRecords.concat(data.records || []);
+    offset = data.offset || null;
+    page++;
+  } while (offset && page < MAX_PAGES);
+
+  if (offset && page >= MAX_PAGES) {
+    console.warn(`[Airtable GET] ${table} — hit MAX_PAGES safety cap (${MAX_PAGES}) with more data still available.`);
+  }
+
+  return allRecords;
 }
 
 async function airtableCreate(table, fields) {
@@ -199,8 +223,9 @@ async function identifySender(phone) {
 
 // ─── TENANT MAIN MENU ─────────────────────────────────────────────────────────
 // Menu Spec v1.1 Section 4.1 — shown on any fresh tenant inbound with no active
-// mid-flow state. Phase 2 scope: display only. Replying 1/2/3 loops back to this
-// same menu until Phase 3 wires up Flow T1 (and later Phases 4/5 for T2/T3).
+// mid-flow state. Option 1 is wired to Flow T1 as of Group 1 (Menu Phase 3) —
+// see startTenantIssueIntake in routeMessage. Options 2/3 (Flow T2/T3, Groups
+// 2/3) are not built yet and still loop back to this same menu.
 
 async function showTenantMainMenu(phone, tenantRecord) {
   const fullName = (tenantRecord.fields['Full Name'] || '').trim();
@@ -220,6 +245,14 @@ async function showTenantMainMenu(phone, tenantRecord) {
 // Writes:  WP_Issues (creates new record, Status = Open)
 // Sends:   tenant acknowledgement + agent notification
 // Error:   logs to console + alerts Shawn, never sends tenant ack if create failed
+//
+// SUPERSEDED for the tenant-menu path by startTenantIssueIntake /
+// completeTenantIssueIntake below (Group 1, Menu Phase 3) — the menu requires a
+// two-step "ask for a description, then receive it" exchange that this one-shot
+// function (message = description, in a single call) can't provide. Left in
+// place rather than removed (Rule 21 — no unauthorised removal without sign-off);
+// it had zero call sites before Group 1 and has zero now. Flagging for Engineer:
+// worth a deliberate decision on whether to delete it in a future pass.
 
 async function handleTenantIssue(phone, messageText, tenantRecord) {
   console.log(`[Flow 1] Tenant intake — phone: ${phone}`);
@@ -297,7 +330,7 @@ async function handleTenantIssue(phone, messageText, tenantRecord) {
         `Unit: ${unitAddress || 'unknown'}\n` +
         `Property: ${propertyName || 'unknown'}\n` +
         `Issue: ${messageText}\n\n` +
-        `Reply *1* to assign a contractor.`;
+        `Reply *ASSIGN WP-${issueRef}* to assign a contractor, or *1* to see all your open issues.`;
 
       logToAxiom('info', 'flow1_agent_notify_attempt', { phone, agentPhone, issueRef });
       const agentSend = await sendWhatsApp(agentPhone, agentMsg);
@@ -319,29 +352,378 @@ async function handleTenantIssue(phone, messageText, tenantRecord) {
   }
 }
 
-// ─── FLOW 2a — AGENT REQUESTS CONTRACTOR LIST ───────────────────────────────
-// Trigger: agent sends "1"
-// Reads:   WP_Issues (most recent Open for this agent), WP_Contractors (all Active)
-// Writes:  nothing — list is stateless; selection arrives as "Assign N" command
-// Sends:   numbered contractor list
+// ─── FLOW T1 — TENANT ISSUE INTAKE FROM MENU OPTION 1 (Group 1, Menu Phase 3) ─
+// Trigger (start):    tenant replies "1" to the main menu, with no placeholder
+//                      issue already pending
+// Trigger (complete):  tenant's next message, once a placeholder issue exists
+//
+// ARCHITECTURE NOTE — the thing Group 4-6's flat-command pattern didn't need,
+// flagged explicitly per instruction:
+// Menu Spec Flow T1 requires a genuine two-turn exchange — "1" -> "please
+// describe your issue" -> [tenant's next message] -> issue created. Every flat
+// command built in Groups 4-6 (ASSIGN WP-N, ATTEND WP-N, OWNER WP-N, CODE,
+// APPROVE, REJECT) carries its own identifying context (a WP-N or a code) in
+// every message, so no memory of the prior turn was ever needed. This flow's
+// second turn is bare free text with NO identifying token in it at all — the
+// same structural problem the *existing* Checks 1-3 already solve for
+// continuing an existing issue (state lives on the WP_Issues record itself, via
+// Issue Resolution Status, not in any session store). But those three states
+// only cover ALREADY-CREATED issues; there was no durable marker for "a new
+// issue was started but not yet described" because no such issue exists yet
+// to carry a status.
+//
+// SOLUTION — no new schema, reuses the existing pattern instead of requesting
+// a new Issue Resolution Status option: create the WP_Issues record immediately
+// on "1", with status Open (an existing, valid value) and a recognisable
+// placeholder in Description ("(awaiting description)"). The router's new
+// Check 5 (below, in routeMessage) looks for exactly that placeholder on an
+// Open issue for this tenant — durable, Airtable-backed, same shape as every
+// other mid-flow check in this file. The agent is NOT notified when the
+// placeholder is created — only once a real description lands — so a tenant
+// who presses 1 and never follows up doesn't generate a false alert.
+//
+// If this isn't the right tradeoff (e.g. a real Issue Resolution Status option
+// like "Awaiting Description" is preferred instead), that's a schema change
+// requiring the usual Airtable-UI sign-off (Rule 10) — flagging the option,
+// not assuming it.
 
-async function handleAgentShowContractors(phone, agentRecord) {
-  console.log(`[Flow 2a] Show contractors — agent: ${phone}`);
+const TENANT_ISSUE_INTAKE_PLACEHOLDER = '(awaiting description)';
+// Distinct placeholder for Flow T3 (Group 3) — same technique, different marker
+// string, so Check 5 in routeMessage can tell a pending issue-report apart from
+// a pending general enquiry without needing a new Issue Resolution Status value.
+const TENANT_ENQUIRY_PLACEHOLDER = '(awaiting enquiry details)';
+
+async function startTenantIssueIntake(phone, tenantRecord) {
+  console.log(`[Flow T1] Start issue intake — phone: ${phone}`);
 
   try {
-    // Find most recent Open issue for this agent
-    const issueUrl =
-      `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent('WP_Issues')}` +
-      `?filterByFormula=${encodeURIComponent(`AND({Agent Whatsapp number} = '${phone}', {Issue Resolution Status} = 'Open')`)}` +
-      `&sort%5B0%5D%5Bfield%5D=Date%20Reported&sort%5B0%5D%5Bdirection%5D=desc` +
-      `&maxRecords=1`;
+    const f = tenantRecord.fields;
+    const tenantName = (f['Full Name'] || '').trim();
+    const agentPhone = (f['Agent WhatsApp Number'] || '').trim();
 
-    const issueRes  = await fetch(issueUrl, { headers: { Authorization: `Bearer ${AIRTABLE_API_KEY}` } });
-    const issueData = await issueRes.json();
-    const openIssues = issueData.records || [];
+    const created = await airtableCreate('WP_Issues', {
+      'Issue Title':             `${tenantName} — ${TENANT_ISSUE_INTAKE_PLACEHOLDER}`,
+      'Description':             TENANT_ISSUE_INTAKE_PLACEHOLDER,
+      'Issue Resolution Status': 'Open',
+      'Urgency':                 'Routine',
+      'Tenant Whatsapp Number':  phone,
+      'Agent Whatsapp number':   agentPhone,
+      'Date Reported':           new Date().toISOString(),
+    });
+    if (!created.id) throw new Error(`Placeholder issue create failed: ${JSON.stringify(created.error || created)}`);
+
+    await sendWhatsApp(phone, `Please describe the issue in one or two sentences.`);
+
+    logToAxiom('info', 'flow_t1_intake_started', { phone, issueId: created.id });
+    console.log(`[Flow T1] Placeholder issue ${created.id} created — awaiting description`);
+
+  } catch (err) {
+    console.error(`[Flow T1 ERROR — start]`, err.message);
+    logToAxiom('error', 'flow_t1_start_error', { phone, error: err.message });
+    await alertShawn('Flow T1 (start issue intake)', err.message, phone);
+  }
+}
+
+async function completeTenantIssueIntake(phone, messageText, tenantRecord, placeholderIssue) {
+  const issueId = placeholderIssue.id;
+  console.log(`[Flow T1] Complete issue intake — phone: ${phone}`);
+
+  try {
+    const f = tenantRecord.fields;
+    const tenantName   = (f['Full Name']    || '').trim();
+    const unitAddress  = (f['Unit Address'] || '').trim();
+    const propertyName = (f['Property Name'] || '').trim();
+    const agentPhone   = (placeholderIssue.fields['Agent Whatsapp number'] || '').trim();
+
+    const patched = await airtableUpdate('WP_Issues', issueId, {
+      'Issue Title':   `${tenantName} — ${messageText.slice(0, 60)}`,
+      'Description':   messageText,
+    });
+    if (patched.error) throw new Error(`Issue PATCH failed: ${JSON.stringify(patched.error)}`);
+
+    const issueRef = placeholderIssue.fields['Issue Ref'] || issueId.slice(-6).toUpperCase();
+
+    await sendWhatsApp(phone,
+      `Hi ${tenantName}, your maintenance request has been received.\n\n` +
+      `Reference: WP-${issueRef}\n` +
+      `Issue: ${messageText.slice(0, 80)}${messageText.length > 80 ? '...' : ''}\n\n` +
+      `Your agent has been notified and will be in touch shortly. Please do not resend this message.`
+    );
+
+    if (agentPhone) {
+      await sendWhatsApp(agentPhone,
+        `🔧 New maintenance issue logged.\n\n` +
+        `Ref: WP-${issueRef}\n` +
+        `Tenant: ${tenantName}\n` +
+        `Unit: ${unitAddress || 'unknown'}\n` +
+        `Property: ${propertyName || 'unknown'}\n` +
+        `Issue: ${messageText}\n\n` +
+        `Reply *ASSIGN WP-${issueRef}* to assign a contractor, or *1* to see all your open issues.`
+      );
+    } else {
+      console.warn(`[Flow T1] No agent phone on tenant record — skipping agent notification`);
+      logToAxiom('warn', 'flow_t1_no_agent_phone', { phone, tenantName });
+    }
+
+    console.log(`[Flow T1] Complete — Ref: WP-${issueRef} | Tenant: ${tenantName}`);
+    logToAxiom('info', 'flow_t1_complete', { phone, issueRef: String(issueRef), tenantName });
+
+  } catch (err) {
+    console.error(`[Flow T1 ERROR — complete]`, err.message);
+    logToAxiom('error', 'flow_t1_complete_error', { phone, error: err.message });
+    await alertShawn('Flow T1 (complete issue intake)', err.message, phone);
+  }
+}
+
+// ─── FLOW T2 — TENANT REQUESTS A CALL (Group 2, Menu Phase 4) ──────────────
+// Trigger: tenant replies "2" to the main menu, with no active mid-flow state
+// Reads:   WP_Tenants (already fetched by router — passed in as tenantRecord)
+// Writes:  WP_Issues (creates new record, Status = Call Requested)
+// Sends:   tenant confirmation + agent notification
+//
+// One-shot, unlike Flow T1 — per Brief and explicit instruction: "No
+// callback-time capture. No new conversational state beyond this single
+// exchange." No reason is asked for or collected, so this needs none of Flow
+// T1's placeholder-record technique — "2" is the complete trigger in a single
+// message, same flat-command shape as Groups 4-6's commands.
+//
+// Router-side note: "Call Requested" was already in the mid-flow check set
+// (Check 4) before this flow existed (commit 8ebd505) — confirmed still true
+// this session. That check's re-prompt path is untouched; this only adds the
+// trigger that creates the Call Requested record in the first place.
+//
+// Composes correctly with Group 1's placeholder guard without any extra work:
+// if a tenant has a pending Flow T1 placeholder issue and sends "2" instead of
+// their description, Check 5 (Group 1) already intercepts bare "1"/"2"/"3" in
+// that state and re-prompts for the description rather than falling through
+// here — a mid-report tenant can't accidentally abandon it by hitting 2.
+
+async function handleTenantCallRequest(phone, tenantRecord) {
+  console.log(`[Flow T2] Call request — phone: ${phone}`);
+
+  try {
+    const f = tenantRecord.fields;
+    const tenantName      = (f['Full Name']             || '').trim();
+    const tenantFirstName = tenantName.split(/\s+/)[0] || 'A tenant';
+    const agentPhone      = (f['Agent WhatsApp Number']  || '').trim();
+
+    const created = await airtableCreate('WP_Issues', {
+      'Issue Title':             `${tenantName} — call requested`,
+      'Description':             'Tenant requested a call back.',
+      'Issue Resolution Status': 'Call Requested',
+      'Urgency':                 'Routine',
+      'Tenant Whatsapp Number':  phone,
+      'Agent Whatsapp number':   agentPhone,
+      'Date Reported':           new Date().toISOString(),
+    });
+    if (!created.id) throw new Error(`Call request issue create failed: ${JSON.stringify(created.error || created)}`);
+
+    const issueRef = created.fields?.['Issue Ref'] || created.id.slice(-6).toUpperCase();
+
+    await sendWhatsApp(phone, `Thanks — your agent will call you shortly.`);
+
+    if (agentPhone) {
+      // Core wording matches what was specified exactly; Ref: WP-{N} appended
+      // for consistency with every other agent notification in this file (so
+      // STATUS WP-N works on it later) -- a small addition, flagging it as
+      // such rather than folding it in silently.
+      await sendWhatsApp(agentPhone,
+        `📞 ${tenantFirstName} (${phone}) has requested a call. Ref: WP-${issueRef}`
+      );
+    } else {
+      console.warn(`[Flow T2] No agent phone on tenant record — skipping agent notification`);
+      logToAxiom('warn', 'flow_t2_no_agent_phone', { phone, tenantName });
+    }
+
+    console.log(`[Flow T2] Complete — Ref: WP-${issueRef} | Tenant: ${tenantName}`);
+    logToAxiom('info', 'flow_t2_complete', { phone, issueRef: String(issueRef), tenantName });
+
+  } catch (err) {
+    console.error(`[Flow T2 ERROR]`, err.message);
+    logToAxiom('error', 'flow_t2_error', { phone, error: err.message });
+    await alertShawn('Flow T2 (call request)', err.message, phone);
+  }
+}
+
+// ─── FLOW T3 — TENANT OTHER ENQUIRY (Group 3, Menu Phase 5) ─────────────────
+// Trigger (start):    tenant replies "3" to the main menu, with no active
+//                      mid-flow state
+// Trigger (complete):  tenant's next message, once a pending enquiry exists
+// Reads:   WP_Tenants (already fetched by router — passed in as tenantRecord)
+// Writes:  WP_Issues (creates, then updates the same record)
+// Sends:   agent forward + tenant confirmation
+//
+// TWO-TURN OR ONE-SHOT? — reasoning, not a silent pick, per instruction:
+// This DOES need the same two-turn technique Flow T1 (Group 1) built, not
+// Flow T2's (Group 2) one-shot shape. The reason is the trigger content, not
+// the destination: "3" carries no enquiry text with it — the tenant's actual
+// question only exists in their SECOND message, which (like Flow T1's
+// description) is bare free text with no identifying token. Flow T2 avoided
+// this because "2" alone is a complete, self-contained request with nothing
+// further to say. So this reuses Flow T1's placeholder-issue pattern exactly,
+// with its own distinct marker (TENANT_ENQUIRY_PLACEHOLDER) so Check 5 in
+// routeMessage can tell "pending issue report" and "pending enquiry" apart
+// without a new Issue Resolution Status value.
+//
+// STATUS CHOICE — reconciled post-session: sets Issue Resolution Status = Open
+// once the enquiry text is forwarded, NOT Closed. Originally shipped as Closed
+// (reasoning: no ASSIGN/ATTEND/OWNER command fits a general question, so an
+// Open enquiry would sit in Flow A1's list and STALE's scan with no way to
+// close it — same "no HANDLED command yet" gap as Group 9's Call Requested).
+// CEO decision: visibility matters more than list cleanliness — accept that
+// gap for now rather than hide enquiries from the agent's view. If a HANDLED
+// WP-N command (Menu Spec Phase 11 Polish) ever lands, this status choice
+// should be revisited alongside Group 9's Call Requested for the same reason.
+
+async function startTenantEnquiry(phone, tenantRecord) {
+  console.log(`[Flow T3] Start enquiry — phone: ${phone}`);
+
+  try {
+    const f = tenantRecord.fields;
+    const tenantName = (f['Full Name'] || '').trim();
+    const agentPhone = (f['Agent WhatsApp Number'] || '').trim();
+
+    const created = await airtableCreate('WP_Issues', {
+      'Issue Title':             `${tenantName} — ${TENANT_ENQUIRY_PLACEHOLDER}`,
+      'Description':             TENANT_ENQUIRY_PLACEHOLDER,
+      'Issue Resolution Status': 'Open',
+      'Category':                'General',
+      'Urgency':                 'Routine',
+      'Tenant Whatsapp Number':  phone,
+      'Agent Whatsapp number':   agentPhone,
+      'Date Reported':           new Date().toISOString(),
+    });
+    if (!created.id) throw new Error(`Placeholder enquiry create failed: ${JSON.stringify(created.error || created)}`);
+
+    await sendWhatsApp(phone, `Please describe your enquiry and your agent will get back to you.`);
+
+    logToAxiom('info', 'flow_t3_enquiry_started', { phone, issueId: created.id });
+    console.log(`[Flow T3] Placeholder enquiry ${created.id} created — awaiting details`);
+
+  } catch (err) {
+    console.error(`[Flow T3 ERROR — start]`, err.message);
+    logToAxiom('error', 'flow_t3_start_error', { phone, error: err.message });
+    await alertShawn('Flow T3 (start enquiry)', err.message, phone);
+  }
+}
+
+async function completeTenantEnquiry(phone, messageText, tenantRecord, placeholderIssue) {
+  const issueId = placeholderIssue.id;
+  console.log(`[Flow T3] Complete enquiry — phone: ${phone}`);
+
+  try {
+    const f = tenantRecord.fields;
+    const tenantName = (f['Full Name'] || '').trim();
+    const agentPhone = (placeholderIssue.fields['Agent Whatsapp number'] || '').trim();
+
+    const patched = await airtableUpdate('WP_Issues', issueId, {
+      'Issue Title':             `${tenantName} — ${messageText.slice(0, 60)}`,
+      'Description':             messageText,
+      'Issue Resolution Status': 'Open', // reconciled post-session — see file header
+    });
+    if (patched.error) throw new Error(`Issue PATCH failed: ${JSON.stringify(patched.error)}`);
+
+    const issueRef = placeholderIssue.fields['Issue Ref'] || issueId.slice(-6).toUpperCase();
+
+    await sendWhatsApp(phone, `Thanks, your agent has been notified and will be in touch.`);
+
+    if (agentPhone) {
+      await sendWhatsApp(agentPhone,
+        `💬 ${tenantName} sent an enquiry:\n\n"${messageText}"\n\n` +
+        `Ref: WP-${issueRef} · Reply directly to ${phone} to respond.`
+      );
+    } else {
+      console.warn(`[Flow T3] No agent phone on tenant record — skipping agent notification`);
+      logToAxiom('warn', 'flow_t3_no_agent_phone', { phone, tenantName });
+    }
+
+    console.log(`[Flow T3] Complete — Ref: WP-${issueRef} | Tenant: ${tenantName}`);
+    logToAxiom('info', 'flow_t3_complete', { phone, issueRef: String(issueRef), tenantName });
+
+  } catch (err) {
+    console.error(`[Flow T3 ERROR — complete]`, err.message);
+    logToAxiom('error', 'flow_t3_complete_error', { phone, error: err.message });
+    await alertShawn('Flow T3 (complete enquiry)', err.message, phone);
+  }
+}
+
+// ─── FLOW A1 — AGENT OPEN ISSUES LIST ───────────────────────────────────────
+// Trigger: agent sends "1"
+// Reads:   WP_Issues (all Open for this agent, oldest first)
+// Writes:  nothing — stateless list; next action arrives as an "ASSIGN WP-N" command
+// Note:    Replaces the old blind "1 -> contractor list for most-recent-Open-issue"
+//          behaviour (UX-02, Menu Spec v1.1 Section 5.2). An agent managing a real
+//          portfolio can have several Open issues at once — picking "most recent"
+//          silently ignored the rest. There is no session store in this codebase
+//          (Vercel serverless — no durable in-memory state between invocations), so
+//          the fix keeps every step self-contained: the WP-N always travels with the
+//          command instead of being remembered between messages.
+
+async function handleAgentOpenIssuesList(phone, agentRecord) {
+  console.log(`[Flow A1] Open issues list — agent: ${phone}`);
+
+  try {
+    const records = await airtableGet(
+      'WP_Issues',
+      `AND({Agent Whatsapp number} = '${phone}', {Issue Resolution Status} = 'Open')`,
+      { sort: [{ field: 'Date Reported', direction: 'asc' }] }
+    );
+
+    if (records.length === 0) {
+      await sendWhatsApp(phone, `No open issues right now — nothing needs assigning.`);
+      return;
+    }
+
+    const now = Date.now();
+    const MAX_SHOWN = 10;
+    const shown = records.slice(0, MAX_SHOWN);
+
+    const lines = shown.map((rec, i) => {
+      const f = rec.fields;
+      const ref = f['Issue Ref'] || rec.id.slice(-6).toUpperCase();
+      const reportedTs = f['Date Reported'] ? new Date(f['Date Reported']).getTime() : null;
+      const ageHrs = reportedTs ? (now - reportedTs) / 3600000 : null;
+      const ageStr = ageHrs === null ? 'age unknown' : ageHrs < 24 ? `${ageHrs.toFixed(0)}h old` : `${(ageHrs / 24).toFixed(0)}d old`;
+      const title = (f['Issue Title'] || f['Description'] || 'No description').slice(0, 70);
+      return `${i + 1} — WP-${ref} · ${ageStr} · ${title}`;
+    });
+
+    const overflowNote = records.length > MAX_SHOWN
+      ? `\n\n(${records.length - MAX_SHOWN} more open — use STATUS WP-N to check a specific one.)`
+      : '';
+
+    const firstRef = shown[0].fields['Issue Ref'] || shown[0].id.slice(-6).toUpperCase();
+    await sendWhatsApp(phone,
+      `Open issues:\n\n${lines.join('\n')}${overflowNote}\n\n` +
+      `Reply *ASSIGN WP-[issue number]* to assign a contractor, *ATTEND WP-[issue number]* to handle it yourself, or *OWNER WP-[issue number]* to send it to the owner — e.g. ASSIGN WP-${firstRef}, ATTEND WP-${firstRef}, or OWNER WP-${firstRef}.`
+    );
+
+    logToAxiom('info', 'agent_open_issues_list', { phone, count: records.length });
+  } catch (err) {
+    console.error(`[Flow A1 ERROR]`, err.message);
+    await alertShawn('Flow A1 (open issues list)', err.message, phone);
+  }
+}
+
+// ─── FLOW 2a — AGENT REQUESTS CONTRACTOR LIST FOR A SPECIFIC ISSUE ──────────
+// Trigger: agent sends "ASSIGN WP-N" (e.g. "ASSIGN WP-62")
+// Reads:   WP_Issues (this agent's Open issue matching Issue Ref = N), WP_Contractors (all Active)
+// Writes:  nothing — list is stateless; selection arrives as "ASSIGN WP-N M" command
+// Note:    UX-02 fix — issue is explicit (the WP-N in the command), never blindly the
+//          "most recent Open issue for this agent".
+
+async function handleAgentShowContractors(phone, agentRecord, issueRefNum) {
+  console.log(`[Flow 2a] Show contractors — agent: ${phone} | WP-${issueRefNum}`);
+
+  try {
+    const openIssues = await airtableGet(
+      'WP_Issues',
+      `AND({Agent Whatsapp number} = '${phone}', {Issue Ref} = ${issueRefNum}, {Issue Resolution Status} = 'Open')`,
+      { maxRecords: 1 }
+    );
 
     if (openIssues.length === 0) {
-      await sendWhatsApp(phone, `No open issues found to assign.`);
+      await sendWhatsApp(phone, `WP-${issueRefNum} not found, not yours, or no longer open. Reply *1* to see your open issues.`);
       return;
     }
 
@@ -367,7 +749,7 @@ async function handleAgentShowContractors(phone, agentRecord) {
     const msg =
       `Select a contractor for WP-${issueRef}:\n\n` +
       `${listLines}\n\n` +
-      `Reply *Assign N* (e.g. Assign 2) to confirm.`;
+      `Reply *ASSIGN WP-${issueRef} N* (e.g. ASSIGN WP-${issueRef} 2) to confirm.`;
 
     await sendWhatsApp(phone, msg);
     console.log(`[Flow 2a] Contractor list sent for WP-${issueRef}`);
@@ -379,30 +761,27 @@ async function handleAgentShowContractors(phone, agentRecord) {
 }
 
 // ─── FLOW 2b — AGENT SELECTS CONTRACTOR ─────────────────────────────────────
-// Trigger: agent sends "Assign N" (e.g. "Assign 2")
-// Reads:   WP_Issues (most recent Open for this agent), WP_Contractors (sorted alphabetically), WP_Tenants
+// Trigger: agent sends "ASSIGN WP-N M" (e.g. "ASSIGN WP-62 2")
+// Reads:   WP_Issues (this agent's Open issue matching Issue Ref = N), WP_Contractors (sorted alphabetically), WP_Tenants
 // Writes:  WP_Issues — Issue Resolution Status, Contractor Name
 // Sends:   agent confirmation + contractor dispatch (with job receipt prompt)
 // Note:    Property Name is NOT written to WP_Issues (multipleLookupValues — read-only, FM-009)
 //          Unit Address is read from WP_Tenants, not WP_Issues (FM-006)
+//          UX-02 fix — issue is explicit (the WP-N in the command), never blindly the
+//          "most recent Open issue for this agent".
 
-async function handleAgentContractorSelect(phone, selection, agentRecord) {
-  console.log(`[Flow 2b] Contractor select — agent: ${phone} | selection: ${selection}`);
+async function handleAgentContractorSelect(phone, issueRefNum, selection, agentRecord) {
+  console.log(`[Flow 2b] Contractor select — agent: ${phone} | WP-${issueRefNum} | selection: ${selection}`);
 
   try {
-    // Find most recent Open issue for this agent
-    const issueUrl =
-      `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent('WP_Issues')}` +
-      `?filterByFormula=${encodeURIComponent(`AND({Agent Whatsapp number} = '${phone}', {Issue Resolution Status} = 'Open')`)}` +
-      `&sort%5B0%5D%5Bfield%5D=Date%20Reported&sort%5B0%5D%5Bdirection%5D=desc` +
-      `&maxRecords=1`;
-
-    const issueRes  = await fetch(issueUrl, { headers: { Authorization: `Bearer ${AIRTABLE_API_KEY}` } });
-    const issueData = await issueRes.json();
-    const openIssues = issueData.records || [];
+    const openIssues = await airtableGet(
+      'WP_Issues',
+      `AND({Agent Whatsapp number} = '${phone}', {Issue Ref} = ${issueRefNum}, {Issue Resolution Status} = 'Open')`,
+      { maxRecords: 1 }
+    );
 
     if (openIssues.length === 0) {
-      await sendWhatsApp(phone, `No open issues found. Nothing to assign.`);
+      await sendWhatsApp(phone, `WP-${issueRefNum} not found, not yours, or no longer open. Reply *1* to see your open issues.`);
       return;
     }
 
@@ -420,7 +799,7 @@ async function handleAgentContractorSelect(phone, selection, agentRecord) {
 
     const index = parseInt(selection, 10) - 1;  // 1-based → 0-based
     if (isNaN(index) || index < 0 || index >= contractorRecords.length) {
-      await sendWhatsApp(phone, `Invalid selection. Reply *1* to see the contractor list again.`);
+      await sendWhatsApp(phone, `Invalid selection. Reply *ASSIGN WP-${issueRef}* to see the contractor list again.`);
       return;
     }
 
@@ -479,6 +858,228 @@ async function handleAgentContractorSelect(phone, selection, agentRecord) {
   } catch (err) {
     console.error(`[Flow 2b ERROR]`, err.message);
     await alertShawn('Flow 2b (contractor select)', err.message, phone);
+  }
+}
+
+// ─── FLOW A1-3b / A2 (part 1) — AGENT MARKS THEMSELVES ATTENDING ───────────
+// Trigger: agent sends "ATTEND WP-N" (e.g. "ATTEND WP-70")
+// Reads:   WP_Issues (this agent's Open issue matching Issue Ref = N), WP_Tenants
+// Writes:  WP_Issues — Issue Resolution Status -> Agent Attending, Handling Method -> Agent
+// Sends:   tenant notification (agent handling personally) + agent confirmation
+// Note:    Same flat WP-N-in-command pattern as ASSIGN WP-N (Group 4) — no session
+//          store exists to remember a prior list selection between messages.
+
+async function handleAgentAttend(phone, issueRefNum, agentRecord) {
+  console.log(`[Flow A1-3b] Agent attending — agent: ${phone} | WP-${issueRefNum}`);
+
+  try {
+    const openIssues = await airtableGet(
+      'WP_Issues',
+      `AND({Agent Whatsapp number} = '${phone}', {Issue Ref} = ${issueRefNum}, {Issue Resolution Status} = 'Open')`,
+      { maxRecords: 1 }
+    );
+
+    if (openIssues.length === 0) {
+      await sendWhatsApp(phone, `WP-${issueRefNum} not found, not yours, or no longer open. Reply *1* to see your open issues.`);
+      return;
+    }
+
+    const issue       = openIssues[0];
+    const issueId     = issue.id;
+    const issueRef    = issue.fields['Issue Ref'] || issueId.slice(-6).toUpperCase();
+    const tenantPhone = (issue.fields['Tenant Whatsapp Number'] || '').trim();
+
+    // "Agent" confirmed live option on Handling Method (Meta API)
+    const patched = await airtableUpdate('WP_Issues', issueId, {
+      'Issue Resolution Status': 'Agent Attending',
+      'Handling Method':         'Agent',
+    });
+    if (patched.error) throw new Error(`Issue PATCH failed: ${JSON.stringify(patched.error)}`);
+
+    let tenantName = 'Tenant';
+    if (tenantPhone) {
+      const tenantRecords = await airtableGet('WP_Tenants', `{Whatsapp Phone Number} = '${tenantPhone}'`);
+      if (tenantRecords.length > 0) {
+        tenantName = (tenantRecords[0].fields['Full Name'] || 'Tenant').trim();
+      }
+      await sendWhatsApp(tenantPhone,
+        `Hi ${tenantName}, your agent is personally handling your maintenance request (Ref: WP-${issueRef}). We'll be in touch shortly.`
+      );
+    }
+
+    await sendWhatsApp(phone, `WP-${issueRef} marked as Agent Attending. ${tenantName} has been notified.\n\nWhen done, reply *ATTENDED WP-${issueRef}* to ask the tenant to confirm.`);
+
+    console.log(`[Flow A1-3b] Complete — WP-${issueRef} marked Agent Attending`);
+    logToAxiom('info', 'agent_attend', { phone, issueRef: String(issueRef) });
+
+  } catch (err) {
+    console.error(`[Flow A1-3b ERROR]`, err.message);
+    await alertShawn('Flow A1-3b (agent attend)', err.message, phone);
+  }
+}
+
+// ─── FLOW A2 (part 2) — ATTENDED WP-N CLOSURE COMMAND ───────────────────────
+// Trigger: agent sends "ATTENDED WP-N [optional note]" (e.g. "ATTENDED WP-70 fixed the lock")
+// Reads:   WP_Issues (this agent's issue matching Issue Ref = N, status Agent Attending), WP_Tenants
+// Writes:  WP_Issues — Issue Resolution Status -> Pending Confirmation, Resolution Note, Closed By -> Agent
+// Sends:   tenant 1/2 confirmation prompt (reuses the same Pending Confirmation state
+//          and handleTenantClosure the contractor-done flow already uses) + agent confirmation
+// Note:    Requires the issue to already be in Agent Attending (i.e. ATTEND WP-N was sent
+//          first) — ATTENDED is the closure of an announced-attending state, not a
+//          standalone one-shot. Goes straight to the final Pending Confirmation state in
+//          one PATCH, matching the existing handleContractorDone pattern — the Menu Spec's
+//          literal "write Resolved, then overwrite with Pending Confirmation" two-step read
+//          as documentation shorthand, not an intentional interim write.
+
+async function handleAgentAttended(phone, issueRefNum, note, agentRecord) {
+  console.log(`[Flow A2] Agent attended closure — agent: ${phone} | WP-${issueRefNum}`);
+
+  try {
+    const attendingIssues = await airtableGet(
+      'WP_Issues',
+      `AND({Agent Whatsapp number} = '${phone}', {Issue Ref} = ${issueRefNum}, {Issue Resolution Status} = 'Agent Attending')`,
+      { maxRecords: 1 }
+    );
+
+    if (attendingIssues.length === 0) {
+      await sendWhatsApp(phone, `WP-${issueRefNum} not found, not yours, or not currently marked as Agent Attending. Reply *ATTEND WP-${issueRefNum}* first, or *1* to see your open issues.`);
+      return;
+    }
+
+    const issue       = attendingIssues[0];
+    const issueId     = issue.id;
+    const issueRef    = issue.fields['Issue Ref'] || issueId.slice(-6).toUpperCase();
+    const tenantPhone = (issue.fields['Tenant Whatsapp Number'] || '').trim();
+
+    const resolutionNote = note ? `Agent attended. ${note}` : `Agent attended.`;
+
+    // "Agent" confirmed live option on Closed By (Meta API)
+    const patched = await airtableUpdate('WP_Issues', issueId, {
+      'Issue Resolution Status': 'Pending Confirmation',
+      'Resolution Note':         resolutionNote,
+      'Closed By':               'Agent',
+    });
+    if (patched.error) throw new Error(`Issue PATCH failed: ${JSON.stringify(patched.error)}`);
+
+    let tenantName = 'Tenant';
+    if (tenantPhone) {
+      const tenantRecords = await airtableGet('WP_Tenants', `{Whatsapp Phone Number} = '${tenantPhone}'`);
+      if (tenantRecords.length > 0) {
+        tenantName = (tenantRecords[0].fields['Full Name'] || 'Tenant').trim();
+      }
+      await sendWhatsApp(tenantPhone,
+        `Update on your maintenance request (Ref: WP-${issueRef}).\n\n` +
+        `Your agent has attended to this personally.${note ? ` Note: ${note}` : ''}\n\n` +
+        `Has your issue been resolved?\n\n` +
+        `Reply with a number:\n` +
+        `1 — Yes, resolved. Thank you.\n` +
+        `2 — No, still a problem.`
+      );
+    }
+
+    await sendWhatsApp(phone, `WP-${issueRef} marked as attended. ${tenantName} has been asked to confirm resolution.`);
+
+    console.log(`[Flow A2] Complete — WP-${issueRef} awaiting tenant confirmation`);
+    logToAxiom('info', 'agent_attended', { phone, issueRef: String(issueRef) });
+
+  } catch (err) {
+    console.error(`[Flow A2 ERROR]`, err.message);
+    await alertShawn('Flow A2 (agent attended)', err.message, phone);
+  }
+}
+
+// ─── FLOW A1-3c / A3 — AGENT ESCALATES ISSUE TO OWNER ───────────────────────
+// Trigger: agent sends "OWNER WP-N" (e.g. "OWNER WP-70")
+// Reads:   WP_Issues (this agent's Open issue matching Issue Ref = N), WP_Tenants (for
+//          Owner Phone, Property Name, Unit Address), WP_Owner (Landlord Whatsapp lookup
+//          for the owner's name — plain notification only, no reply handling this session)
+// Writes:  WP_Issues — Issue Resolution Status -> Owner Handling, Handling Method -> Owner
+// Sends:   plain owner notification (no interactive 1/2/3 menu — explicitly deferred by
+//          CEO for this session) + agent confirmation
+// Note:    Same flat WP-N-in-command pattern as ASSIGN WP-N / ATTEND WP-N. Owner phone is
+//          not a field on WP_Issues (confirmed live Meta API) — resolved the same way
+//          Flow 1 already does, via the denormalised Owner Phone field on WP_Tenants.
+//          Approval Status is intentionally NOT written here — that field only has
+//          meaning once an owner reply is processed, which is out of scope this session.
+
+async function handleAgentEscalateToOwner(phone, issueRefNum, agentRecord) {
+  console.log(`[Flow A1-3c] Agent escalates to owner — agent: ${phone} | WP-${issueRefNum}`);
+
+  try {
+    const openIssues = await airtableGet(
+      'WP_Issues',
+      `AND({Agent Whatsapp number} = '${phone}', {Issue Ref} = ${issueRefNum}, {Issue Resolution Status} = 'Open')`,
+      { maxRecords: 1 }
+    );
+
+    if (openIssues.length === 0) {
+      await sendWhatsApp(phone, `WP-${issueRefNum} not found, not yours, or no longer open. Reply *1* to see your open issues.`);
+      return;
+    }
+
+    const issue       = openIssues[0];
+    const issueId     = issue.id;
+    const issueRef    = issue.fields['Issue Ref'] || issueId.slice(-6).toUpperCase();
+    const description = (issue.fields['Description']            || '').trim();
+    const tenantPhone = (issue.fields['Tenant Whatsapp Number'] || '').trim();
+
+    // "Owner" confirmed live option on Handling Method (Meta API).
+    // "Owner Handling" replaces the old deprecated "Owner Decision" status value.
+    const patched = await airtableUpdate('WP_Issues', issueId, {
+      'Issue Resolution Status': 'Owner Handling',
+      'Handling Method':         'Owner',
+    });
+    if (patched.error) throw new Error(`Issue PATCH failed: ${JSON.stringify(patched.error)}`);
+
+    // Resolve owner phone + property context via WP_Tenants (Owner Phone is not on
+    // WP_Issues — same denormalised-field pattern Flow 1 already uses, FM-006 style)
+    let ownerPhone  = '';
+    let ownerName   = 'the owner';
+    let unitAddress = '';
+    let propertyName = '';
+    let agentName   = (agentRecord.fields['Agent Name'] || 'Your agent').trim();
+
+    if (tenantPhone) {
+      const tenantRecords = await airtableGet('WP_Tenants', `{Whatsapp Phone Number} = '${tenantPhone}'`);
+      if (tenantRecords.length > 0) {
+        const tf = tenantRecords[0].fields;
+        ownerPhone   = (tf['Owner Phone']    || '').trim();
+        unitAddress  = (tf['Unit Address']   || '').trim();
+        propertyName = (tf['Property Name']  || '').trim();
+      }
+    }
+
+    if (ownerPhone) {
+      const ownerRecords = await airtableGet('WP_Owner', `{Landlord Whatsapp} = '${ownerPhone}'`);
+      if (ownerRecords.length > 0) {
+        const fullName = (ownerRecords[0].fields['Full Name of Landlord'] || '').trim();
+        if (fullName) ownerName = fullName.split(/\s+/)[0];
+      }
+
+      await sendWhatsApp(ownerPhone,
+        `Your agent has flagged an issue at ${propertyName || unitAddress || 'your property'} for your attention.\n\n` +
+        `Ref: WP-${issueRef}\n` +
+        `Unit: ${unitAddress || 'unknown'}\n` +
+        `Issue: ${description}\n\n` +
+        `${agentName} will follow up with you directly.`
+      );
+      console.log(`[Flow A1-3c] Owner notified — WP-${issueRef}`);
+    } else {
+      console.warn(`[Flow A1-3c] No owner phone found for WP-${issueRef} — status set, owner NOT notified`);
+      logToAxiom('warn', 'agent_escalate_no_owner_phone', { phone, issueRef: String(issueRef) });
+    }
+
+    await sendWhatsApp(phone,
+      ownerPhone
+        ? `WP-${issueRef} assigned to owner. ${ownerName} has been notified.`
+        : `WP-${issueRef} marked as Owner Handling, but no owner phone number was found on file — please follow up with the owner directly.`
+    );
+
+    logToAxiom('info', 'agent_escalate_to_owner', { phone, issueRef: String(issueRef), ownerNotified: Boolean(ownerPhone) });
+
+  } catch (err) {
+    console.error(`[Flow A1-3c ERROR]`, err.message);
+    await alertShawn('Flow A1-3c (agent escalate to owner)', err.message, phone);
   }
 }
 
@@ -871,7 +1472,9 @@ async function handleTenantConfirmReopen(phone, messageText, tenantRecord, confi
           `⚠️ WP-${issueRef} REOPENED\n\n` +
           `${tenantFirstName} says:\n${accumulated}\n\n` +
           `Reply with:\n` +
-          `• *1* — reply to get contractor list, then pick a number to reassign\n` +
+          `• *ASSIGN WP-${issueRef}* — reassign to a contractor\n` +
+          `• *ATTEND WP-${issueRef}* — handle it yourself\n` +
+          `• *OWNER WP-${issueRef}* — send it to the owner\n` +
           `• *STATUS WP-${issueRef}* — view full issue detail\n` +
           `• *STALE* — find all stuck issues\n` +
           `• *REPORT* — list all open issues`
@@ -1020,6 +1623,212 @@ async function handleAgentBriefing(phone, messageText, agentRecord) {
   await sendWhatsApp(phone, `[STUB] BRIEFING command received. V2-4 not yet built.`);
 }
 
+// ─── GROUP 12 — TENANT SELF-REGISTRATION (agent-confirm, not immediate-link) ─
+// Trigger (unregistered number): "CODE {code}" (e.g. "CODE WP-1234")
+// Trigger (agent):               "APPROVE {code} [Full Name]" / "REJECT {code}"
+// Reads:   WP_Units (Registration Code match), WP_Properties (Property Name,
+//          Agent Phone, Owner Whatsapp -- for the agent/tenant notifications and
+//          for denormalising onto the new WP_Tenants record)
+// Writes:  WP_Units.Registered Tenant Phone (claim marker) -> cleared on reject;
+//          WP_Tenants (new record) -> created only on agent APPROVE
+//
+// DESIGN NOTE -- why the tenant's name is NOT collected at CODE time:
+// The only two fields approved for this flow are WP_Units."Registration Code"
+// and WP_Units."Registered Tenant Phone" -- there is no field to hold a tenant's
+// name during the pending window, and adding one would need CEO sign-off (Rule
+// 10) that wasn't sought. Rather than stop the whole group over it, the flow is
+// shaped so nothing extra needs to persist: "Registered Tenant Phone" is both
+// the claim marker AND the only thing carried across the pending window. The
+// agent -- who already has this tenant's name from their own lease paperwork --
+// supplies it fresh in the APPROVE command itself. This also means the
+// registering number is NEVER auto-recognised as a tenant (identifySender has
+// no "pending" concept, only match/no-match) -- a WP_Tenants record, and
+// therefore live tenant access, only exists after explicit agent approval.
+// This is the "Pending state, ping the agent to approve, not immediate-link"
+// design that was signed off.
+//
+// Registration Code matching is case-insensitive (LOWER() on both sides) --
+// friendlier for a code copied off a printed notice. The code itself must be a
+// single whitespace-free token (the command parser splits on the first space),
+// so codes containing spaces will not match correctly -- worth knowing before
+// codes are generated/printed for units.
+//
+// Invalid-code attempts do NOT create a WP_Leads record (unlike the generic
+// unknown-sender fallback) -- a mistyped registration code is a distinct,
+// deliberate self-registration attempt, not the same signal as a random
+// unrecognised message, and logging every typo into the sales-CRM-ish WP_Leads
+// table would be noise. Flagging this as a judgment call, not obviously correct.
+
+async function resolvePropertyContext(unitRecord) {
+  const propertyIds = unitRecord.fields['Property'] || [];
+  if (propertyIds.length === 0) return {};
+  const propertyRecords = await airtableGet('WP_Properties', `RECORD_ID() = '${propertyIds[0]}'`, { maxRecords: 1 });
+  if (propertyRecords.length === 0) return {};
+  const pf = propertyRecords[0].fields;
+  return {
+    propertyName: (pf['Property Name']   || '').trim(),
+    agentPhone:   (pf['Agent Phone']     || '').trim(),
+    ownerPhone:   (pf['Owner Whatsapp']  || '').trim(),
+  };
+}
+
+async function handleTenantSelfRegister(phone, code) {
+  console.log(`[Group 12] Self-registration attempt — phone: ${phone} | code: ${code}`);
+
+  try {
+    const escapedCode = code.replace(/'/g, "\\'");
+    const units = await airtableGet('WP_Units', `LOWER({Registration Code}) = LOWER('${escapedCode}')`, { maxRecords: 1 });
+
+    if (units.length === 0) {
+      await sendWhatsApp(phone, `That registration code wasn't recognized. Please check the code (e.g. WP-1234) and try again, or contact your agent.`);
+      logToAxiom('info', 'tenant_register_code_not_found', { phone, code });
+      return;
+    }
+
+    const unit = units[0];
+    const existingPhone = (unit.fields['Registered Tenant Phone'] || '').trim();
+
+    if (existingPhone === phone) {
+      await sendWhatsApp(phone, `Your registration for this unit is still pending your agent's approval.`);
+      return;
+    }
+    if (existingPhone) {
+      await sendWhatsApp(phone, `This registration code has already been used. If you believe this is a mistake, please contact your agent.`);
+      logToAxiom('warn', 'tenant_register_code_already_claimed', { phone, code, unitId: unit.id });
+      return;
+    }
+
+    const { propertyName, agentPhone, ownerPhone } = await resolvePropertyContext(unit);
+    const unitName = (unit.fields['Unit Name'] || 'your unit').trim();
+
+    const patched = await airtableUpdate('WP_Units', unit.id, { 'Registered Tenant Phone': phone });
+    if (patched.error) throw new Error(`Unit PATCH failed: ${JSON.stringify(patched.error)}`);
+
+    await sendWhatsApp(phone,
+      `Thanks! Your registration for ${unitName}${propertyName ? `, ${propertyName}` : ''} has been sent to your agent for approval. You'll get a message once it's confirmed.`
+    );
+
+    if (agentPhone) {
+      await sendWhatsApp(agentPhone,
+        `📋 New tenant registration pending approval.\n\n` +
+        `Phone: ${phone}\n` +
+        `Unit: ${unitName}${propertyName ? `, ${propertyName}` : ''}\n` +
+        `Code: ${code}\n\n` +
+        `Reply *APPROVE ${code} [Tenant Full Name]* to confirm — e.g. APPROVE ${code} Ayanda Khumalo.\n` +
+        `Reply *REJECT ${code}* to decline.`
+      );
+    } else {
+      console.warn(`[Group 12] No agent phone resolved for unit ${unit.id} — registration claimed but agent not notified`);
+      logToAxiom('warn', 'tenant_register_no_agent_phone', { phone, code, unitId: unit.id });
+    }
+
+    logToAxiom('info', 'tenant_register_pending', { phone, code, unitId: unit.id, agentNotified: Boolean(agentPhone) });
+
+  } catch (err) {
+    console.error(`[Group 12 ERROR — self-register]`, err.message);
+    await alertShawn('Group 12 (tenant self-register)', err.message, phone);
+  }
+}
+
+async function handleAgentApproveRegistration(phone, code, fullName, agentRecord) {
+  console.log(`[Group 12] Agent approve — agent: ${phone} | code: ${code} | name: ${fullName}`);
+
+  try {
+    const escapedCode = code.replace(/'/g, "\\'");
+    const units = await airtableGet(
+      'WP_Units',
+      `AND(LOWER({Registration Code}) = LOWER('${escapedCode}'), {Registered Tenant Phone} != '')`,
+      { maxRecords: 1 }
+    );
+
+    if (units.length === 0) {
+      await sendWhatsApp(phone, `No pending registration found for code ${code}. It may already be approved, rejected, or the code is wrong.`);
+      return;
+    }
+
+    const unit = units[0];
+    const { propertyName, agentPhone: unitAgentPhone, ownerPhone } = await resolvePropertyContext(unit);
+
+    // Ownership check -- only the agent assigned to this unit's property may approve
+    if (unitAgentPhone && unitAgentPhone !== phone) {
+      await sendWhatsApp(phone, `Code ${code} belongs to a property assigned to a different agent. Cannot approve.`);
+      logToAxiom('warn', 'tenant_register_approve_wrong_agent', { phone, code, unitId: unit.id });
+      return;
+    }
+
+    const pendingPhone = (unit.fields['Registered Tenant Phone'] || '').trim();
+    const unitName = (unit.fields['Unit Name'] || 'unit').trim();
+
+    const created = await airtableCreate('WP_Tenants', {
+      'Full Name':                fullName,
+      'Whatsapp Phone Number':    pendingPhone,
+      'Units':                    [unit.id],
+      'Tenant Status':            'Active',
+      'Property Name':            propertyName || '',
+      'Agent WhatsApp Number':    unitAgentPhone || phone,
+      'Owner Phone':              ownerPhone || '',
+    });
+    if (!created.id) throw new Error(`WP_Tenants create failed: ${JSON.stringify(created.error || created)}`);
+
+    await sendWhatsApp(phone, `✅ ${fullName} registered as tenant for ${unitName}. They can now report issues via WhatsApp.`);
+
+    const tenantFirstName = fullName.trim().split(/\s+/)[0] || fullName;
+    await sendWhatsApp(pendingPhone,
+      `Hi ${tenantFirstName}, you're all set! You can now report maintenance issues, request a call, or ask a question any time — just message this number.`
+    );
+
+    logToAxiom('info', 'tenant_register_approved', { phone, code, unitId: unit.id, tenantId: created.id, pendingPhone });
+    console.log(`[Group 12] Approved — WP_Tenants ${created.id} created for ${pendingPhone}`);
+
+  } catch (err) {
+    console.error(`[Group 12 ERROR — approve]`, err.message);
+    await alertShawn('Group 12 (agent approve registration)', err.message, phone);
+  }
+}
+
+async function handleAgentRejectRegistration(phone, code, agentRecord) {
+  console.log(`[Group 12] Agent reject — agent: ${phone} | code: ${code}`);
+
+  try {
+    const escapedCode = code.replace(/'/g, "\\'");
+    const units = await airtableGet(
+      'WP_Units',
+      `AND(LOWER({Registration Code}) = LOWER('${escapedCode}'), {Registered Tenant Phone} != '')`,
+      { maxRecords: 1 }
+    );
+
+    if (units.length === 0) {
+      await sendWhatsApp(phone, `No pending registration found for code ${code}.`);
+      return;
+    }
+
+    const unit = units[0];
+    const { agentPhone: unitAgentPhone } = await resolvePropertyContext(unit);
+
+    if (unitAgentPhone && unitAgentPhone !== phone) {
+      await sendWhatsApp(phone, `Code ${code} belongs to a property assigned to a different agent. Cannot reject.`);
+      return;
+    }
+
+    const pendingPhone = (unit.fields['Registered Tenant Phone'] || '').trim();
+
+    const patched = await airtableUpdate('WP_Units', unit.id, { 'Registered Tenant Phone': '' });
+    if (patched.error) throw new Error(`Unit PATCH failed: ${JSON.stringify(patched.error)}`);
+
+    await sendWhatsApp(phone, `Registration for code ${code} declined. The code is now available again.`);
+
+    if (pendingPhone) {
+      await sendWhatsApp(pendingPhone, `Your registration request could not be confirmed. Please contact your agent directly if you believe this is a mistake.`);
+    }
+
+    logToAxiom('info', 'tenant_register_rejected', { phone, code, unitId: unit.id, pendingPhone });
+
+  } catch (err) {
+    console.error(`[Group 12 ERROR — reject]`, err.message);
+    await alertShawn('Group 12 (agent reject registration)', err.message, phone);
+  }
+}
+
 // ─── POST ROUTER ─────────────────────────────────────────────────────────────
 
 async function routeMessage(phone, messageText) {
@@ -1035,6 +1844,14 @@ async function routeMessage(phone, messageText) {
   // Menu Spec v1.1 Section 3 — access-denied message + WP_Leads capture.
   // Field names confirmed live Meta API 1 Jul 2026: "Phone Number", "Lead Type" (both singleLineText)
   if (role === 'unknown') {
+    // Group 12 — "CODE {code}" self-registration, checked before the generic
+    // access-denied fallback below. See handleTenantSelfRegister for full design.
+    const codeMatch = text.match(/^code\s+(\S+)$/i);
+    if (codeMatch) {
+      await handleTenantSelfRegister(phone, codeMatch[1]);
+      return;
+    }
+
     await sendWhatsApp(phone,
       `Hi, this service is for registered tenants and property owners only. Please contact your rental agent to be added to the system.`
     );
@@ -1048,13 +1865,57 @@ async function routeMessage(phone, messageText) {
   // ── AGENT COMMANDS ───────────────────────────────────────────────────────
   if (role === 'agent') {
     if (text === '1') {
-      await handleAgentShowContractors(phone, record);
+      await handleAgentOpenIssuesList(phone, record);
       return;
     }
-    // "Assign N" — e.g. "Assign 2" or "assign 3"
-    const assignMatch = textLower.match(/^assign\s+([1-9]\d*)$/);
-    if (assignMatch) {
-      await handleAgentContractorSelect(phone, assignMatch[1], record);
+    // "ASSIGN WP-N M" — e.g. "ASSIGN WP-62 2" — confirm contractor M for issue N.
+    // Checked before the single-argument form below so "ASSIGN WP-62 2" is not
+    // swallowed by the shorter pattern.
+    const assignConfirmMatch = textLower.match(/^assign\s+wp-?(\d+)\s+([1-9]\d*)$/);
+    if (assignConfirmMatch) {
+      await handleAgentContractorSelect(phone, assignConfirmMatch[1], assignConfirmMatch[2], record);
+      return;
+    }
+    // "ASSIGN WP-N" — e.g. "ASSIGN WP-62" — show contractor list for that issue.
+    // Replaces the old bare "Assign N" (contractor-index-only) command — UX-02 fix
+    // means there is no longer a single implicit "most recent Open issue" to assign
+    // a bare contractor index against.
+    const assignListMatch = textLower.match(/^assign\s+wp-?(\d+)$/);
+    if (assignListMatch) {
+      await handleAgentShowContractors(phone, record, assignListMatch[1]);
+      return;
+    }
+    // "ATTEND WP-N" — e.g. "ATTEND WP-70" — agent takes this issue on personally
+    const attendMatch = textLower.match(/^attend\s+wp-?(\d+)$/);
+    if (attendMatch) {
+      await handleAgentAttend(phone, attendMatch[1], record);
+      return;
+    }
+    // "ATTENDED WP-N [note]" — e.g. "ATTENDED WP-70 fixed the lock" — closure command.
+    // Checked before ATTEND above only matters for exact-string collisions, which the
+    // \s+wp- boundary already prevents ("attend" will never match "attended ...").
+    const attendedMatch = text.match(/^attended\s+wp-?(\d+)(?:\s+([\s\S]+))?$/i);
+    if (attendedMatch) {
+      await handleAgentAttended(phone, attendedMatch[1], (attendedMatch[2] || '').trim(), record);
+      return;
+    }
+    // "OWNER WP-N" — e.g. "OWNER WP-70" — escalate this issue to the property owner
+    const ownerMatch = textLower.match(/^owner\s+wp-?(\d+)$/);
+    if (ownerMatch) {
+      await handleAgentEscalateToOwner(phone, ownerMatch[1], record);
+      return;
+    }
+    // "APPROVE {code} {Full Name}" — e.g. "APPROVE WP-1234 Ayanda Khumalo" — Group 12
+    // Case preserved on the name (text, not textLower); code matched case-insensitively.
+    const approveMatch = text.match(/^approve\s+(\S+)\s+([\s\S]+)$/i);
+    if (approveMatch) {
+      await handleAgentApproveRegistration(phone, approveMatch[1], approveMatch[2].trim(), record);
+      return;
+    }
+    // "REJECT {code}" — e.g. "REJECT WP-1234" — Group 12
+    const rejectMatch = text.match(/^reject\s+(\S+)$/i);
+    if (rejectMatch) {
+      await handleAgentRejectRegistration(phone, rejectMatch[1], record);
       return;
     }
     if (textLower === 'report') {
@@ -1078,7 +1939,7 @@ async function routeMessage(phone, messageText) {
     }
     // Agent sent something unrecognised
     await sendWhatsApp(phone,
-      `Hi! Commands available:\n- *1* — assign contractor to latest open issue\n- *STATUS WP-[issue number]* — e.g. STATUS WP-62\n- *STALE* — find issues stuck > 4 hours\n- *REPORT* — list all open issues`
+      `Hi! Commands available:\n- *1* — see your open issues\n- *ASSIGN WP-[issue number]* — e.g. ASSIGN WP-62\n- *ATTEND WP-[issue number]* — handle it yourself, e.g. ATTEND WP-62\n- *ATTENDED WP-[issue number]* — close it out once you're done, e.g. ATTENDED WP-62\n- *OWNER WP-[issue number]* — send it to the owner, e.g. OWNER WP-62\n- *APPROVE [code] [Tenant Name]* — confirm a pending tenant registration\n- *REJECT [code]* — decline a pending tenant registration\n- *STATUS WP-[issue number]* — e.g. STATUS WP-62\n- *STALE* — find issues stuck > 4 hours\n- *REPORT* — list all open issues`
     );
     return;
   }
@@ -1197,9 +2058,53 @@ async function routeMessage(phone, messageText) {
       return;
     }
 
-    // Check 5: any other tenant message = tenant main menu (Menu Spec v1.1 — replaces
-    // straight-to-Flow-1 intake from V1). Flow T1 wiring for option 1 is Phase 3 —
-    // handleTenantIssue (Flow 1) is intentionally unreachable from here until then.
+    // Check 5: tenant has a pending placeholder issue awaiting its real text --
+    // either Flow T1 (issue report, Group 1) or Flow T3 (enquiry, Group 3).
+    // Single query against both markers rather than two near-identical checks;
+    // see TENANT_ISSUE_INTAKE_PLACEHOLDER / TENANT_ENQUIRY_PLACEHOLDER and the
+    // startTenantIssueIntake / startTenantEnquiry header comments for why this
+    // exists instead of a session-state marker.
+    const placeholderIssues = await airtableGet(
+      'WP_Issues',
+      `AND({Tenant Whatsapp Number} = '${phone}', {Issue Resolution Status} = 'Open', OR({Description} = '${TENANT_ISSUE_INTAKE_PLACEHOLDER}', {Description} = '${TENANT_ENQUIRY_PLACEHOLDER}'))`,
+      { sort: [{ field: 'Date Reported', direction: 'desc' }], maxRecords: 1 }
+    );
+    if (placeholderIssues.length > 0) {
+      const isEnquiry = placeholderIssues[0].fields['Description'] === TENANT_ENQUIRY_PLACEHOLDER;
+      // Guard: a bare menu digit here is almost certainly a mis-tap, not real
+      // content — re-prompt instead of logging "1"/"2"/"3" as the answer.
+      if (text === '1' || text === '2' || text === '3') {
+        await sendWhatsApp(phone, isEnquiry
+          ? `Please describe your enquiry and your agent will get back to you.`
+          : `Please describe the issue in one or two sentences.`
+        );
+        return;
+      }
+      if (isEnquiry) {
+        await completeTenantEnquiry(phone, text, record, placeholderIssues[0]);
+      } else {
+        await completeTenantIssueIntake(phone, text, record, placeholderIssues[0]);
+      }
+      return;
+    }
+
+    // Check 6: tenant replied to the main menu with no active mid-flow state
+    // above. 1 -> Flow T1 (issue intake, Group 1). 2 -> Flow T2 (call request,
+    // Group 2). 3 -> Flow T3 (other enquiry, Group 3). Any other message =
+    // tenant main menu (Menu Spec v1.1 — replaces straight-to-Flow-1 intake
+    // from V1).
+    if (text === '1') {
+      await startTenantIssueIntake(phone, record);
+      return;
+    }
+    if (text === '2') {
+      await handleTenantCallRequest(phone, record);
+      return;
+    }
+    if (text === '3') {
+      await startTenantEnquiry(phone, record);
+      return;
+    }
     await showTenantMainMenu(phone, record);
     return;
   }

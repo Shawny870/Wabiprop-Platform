@@ -1,38 +1,83 @@
-# CLAUDE.md — Wabistay Repo Contract
-Teroch Projects (Pty) Ltd · v1 · 5 July 2026
-This file is read at the start of EVERY Claude Code session. It is the code-level twin of the Wabistay Build Bible (kept in Claude chat / project docs). If code and this contract disagree, STOP and ask Shawn.
+# CLAUDE.md — Wabiprop + Wabistay Repo Contract
+Teroch Projects (Pty) Ltd · v2 · 8 July 2026
+This file is read at the start of EVERY Claude Code session. If code and this contract disagree, STOP and report to Shawn before touching anything.
 
-## What this codebase is
-WhatsApp-native booking + ops platform for SA guest lodges. Node serverless on Vercel, Airtable as DB, Meta WhatsApp Cloud API (v25.0), Axiom logging. NO frameworks, NO TypeScript, NO ORMs, NO npm bloat. Deterministic state machine only — no AI in runtime flows.
+## Three-role model
+- CEO (Shawn): approvals, device testing, go/no-go only. Never writes code.
+- Design Engineer (Claude AI): specs, architecture, transfer documents, challenge function.
+- Builder (Claude Code): code execution only. NEVER pushes to main. NEVER deploys. NEVER merges.
 
-## Session ritual (do in this order, every session)
-1. Read this file fully. Read `FIXLOG.md`. Read `WABISTAY_SESSION_BRIEF.md` for current decisions/build state.
-2. Run schema drift check: `node scripts/schema-diff.js` (live Airtable metadata vs `schema.json`). Mismatch → STOP, report, wait.
-3. Confirm which single B-step (from the brief) this session builds. ONE B-step per session. No scope additions.
-4. Build. Then run tests: `node --test`. All fixtures must pass.
-5. Append to `FIXLOG.md` (keep F-numbering) and update `states.json` if transitions changed.
-6. Open a PR titled with the B-number (e.g. "B6: WS2 hourly core"). NEVER push to main. NEVER deploy. Shawn merges (Rule 26: CEO pushes only).
+## Session ritual — do in this order, every session, no exceptions
+1. Read this file fully.
+2. Read `FIXLOG.md` if it exists.
+3. Read the session brief provided by Shawn (transfer document for this session).
+4. Confirm AIRTABLE_BASE_ID from live Vercel env — read it, report the exact string before any Airtable call.
+5. Run a live Airtable ping — single test API call confirming connection returns real data, not empty. PASS = proceed. FAIL = stop and report.
+6. Confirm which single task this session builds. ONE task per session. No scope additions without CEO approval.
+7. Build. Run tests if test suite exists.
+8. Report what was built, what was tested, what was not tested.
+9. Open a PR. NEVER push to main. NEVER deploy. Shawn merges.
 
 ## Hard rules
-- Field names come from `schema.json` ONLY. Never type an Airtable field name from memory.
-- `node scripts/schema-diff.js --write` is a SHAWN-ONLY command, used after a deliberate schema change. Never run `--write` to clear a failing diff — a failing diff means STOP, report, wait.
-- State machine lives in `states.json` (state → input → next state → sends). Handlers read the table. No new nested if-state logic.
-- Every bug fixed gets a fixture in `fixtures/` (real Meta payload + expected outcome) so it can never regress silently.
-- Never refactor while adding a feature. Refactors are their own session with their own PR.
-- All Airtable/Meta calls go through the existing helpers (`airtableGet/Create/Update`, `sendWhatsApp`). Log every call with HTTP status (F6 pattern).
-- Always return HTTP 200 to Meta after processing (F2). Verify HMAC X-Hub-Signature-256 on the RAW body (B1) — raw bytes, not re-serialised JSON.
-- Business-initiated sends (cleaner, owner, OTP, summaries) must use approved utility templates — free-form text silently fails outside the 24h window.
-- Guest-facing copy: warm, short, SA-natural, numbered menus with one-line descriptors (Rule 11). One Wabistay voice for all properties.
-- Times are SAST; Vercel runs UTC — convert explicitly, test checkout times.
-- Changes touching message templates, pricing values, `states.json`, or POPIA/consent code: label the PR `needs-decision` — Shawn reviews these against the Bible before merging.
-- Airtable is not transactional: after any room assignment, re-query to verify sole ownership; on conflict roll back and re-offer.
-- Staging first: preview deploys use the staging Airtable base + test number. Production config only via `main`.
+- Field names come from live Airtable schema or schema.json ONLY. Never type an Airtable field name from memory.
+- Every Airtable call uses existing helpers. Log every call with HTTP status.
+- Always return HTTP 200 to Meta immediately after receiving webhook (before async work).
+- Verify HMAC X-Hub-Signature-256 on RAW body — raw bytes, not re-serialised JSON.
+- Never refactor while adding a feature. Refactors are their own session, own PR.
+- Never push to main. Never deploy to production. Never merge PRs. CEO only.
+- Builder never pushes — Rule 26. This is non-negotiable and applies to every session.
+- HTTP 200 from WhatsApp Send API means Meta accepted the request only — not delivery. Log async delivery callbacks to Axiom.
+- Business-initiated sends (cleaner, owner, summaries) must use approved utility templates — free-form text silently fails outside the 24h window.
+- Changes touching message templates, pricing values, state machine, or POPIA/consent code: label PR `needs-decision` — Shawn reviews before merging.
+- Airtable is not transactional. After any room or record assignment, re-query to verify. On conflict, roll back and re-offer.
 
-## Key architecture decisions (from the Bible — do not re-litigate)
-- Multi-tenancy: one webhook, many numbers, routed on receiving `phone_number_id` → WS_Properties (D5). No hardcoded property strings, no global OWNER_PHONE.
-- Cleaner dispatch fires on checkout; PAID only records payment (D4). Cleaner no-response: re-ping +20min, alert manager +40min (D20).
-- Auto-checkout at expiry +15min; manager never actions checkout. T-15 extension offer.
-- STOP: two-tier — kills all optional messaging instantly; transaction-completion messages continue until active booking closes, then silence. Timestamp everything (D-round5).
-- POPIA consent = message #1, always, demos included (D11).
-- BLOCK ROOM X <dates> / UNBLOCK: manual availability stopgap until NightsBridge sync (D21).
-- Number changes: OTP to the NEW number before swap; 7-day audit log; notify both (D8).
+## Diagnostic protocol (3-lens rule — mandatory for every bug fix)
+When a flow is broken:
+1. Collect evidence first — read logs, read the relevant code, identify the exact failure point.
+2. Diagnose from three distinct lenses — what broke, why it broke, what else could break from the fix.
+3. Propose the fix with explicit statement of side effects.
+4. Design Engineer (Claude AI) validates the proposal before Builder implements.
+5. If side effects are uncertain — loop back to lens 2. Do not implement under uncertainty.
+6. After fix: device test confirms the loop closes. Not code review — real device.
+
+## What this codebase is
+Two WhatsApp-native products on one repo:
+- Wabiprop: property maintenance coordination for rental agents, tenants, contractors, owners.
+- Wabistay: short-stay guest lodge booking and ops automation.
+
+Stack: Node.js serverless on Vercel, Airtable as DB, Meta WhatsApp Cloud API v25.0, Axiom logging.
+NO frameworks, NO TypeScript, NO ORMs, NO npm bloat. Deterministic state machine only — no AI in runtime flows.
+
+## Routing architecture
+- Master router: `api/webhook.js` — routes inbound messages by `phone_number_id`
+- Wabiprop handler: `api/wabiprop/webhook.js`
+- Wabistay handler: `api/wabistay/webhook.js`
+- NEVER route Wabistay traffic through Wabiprop handler or vice versa.
+- No hardcoded property strings, no global OWNER_PHONE. All config from Airtable.
+
+## Locked constants — never derive from memory
+- Repo: github.com/Shawny870/Wabiprop-Platform
+- Branch: main
+- Local repo path: C:\Users\smaha\wabiprop-platform
+- Vercel URL: wabiprop-platform.vercel.app
+- Master router: https://wabiprop-platform.vercel.app/api/webhook
+- Wabiprop webhook: https://wabiprop-platform.vercel.app/api/wabiprop/webhook
+- Wabistay webhook: https://wabiprop-platform.vercel.app/api/wabistay/webhook
+- Production WABA number: 27730260871
+- Wabiprop Phone Number ID: 1157302750805659
+- Airtable Base ID: confirm from live Vercel env every session — do not use memory
+
+## Do not touch list (unless explicitly instructed by CEO)
+- api/webhook.js — master router, touch only in dispatch layer sessions
+- Any file not related to the current session's single stated task
+- .claude/settings.json — CEO-controlled permissions config
+- Any production environment variable
+
+## Known open bugs (as of 8 July 2026)
+- BUG-04: Duplicate owner summaries in one cron run
+- BUG-05: Owner salutation renders "Hi Mrs," with no name
+- BUG-06: All monetary values display as R0.00
+- BUG-07: Agent summary dead-end — no pagination
+- BUG-08: "Questions? Reply" prompt has no inbound handler
+- BUG-09: WhatsApp profile displays "MyNumber" not "Wabiprop"
+- Dispatch layer defect: Wabistay messages routing through Wabiprop handler (current session priority)
