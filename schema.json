@@ -36,6 +36,10 @@
         "WS_Cleaners": {
           "id": "fldGTqjGoNnU5cAYe",
           "type": "multipleRecordLinks"
+        },
+        "Property": {
+          "id": "fldmHdoCRHqg0kkLy",
+          "type": "multipleRecordLinks"
         }
       }
     },
@@ -195,6 +199,10 @@
         "WS_Bookings": {
           "id": "fldGFHxoq3ZMFSrJq",
           "type": "multipleRecordLinks"
+        },
+        "Property": {
+          "id": "fldzmydltmj0LnaXZ",
+          "type": "multipleRecordLinks"
         }
       }
     },
@@ -278,9 +286,25 @@
         "Notify Phone": {
           "id": "fldAFnFZW4HasRXVt",
           "type": "singleLineText"
+        },
+        "WS_Rooms": {
+          "id": "fldRn6bzkX7VqQPs1",
+          "type": "multipleRecordLinks"
+        },
+        "WS_Rates": {
+          "id": "fldQWGFGWdHByEEXE",
+          "type": "multipleRecordLinks"
+        },
+        "Phone Number ID": {
+          "id": "fldNByoXXIaACGdxg",
+          "type": "singleLineText"
+        },
+        "City": {
+          "id": "fldWkRk0x3KaUK2Xr",
+          "type": "singleLineText"
         }
       }
     }
   },
-  "pulledAt": "2026-07-05T15:58:12.271Z"
+  "pulledAt": "2026-07-10T19:12:37.146Z"
 }
