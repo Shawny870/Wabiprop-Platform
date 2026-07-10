@@ -1,6 +1,9 @@
 {
   "name": "checkout: '1' in CHECKED_IN checks out booking, room to Cleaning, dispatches active cleaners, guest to NEW",
   "seed": {
+    "WS_Properties": [
+      { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222" } }
+    ],
     "WS_Guests": [
       { "id": "recG1", "fields": { "Guest Name": "John Smith", "Phone Number": "27821234567", "Session State": "CHECKED_IN" } }
     ],
@@ -25,7 +28,7 @@
     ],
     "sends": [
       { "to": "27821110000", "includes": ["Hi Thandi", "Room 1 has just been vacated", "Reply *DONE* when complete"] },
-      { "to": "27821234567", "includes": ["Thank you for staying with us at Villa Liza"] }
+      { "to": "27821234567", "includes": ["Thank you for staying with us at Test Lodge"] }
     ]
   }
 }

@@ -1,6 +1,9 @@
 {
   "name": "details: unclassifiable mid-flow message (no date found) reprompts, NO writes — frozen current behaviour for future F-work",
   "seed": {
+    "WS_Properties": [
+      { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222" } }
+    ],
     "WS_Guests": [
       { "id": "recG1", "fields": { "Guest Name": "Unknown", "Phone Number": "27821234567", "Session State": "AWAITING_DETAILS" } }
     ],

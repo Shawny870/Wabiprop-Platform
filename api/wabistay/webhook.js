@@ -158,6 +158,26 @@ function msg(key, vars = {}) {
   return out;
 }
 
+// ─── PROPERTY RESOLUTION ─────────────────────────────────────────────────────
+// 6.4: resolve which WS_Properties record this message belongs to, from the
+// receiving phone_number_id. Called once per incoming message, before dispatch.
+// filterByFormula on a plain singleLineText field ({Phone Number ID} = '...')
+// — standard equality match, not a linked-record lookup, so no FIND/ARRAYJOIN needed here.
+
+async function resolveProperty(phoneNumberId) {
+  const properties = await airtableGet('WS_Properties', `{Phone Number ID} = '${phoneNumberId}'`);
+  if (properties.length === 0) {
+    logToAxiom('error', 'property_resolution_failed', { phone_number_id: phoneNumberId });
+    return null;
+  }
+  return properties[0];
+}
+
+function propertyCityLine(property) {
+  const city = property.fields['City'];
+  return city ? `, ${city}` : '';
+}
+
 // ─── GUARDS ──────────────────────────────────────────────────────────────────
 
 const guards = {
@@ -191,16 +211,40 @@ const actions = {
   },
 
   // NEW guest (or reset): greet with availability + rates, ask for details (F10)
+  // 6.4: scoped to ctx.property via {Property} linked-record filter — Airtable
+  // FIND/ARRAYJOIN pattern for filtering multipleRecordLinks by record ID.
+  // FLAG: this filterByFormula syntax has NOT been live-tested (no Airtable
+  // credential available in this Builder session) — must be confirmed via a
+  // real Airtable ping / device test before merge, per Rule 1 and the 3-lens
+  // diagnostic. If it's wrong, Airtable returns HTTP 200 with an empty record
+  // set (not an error) — a formula bug here would silently show 0 rooms/rates
+  // rather than fail loudly, so this is the single highest-risk line in 6.4.
   async greetAndAskDetails(ctx) {
-    const availableRooms = await airtableGet('WS_Rooms', `{Status} = 'Available'`);
+    const availableRooms = await airtableGet('WS_Rooms',
+      `AND({Status} = 'Available', FIND('${ctx.property.id}', ARRAYJOIN({Property})))`);
     const roomCount = availableRooms.length;
     // F4: was {Active} = 1
-    const activeRates = await airtableGet('WS_Rates', `{Active} = TRUE()`);
+    const activeRates = await airtableGet('WS_Rates',
+      `AND({Active} = TRUE(), FIND('${ctx.property.id}', ARRAYJOIN({Property})))`);
     const rateText = activeRates.length > 0
       ? activeRates.map(r =>
           `• ${r.fields['Rate Name']}: R${r.fields['Amount']} ${r.fields['Rate Type'] === 'Per Night' ? 'per night' : 'per hour'}`
         ).join('\n')
       : '• Contact us for current rates';
+
+    // Data-quality signal: rows with an empty Property field never match the
+    // scoped filter above and so silently vanish from every property's greeting.
+    // Schema can't force this field non-empty, so surface gaps instead of guessing.
+    const unassignedRooms = await airtableGet('WS_Rooms', `AND({Status} = 'Available', {Property} = BLANK())`);
+    const unassignedRates = await airtableGet('WS_Rates', `AND({Active} = TRUE(), {Property} = BLANK())`);
+    if (unassignedRooms.length > 0 || unassignedRates.length > 0) {
+      logToAxiom('warn', 'property_unassigned_rows', {
+        phone: ctx.phone,
+        propertyId: ctx.property.id,
+        unassignedRoomCount: unassignedRooms.length,
+        unassignedRateCount: unassignedRates.length
+      });
+    }
 
     if (!ctx.guest) {
       await airtableCreate('WS_Guests', {
@@ -215,6 +259,8 @@ const actions = {
     }
 
     await sendWhatsApp(ctx.phone, msg('greeting', {
+      propertyName: ctx.property.fields['Property Name'],
+      propertyCityLine: propertyCityLine(ctx.property),
       roomCountText: `${roomCount} room${roomCount !== 1 ? 's' : ''}`,
       rateText
     }));
@@ -254,7 +300,11 @@ const actions = {
     });
 
     // F4: was {Active} = 1
-    const activeRates = await airtableGet('WS_Rates', `{Active} = TRUE()`);
+    // 6.4: scoped to ctx.property — not in the original spec's call-site list,
+    // but left unscoped this call would apply another property's rate to the
+    // booking, same bug class as the greeting queries (Rule 1: formula unverified live)
+    const activeRates = await airtableGet('WS_Rates',
+      `AND({Active} = TRUE(), FIND('${ctx.property.id}', ARRAYJOIN({Property})))`);
     const rate = activeRates[0] || null;
 
     const bookingData = {
@@ -312,19 +362,21 @@ const actions = {
     }
     await airtableUpdate('WS_Guests', ctx.guest.id, { 'Session State': ctx.next });
     logToAxiom('info', 'state_transition', { phone: ctx.phone, guestId: ctx.guest.id, from: 'AWAITING_ETA', to: ctx.next, eta });
-    await sendWhatsApp(ctx.phone, msg('etaConfirmed', { eta }));
+    await sendWhatsApp(ctx.phone, msg('etaConfirmed', { eta, propertyName: ctx.property.fields['Property Name'] }));
   },
 
   // CONFIRMED → "1": gate arrival (F11)
   async gateArrival(ctx) {
-    // Step 1: notify phone from WS_Properties, fallback to OWNER_PHONE
-    const properties = await airtableGet('WS_Properties', `{Property Name} = 'Villa Liza Guest Lodge'`);
-    const notifyPhone = (properties.length > 0 && properties[0].fields['Notify Phone'])
-      ? properties[0].fields['Notify Phone'].replace(/[\s\-\+]/g, '')
+    // Step 1: notify phone from ctx.property (resolved once at dispatch — 6.4,
+    // no second WS_Properties call needed), fallback to OWNER_PHONE
+    const notifyPhone = ctx.property.fields['Notify Phone']
+      ? ctx.property.fields['Notify Phone'].replace(/[\s\-\+]/g, '')
       : OWNER_PHONE;
 
-    // Step 2: first available room
-    const availableRooms = await airtableGet('WS_Rooms', `{Status} = 'Available'`);
+    // Step 2: first available room, scoped to this property (6.4 — unscoped
+    // would let a guest be assigned a room belonging to a different property)
+    const availableRooms = await airtableGet('WS_Rooms',
+      `AND({Status} = 'Available', FIND('${ctx.property.id}', ARRAYJOIN({Property})))`);
     let assignedRoomName = null;
     let assignedRoomId = null;
     if (availableRooms.length > 0) {
@@ -361,9 +413,10 @@ const actions = {
     }
 
     // Step 7: tell guest
+    const propertyName = ctx.property.fields['Property Name'];
     await sendWhatsApp(ctx.phone, assignedRoomName
-      ? msg('welcomeAssigned', { roomName: assignedRoomName })
-      : msg('welcomeUnassigned'));
+      ? msg('welcomeAssigned', { roomName: assignedRoomName, propertyName })
+      : msg('welcomeUnassigned', { propertyName }));
   },
 
   // CONFIRMED → "2": cancel
@@ -391,7 +444,7 @@ const actions = {
       const checkedInAt = new Date(recentBookings[0].fields['Checked In At']);
       const secondsSinceCheckin = (Date.now() - checkedInAt.getTime()) / 1000;
       if (secondsSinceCheckin < 60) {
-        await sendWhatsApp(ctx.phone, msg('gateCooldownMenu', { guestName: ctx.guest.fields['Guest Name'] }));
+        await sendWhatsApp(ctx.phone, msg('gateCooldownMenu', { guestName: ctx.guest.fields['Guest Name'], propertyName: ctx.property.fields['Property Name'] }));
         return; // stay CHECKED_IN
       }
     }
@@ -424,7 +477,7 @@ const actions = {
     }
     await airtableUpdate('WS_Guests', ctx.guest.id, { 'Session State': ctx.next });
     logToAxiom('info', 'state_transition', { phone: ctx.phone, guestId: ctx.guest.id, from: 'CHECKED_IN', to: ctx.next, reason: 'checkout', roomName });
-    await sendWhatsApp(ctx.phone, msg('checkoutThanks'));
+    await sendWhatsApp(ctx.phone, msg('checkoutThanks', { propertyName: ctx.property.fields['Property Name'] }));
   },
 
   // CHECKED_IN fallback menu (F9)
@@ -449,18 +502,27 @@ function matchTransition(rows, text) {
   return rows.find(t => t.inputs === '*' || t.inputs.includes(text)) || null;
 }
 
-async function handleMessage(from, messageText) {
+async function handleMessage(from, messageText, phoneNumberId) {
   const phone = formatPhone(from);
   const text = messageText.trim().toLowerCase();
   console.log(`[handleMessage] from: ${phone} | text: ${text}`);
   logToAxiom('info', 'message_received', { phone, text: messageText.slice(0, 100) });
+
+  // 6.4: resolve property before anything else — no action may run for an
+  // unconfigured number, and no property's data may leak to another's guest.
+  const property = await resolveProperty(phoneNumberId);
+  if (!property) {
+    console.error(`[Dispatch] no WS_Properties match for phone_number_id: ${phoneNumberId} — refusing dispatch`);
+    await sendWhatsApp(phone, msg('numberNotConfigured'));
+    return;
+  }
 
   const guestRecords = await airtableGet('WS_Guests', `{Phone Number} = '${phone}'`);
   const guest = guestRecords[0] || null;
   const sessionState = guest ? guest.fields['Session State'] : null;
   console.log(`[State] guest: ${guest ? guest.id : 'none'} | state: ${sessionState}`);
 
-  const ctx = { phone, text, messageText, guest, next: null, cleaner: null };
+  const ctx = { phone, text, messageText, guest, next: null, cleaner: null, property };
 
   // Global transitions (cleaner DONE) — guard decides, any state
   for (const t of STATES.global) {
@@ -521,6 +583,7 @@ module.exports = async function handler(req, res) {
     const changes = entry?.changes?.[0];
     const value = changes?.value;
     const messages = value?.messages;
+    const phoneNumberId = value?.metadata?.phone_number_id;
 
     console.log(`[POST] entry: ${!!entry} | messages: ${messages?.length || 0}`);
 
@@ -544,7 +607,7 @@ module.exports = async function handler(req, res) {
 
     // F2: handleMessage runs FULLY before we respond 200
     try {
-      await handleMessage(from, messageText);
+      await handleMessage(from, messageText, phoneNumberId);
     } catch (err) {
       console.error('[FATAL]', err.message, err.stack);
       logToAxiom('error', 'fatal', { message: err.message, stack: err.stack });

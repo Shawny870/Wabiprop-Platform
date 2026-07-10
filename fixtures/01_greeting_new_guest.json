@@ -1,13 +1,16 @@
 {
   "name": "greeting: unknown number gets rates + overnight instructions, guest record created (F10)",
   "seed": {
+    "WS_Properties": [
+      { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222" } }
+    ],
     "WS_Rooms": [
-      { "id": "recR1", "fields": { "Room Name": "Room 1", "Status": "Available" } },
-      { "id": "recR2", "fields": { "Room Name": "Room 2", "Status": "Available" } },
-      { "id": "recR3", "fields": { "Room Name": "Room 3", "Status": "Available" } }
+      { "id": "recR1", "fields": { "Room Name": "Room 1", "Status": "Available", "Property": ["recP1"] } },
+      { "id": "recR2", "fields": { "Room Name": "Room 2", "Status": "Available", "Property": ["recP1"] } },
+      { "id": "recR3", "fields": { "Room Name": "Room 3", "Status": "Available", "Property": ["recP1"] } }
     ],
     "WS_Rates": [
-      { "id": "recRATE1", "fields": { "Rate Name": "Standard Overnight", "Rate Type": "Per Night", "Amount": 350, "Active": true } }
+      { "id": "recRATE1", "fields": { "Rate Name": "Standard Overnight", "Rate Type": "Per Night", "Amount": 350, "Active": true, "Property": ["recP1"] } }
     ],
     "WS_Guests": [],
     "WS_Cleaners": []
@@ -31,7 +34,7 @@
       {
         "to": "27821234567",
         "includes": [
-          "Welcome to Villa Liza Guest Lodge",
+          "Welcome to Test Lodge, Testville",
           "*3 rooms* available",
           "Standard Overnight: R350 per night",
           "overnight booking",
