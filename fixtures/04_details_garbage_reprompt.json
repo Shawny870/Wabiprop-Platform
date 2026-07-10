@@ -1,0 +1,17 @@
+{
+  "name": "details: unclassifiable mid-flow message (no date found) reprompts, NO writes — frozen current behaviour for future F-work",
+  "seed": {
+    "WS_Guests": [
+      { "id": "recG1", "fields": { "Guest Name": "Unknown", "Phone Number": "27821234567", "Session State": "AWAITING_DETAILS" } }
+    ],
+    "WS_Cleaners": []
+  },
+  "message": { "from": "27821234567", "text": "asdf qwerty !!" },
+  "expect": {
+    "status": 200,
+    "writes": [],
+    "sends": [
+      { "to": "27821234567", "includes": ["Sorry, I didn't quite get that", "1. Full name", "2. Check-in date", "3. Check-out date"] }
+    ]
+  }
+}

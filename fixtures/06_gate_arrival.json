@@ -1,0 +1,32 @@
+{
+  "name": "gate arrival: '1' assigns first available room (F11), books Checked In with timestamp, notifies Notify Phone from WS_Properties",
+  "seed": {
+    "WS_Properties": [
+      { "id": "recP1", "fields": { "Property Name": "Villa Liza Guest Lodge", "Notify Phone": "27831112222" } }
+    ],
+    "WS_Rooms": [
+      { "id": "recR1", "fields": { "Room Name": "Room 1", "Status": "Available" } },
+      { "id": "recR2", "fields": { "Room Name": "Room 2", "Status": "Available" } }
+    ],
+    "WS_Guests": [
+      { "id": "recG1", "fields": { "Guest Name": "John Smith", "Phone Number": "27821234567", "Session State": "CONFIRMED" } }
+    ],
+    "WS_Bookings": [
+      { "id": "recB1", "fields": { "Guest": ["recG1"], "Status": "Confirmed" } }
+    ],
+    "WS_Cleaners": []
+  },
+  "message": { "from": "27821234567", "text": "1" },
+  "expect": {
+    "status": 200,
+    "writes": [
+      { "op": "update", "table": "WS_Rooms", "id": "recR1", "fields": { "Status": "Occupied" } },
+      { "op": "update", "table": "WS_Bookings", "id": "recB1", "fields": { "Status": "Checked In", "Checked In At": "re:^\\d{4}-\\d{2}-\\d{2}T", "Room": ["recR1"] } },
+      { "op": "update", "table": "WS_Guests", "id": "recG1", "fields": { "Session State": "CHECKED_IN" } }
+    ],
+    "sends": [
+      { "to": "27831112222", "includes": ["John Smith is at the gate", "Room 1 assigned", "Phone: 27821234567"] },
+      { "to": "27821234567", "includes": ["assigned *Room 1*", "1 - Check out"] }
+    ]
+  }
+}

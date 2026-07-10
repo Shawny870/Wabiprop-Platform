@@ -3,21 +3,15 @@
 // Reads: WS_Rooms, WS_Rates, WS_Guests, WS_Cleaners
 // Writes: WS_Guests, WS_Bookings, WS_Rooms
 // No AI. Deterministic state machine only.
-// FIX LOG:
-//   F1 — Body parse guard added (req.body undefined protection)
-//   F2 — res.status(200) moved to AFTER handleMessage completes
-//   F3 — Meta API version v19.0 → v25.0
-//   F4 — {Active} = 1 → {Active} = TRUE() for Rates and Cleaners
-//   F5 — FIND/ARRAYJOIN linked record filter replaced with direct lookup
-//   F6 — Airtable error logging now includes HTTP status code
-//   F7 — OWNER_PHONE notification added to NEW booking creation
-//   F8 — CHECKED_IN state added (gate arrival → checked in flow)
-//   F9 — All guest-facing messages converted to numbered menu options (Rule 11)
-//   F10 — Greeting scoped to overnight bookings, HOURLY keyword placeholder added
-//   F11 — Room assigned at gate arrival, Notify Phone from WS_Properties with OWNER_PHONE fallback
-//   F12 — Axiom HTTP logging added (fire-and-forget, never blocks state machine)
-//   F13 — Booking Ref written back to WS_Bookings after CREATE
-//   F14 — Gate cooldown guard: ignores checkout trigger if checked in < 60s ago
+//
+// H0: the state machine (state → input → action → next state) and ALL outbound
+// message copy live in /states.json. This file holds transport, helpers and the
+// side-effect handlers the table dispatches to. Every behaviour is frozen by a
+// replay fixture in /fixtures — run `node --test` before and after any change.
+//
+// FIX LOG: see FIXLOG.md (F1–F14 from the WS1 build, referenced inline below).
+
+const STATES = require('../../states.json');
 
 const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID;
 const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY;
@@ -85,8 +79,8 @@ async function airtableUpdate(table, recordId, fields) {
 
 // F5: direct record ID lookup — replaces FIND/ARRAYJOIN pattern
 async function airtableGetBookingsByGuestId(guestId, status) {
-  // Fetch all bookings with matching status, then filter by guest ID in JS
-  // Airtable linked record filter via FIND/ARRAYJOIN is unreliable
+  // Airtable linked record filter via FIND/ARRAYJOIN is unreliable —
+  // fetch all bookings with matching status, then filter by guest ID in JS
   const allBookings = await airtableGet('WS_Bookings', `{Status} = '${status}'`);
   return allBookings.filter(b => {
     const guests = b.fields['Guest'] || [];
@@ -152,77 +146,84 @@ function logToAxiom(level, event, detail = {}) {
   }).catch(err => console.error('[Axiom ERROR]', err.message));
 }
 
-// ─── STATE MACHINE ───────────────────────────────────────────────────────────
+// ─── MESSAGE RENDERING ───────────────────────────────────────────────────────
+// All copy lives in states.json → messages. {placeholder} substitution only.
 
-async function handleMessage(from, messageText) {
-  const phone = formatPhone(from);
-  const text = messageText.trim().toLowerCase();
-  console.log(`[handleMessage] from: ${phone} | text: ${text}`);
-  logToAxiom('info', 'message_received', { phone, text: messageText.slice(0, 100) });
-
-  const guestRecords = await airtableGet('WS_Guests', `{Phone Number} = '${phone}'`);
-  const guest = guestRecords[0] || null;
-  const sessionState = guest ? guest.fields['Session State'] : null;
-  console.log(`[State] guest: ${guest ? guest.id : 'none'} | state: ${sessionState}`);
-
-  // ── CLEANER REPLY: DONE ──────────────────────────────────────────────────
-  if (text === 'done') {
-    const cleanerRecords = await airtableGet('WS_Cleaners', `{Phone Number} = '${phone}'`);
-    if (cleanerRecords.length > 0) {
-      // F4: was {Active} = 1 — Airtable checkbox requires TRUE()
-      const cleaningRooms = await airtableGet('WS_Rooms', `{Status} = 'Cleaning'`);
-      if (cleaningRooms.length > 0) {
-        const room = cleaningRooms[0];
-        await airtableUpdate('WS_Rooms', room.id, { 'Status': 'Available' });
-        logToAxiom('info', 'state_transition', { phone, roomId: room.id, roomName: room.fields['Room Name'], from: 'Cleaning', to: 'Available', reason: 'cleaner_done' });
-        await sendWhatsApp(phone, `Thank you! ${room.fields['Room Name']} is marked as clean and available. ✅`);
-        if (OWNER_PHONE) {
-          await sendWhatsApp(OWNER_PHONE, `✅ ${room.fields['Room Name']} has been cleaned and is now available for new bookings.`);
-        }
-      } else {
-        await sendWhatsApp(phone, `Thanks! No rooms currently marked for cleaning — nothing to update.`);
-      }
-      return;
-    }
+function msg(key, vars = {}) {
+  let out = STATES.messages[key];
+  if (out === undefined) throw new Error(`states.json missing message: ${key}`);
+  for (const [k, v] of Object.entries(vars)) {
+    out = out.split(`{${k}}`).join(String(v));
   }
+  return out;
+}
 
-  // ── NEW GUEST or FALLBACK ────────────────────────────────────────────────
-  if (!guest || !sessionState || sessionState === 'NEW') {
+// ─── GUARDS ──────────────────────────────────────────────────────────────────
+
+const guards = {
+  async senderIsCleaner(ctx) {
+    const cleanerRecords = await airtableGet('WS_Cleaners', `{Phone Number} = '${ctx.phone}'`);
+    ctx.cleaner = cleanerRecords[0] || null;
+    return cleanerRecords.length > 0;
+  }
+};
+
+// ─── ACTION HANDLERS ─────────────────────────────────────────────────────────
+// Each handler owns its side effects and write ORDER (frozen by fixtures).
+// The Session State it writes comes from the transition's `next` in states.json.
+
+const actions = {
+  // Cleaner replies DONE (global, any state)
+  async cleanerDone(ctx) {
+    // F4: was {Active} = 1 — Airtable checkbox requires TRUE()
+    const cleaningRooms = await airtableGet('WS_Rooms', `{Status} = 'Cleaning'`);
+    if (cleaningRooms.length > 0) {
+      const room = cleaningRooms[0];
+      await airtableUpdate('WS_Rooms', room.id, { 'Status': 'Available' });
+      logToAxiom('info', 'state_transition', { phone: ctx.phone, roomId: room.id, roomName: room.fields['Room Name'], from: 'Cleaning', to: 'Available', reason: 'cleaner_done' });
+      await sendWhatsApp(ctx.phone, msg('cleanerThanks', { roomName: room.fields['Room Name'] }));
+      if (OWNER_PHONE) {
+        await sendWhatsApp(OWNER_PHONE, msg('ownerRoomCleaned', { roomName: room.fields['Room Name'] }));
+      }
+    } else {
+      await sendWhatsApp(ctx.phone, msg('cleanerNothingToClean'));
+    }
+  },
+
+  // NEW guest (or reset): greet with availability + rates, ask for details (F10)
+  async greetAndAskDetails(ctx) {
     const availableRooms = await airtableGet('WS_Rooms', `{Status} = 'Available'`);
     const roomCount = availableRooms.length;
-    // F4: was {Active} = 1 — Airtable checkbox requires TRUE()
+    // F4: was {Active} = 1
     const activeRates = await airtableGet('WS_Rates', `{Active} = TRUE()`);
-    let rateText = '';
-    if (activeRates.length > 0) {
-      rateText = activeRates.map(r =>
-        `• ${r.fields['Rate Name']}: R${r.fields['Amount']} ${r.fields['Rate Type'] === 'Per Night' ? 'per night' : 'per hour'}`
-      ).join('\n');
-    } else {
-      rateText = '• Contact us for current rates';
-    }
+    const rateText = activeRates.length > 0
+      ? activeRates.map(r =>
+          `• ${r.fields['Rate Name']}: R${r.fields['Amount']} ${r.fields['Rate Type'] === 'Per Night' ? 'per night' : 'per hour'}`
+        ).join('\n')
+      : '• Contact us for current rates';
 
-    const greeting = `Hi! 👋 Welcome to Villa Liza Guest Lodge, Boksburg.\n\nWe currently have *${roomCount} room${roomCount !== 1 ? 's' : ''}* available.\n\n*Our rates:*\n${rateText}\n\nTo make an *overnight booking*, please send:\n1. Your full name\n2. Check-in date (e.g. 25 June)\n3. Check-out date (e.g. 27 June)\n\nSend all three, each on a new line.\n\n_For short stay bookings, reply HOURLY and we'll assist you._`;
-
-    if (!guest) {
+    if (!ctx.guest) {
       await airtableCreate('WS_Guests', {
         'Guest Name': 'Unknown',
-        'Phone Number': phone,
+        'Phone Number': ctx.phone,
         'Guest Type': 'WhatsApp',
-        'Session State': 'AWAITING_DETAILS',
+        'Session State': ctx.next,
         'First Visit': new Date().toISOString().split('T')[0]
       });
     } else {
-      await airtableUpdate('WS_Guests', guest.id, { 'Session State': 'AWAITING_DETAILS' });
+      await airtableUpdate('WS_Guests', ctx.guest.id, { 'Session State': ctx.next });
     }
 
-    await sendWhatsApp(phone, greeting);
-    return;
-  }
+    await sendWhatsApp(ctx.phone, msg('greeting', {
+      roomCountText: `${roomCount} room${roomCount !== 1 ? 's' : ''}`,
+      rateText
+    }));
+  },
 
-  // ── AWAITING_DETAILS ────────────────────────────────────────────────────
-  if (sessionState === 'AWAITING_DETAILS') {
-    const lines = messageText.trim().split('\n').map(l => l.trim()).filter(Boolean);
-    let guestName = guest.fields['Guest Name'] !== 'Unknown' ? guest.fields['Guest Name'] : null;
+  // AWAITING_DETAILS: parse name + dates, create Enquiry booking (F7, F13)
+  async collectDetails(ctx) {
+    const lines = ctx.messageText.trim().split('\n').map(l => l.trim()).filter(Boolean);
+    let guestName = ctx.guest.fields['Guest Name'] !== 'Unknown' ? ctx.guest.fields['Guest Name'] : null;
     let checkIn = null;
     let checkOut = null;
 
@@ -242,13 +243,14 @@ async function handleMessage(from, messageText) {
     });
 
     if (!guestName || !checkIn) {
-      await sendWhatsApp(phone, `Sorry, I didn't quite get that. Please reply with your:\n1. Full name\n2. Check-in date (e.g. 25 June)\n3. Check-out date (e.g. 27 June)\n\nSend each on a new line.`);
+      // Stay in AWAITING_DETAILS — no writes, reprompt only
+      await sendWhatsApp(ctx.phone, msg('detailsReprompt'));
       return;
     }
 
-    await airtableUpdate('WS_Guests', guest.id, {
+    await airtableUpdate('WS_Guests', ctx.guest.id, {
       'Guest Name': guestName,
-      'Session State': 'AWAITING_ETA'
+      'Session State': ctx.next
     });
 
     // F4: was {Active} = 1
@@ -256,7 +258,7 @@ async function handleMessage(from, messageText) {
     const rate = activeRates[0] || null;
 
     const bookingData = {
-      'Guest': [guest.id],
+      'Guest': [ctx.guest.id],
       'Booking Type': 'Overnight',
       'Source': 'WhatsApp',
       'Status': 'Enquiry',
@@ -264,7 +266,6 @@ async function handleMessage(from, messageText) {
       'Notes': `Check-in: ${checkIn}${checkOut ? ' | Check-out: ' + checkOut : ''}`,
       'Payment Status': 'Unpaid'
     };
-
     if (rate) {
       bookingData['Rate Applied'] = [rate.id];
       bookingData['Amount Due'] = rate.fields['Amount'];
@@ -277,195 +278,209 @@ async function handleMessage(from, messageText) {
       await airtableUpdate('WS_Bookings', booking.id, { 'Booking Ref': bookingRef });
     }
     logToAxiom(booking.id ? 'info' : 'error', 'booking_create', {
-      phone,
+      phone: ctx.phone,
       guestName,
       bookingRef,
       airtableId: booking.id || null,
       error: booking.error ? JSON.stringify(booking.error) : null
     });
 
-    // F7: Owner was never notified on new booking — now they are
+    // F7: notify owner on new booking
     if (OWNER_PHONE) {
-      await sendWhatsApp(OWNER_PHONE,
-        `📋 New booking enquiry from ${guestName}\nPhone: ${phone}\nRef: ${bookingRef}\nCheck-in: ${checkIn}\nCheck-out: ${checkOut || 'TBC'}`
-      );
+      await sendWhatsApp(OWNER_PHONE, msg('ownerNewBooking', {
+        guestName, phone: ctx.phone, bookingRef, checkIn, checkOut: checkOut || 'TBC'
+      }));
     }
 
-    await sendWhatsApp(phone,
-      `Thanks ${guestName}! 🙏\n\nYour booking enquiry has been received.\n\n*Ref:* ${bookingRef}\n*Check-in:* ${checkIn}\n*Check-out:* ${checkOut || 'TBC'}\n${rate ? `*Rate:* R${rate.fields['Amount']} per night` : ''}\n\nWhat time do you expect to arrive? (e.g. "around 2pm" or "after 5")`
-    );
-    return;
-  }
+    await sendWhatsApp(ctx.phone, msg('bookingReceived', {
+      guestName, bookingRef, checkIn,
+      checkOut: checkOut || 'TBC',
+      rateLine: rate ? `*Rate:* R${rate.fields['Amount']} per night` : ''
+    }));
+  },
 
-  // ── AWAITING_ETA ────────────────────────────────────────────────────────
-  if (sessionState === 'AWAITING_ETA') {
-    const eta = messageText.trim();
+  // AWAITING_ETA: record ETA, confirm booking
+  async recordEta(ctx) {
+    const eta = ctx.messageText.trim();
     // F5: was FIND/ARRAYJOIN — now JS filter on fetched records
-    const bookings = await airtableGetBookingsByGuestId(guest.id, 'Enquiry');
+    const bookings = await airtableGetBookingsByGuestId(ctx.guest.id, 'Enquiry');
     if (bookings.length > 0) {
       await airtableUpdate('WS_Bookings', bookings[0].id, {
         'ETA': eta,
         'Status': 'Confirmed'
       });
     }
-    await airtableUpdate('WS_Guests', guest.id, { 'Session State': 'CONFIRMED' });
-    logToAxiom('info', 'state_transition', { phone, guestId: guest.id, from: 'AWAITING_ETA', to: 'CONFIRMED', eta });
-    await sendWhatsApp(phone,
-      `Perfect! We'll have your room ready for you. 🛏️\n\nSee you at *${eta}*.\n\nWhen you arrive, reply with a number:\n1 - I'm at the gate\n2 - Cancel my booking\n\nWe look forward to hosting you at Villa Liza! 🌟`
-    );
-    return;
-  }
+    await airtableUpdate('WS_Guests', ctx.guest.id, { 'Session State': ctx.next });
+    logToAxiom('info', 'state_transition', { phone: ctx.phone, guestId: ctx.guest.id, from: 'AWAITING_ETA', to: ctx.next, eta });
+    await sendWhatsApp(ctx.phone, msg('etaConfirmed', { eta }));
+  },
 
-  // ── CONFIRMED ───────────────────────────────────────────────────────────
-  // F8: CONFIRMED now handles gate arrival and cancel only
-  // Checkout moved to CHECKED_IN state
-  if (sessionState === 'CONFIRMED') {
-    // F9: accept number or word equivalent (Rule 11)
-    if (text === '1' || text === 'here' || text === 'arrived' || text === 'at the gate') {
-      // F11: gate arrival — assign first available room, notify party, move to CHECKED_IN
+  // CONFIRMED → "1": gate arrival (F11)
+  async gateArrival(ctx) {
+    // Step 1: notify phone from WS_Properties, fallback to OWNER_PHONE
+    const properties = await airtableGet('WS_Properties', `{Property Name} = 'Villa Liza Guest Lodge'`);
+    const notifyPhone = (properties.length > 0 && properties[0].fields['Notify Phone'])
+      ? properties[0].fields['Notify Phone'].replace(/[\s\-\+]/g, '')
+      : OWNER_PHONE;
 
-      // Step 1: get notify phone from WS_Properties, fallback to OWNER_PHONE
-      const properties = await airtableGet('WS_Properties', `{Property Name} = 'Villa Liza Guest Lodge'`);
-      const notifyPhone = (properties.length > 0 && properties[0].fields['Notify Phone'])
-        ? properties[0].fields['Notify Phone'].replace(/[\s\-\+]/g, '')
-        : OWNER_PHONE;
-
-      // Step 2: find first available room
-      const availableRooms = await airtableGet('WS_Rooms', `{Status} = 'Available'`);
-      let assignedRoomName = null;
-      let assignedRoomId = null;
-
-      if (availableRooms.length > 0) {
-        assignedRoomId = availableRooms[0].id;
-        assignedRoomName = availableRooms[0].fields['Room Name'];
-        // Step 3: set room → Occupied
-        await airtableUpdate('WS_Rooms', assignedRoomId, { 'Status': 'Occupied' });
-      }
-
-      // Step 4: update booking — Checked In + link room + timestamp if assigned
-      const bookings = await airtableGetBookingsByGuestId(guest.id, 'Confirmed');
-      if (bookings.length > 0) {
-        const bookingUpdate = {
-          'Status': 'Checked In',
-          'Checked In At': new Date().toISOString()
-        };
-        if (assignedRoomId) bookingUpdate['Room'] = [assignedRoomId];
-        await airtableUpdate('WS_Bookings', bookings[0].id, bookingUpdate);
-      }
-
-      // Step 5: set session → CHECKED_IN
-      await airtableUpdate('WS_Guests', guest.id, { 'Session State': 'CHECKED_IN' });
-      logToAxiom('info', 'state_transition', { phone, guestId: guest.id, from: 'CONFIRMED', to: 'CHECKED_IN', assignedRoom: assignedRoomName || null });
-
-      // Step 6: notify party
-      if (notifyPhone) {
-        const roomInfo = assignedRoomName ? `${assignedRoomName} assigned.` : 'No rooms available — please assign manually.';
-        await sendWhatsApp(notifyPhone,
-          `🔔 ${guest.fields['Guest Name']} is at the gate. ${roomInfo}\nPhone: ${phone}`
-        );
-      }
-
-      // Step 7: tell guest their room or no availability
-      if (assignedRoomName) {
-        await sendWhatsApp(phone,
-          `Welcome to Villa Liza! 🌟 You've been assigned *${assignedRoomName}*.\n\nSomeone is on their way to open the gate for you. Enjoy your stay!\n\nWhen you're ready to leave, reply with a number:\n1 - Check out`
-        );
-      } else {
-        await sendWhatsApp(phone,
-          `Welcome to Villa Liza! 🌟 We've notified someone to assist you at the gate.\n\nEnjoy your stay! When you're ready to leave, reply with a number:\n1 - Check out`
-        );
-      }
-      return;
+    // Step 2: first available room
+    const availableRooms = await airtableGet('WS_Rooms', `{Status} = 'Available'`);
+    let assignedRoomName = null;
+    let assignedRoomId = null;
+    if (availableRooms.length > 0) {
+      assignedRoomId = availableRooms[0].id;
+      assignedRoomName = availableRooms[0].fields['Room Name'];
+      // Step 3: room → Occupied
+      await airtableUpdate('WS_Rooms', assignedRoomId, { 'Status': 'Occupied' });
     }
 
-    if (text === '2' || text === 'cancel') {
-      // F5: was FIND/ARRAYJOIN
-      const bookings = await airtableGetBookingsByGuestId(guest.id, 'Confirmed');
-      if (bookings.length > 0) {
-        await airtableUpdate('WS_Bookings', bookings[0].id, { 'Status': 'Cancelled' });
-      }
-      await airtableUpdate('WS_Guests', guest.id, { 'Session State': 'NEW' });
-      logToAxiom('info', 'state_transition', { phone, guestId: guest.id, from: 'CONFIRMED', to: 'NEW', reason: 'cancel' });
-      await sendWhatsApp(phone, `Your booking has been cancelled. No problem at all — we hope to see you another time. 👋`);
-      return;
+    // Step 4: booking → Checked In + link room + timestamp
+    const bookings = await airtableGetBookingsByGuestId(ctx.guest.id, 'Confirmed');
+    if (bookings.length > 0) {
+      const bookingUpdate = {
+        'Status': 'Checked In',
+        'Checked In At': new Date().toISOString()
+      };
+      if (assignedRoomId) bookingUpdate['Room'] = [assignedRoomId];
+      await airtableUpdate('WS_Bookings', bookings[0].id, bookingUpdate);
     }
 
-    // F9: fallback — show numbered menu
-    await sendWhatsApp(phone,
-      `Hi ${guest.fields['Guest Name']}! Your booking is confirmed. 🛏️\n\nReply with a number:\n1 - I'm at the gate\n2 - Cancel my booking`
-    );
-    return;
-  }
+    // Step 5: session → CHECKED_IN
+    await airtableUpdate('WS_Guests', ctx.guest.id, { 'Session State': ctx.next });
+    logToAxiom('info', 'state_transition', { phone: ctx.phone, guestId: ctx.guest.id, from: 'CONFIRMED', to: ctx.next, assignedRoom: assignedRoomName || null });
 
-  // ── CHECKED_IN ──────────────────────────────────────────────────────────
-  // F8: new state — guest has arrived, booking is Checked In
-  if (sessionState === 'CHECKED_IN') {
-    if (text === '1' || text === 'checking out' || text === 'checkout' || text === 'check out') {
-      // F14: gate cooldown guard — if guest just checked in (< 60s ago), ignore checkout trigger
-      const recentBookings = await airtableGetBookingsByGuestId(guest.id, 'Checked In');
-      if (recentBookings.length > 0 && recentBookings[0].fields['Checked In At']) {
-        const checkedInAt = new Date(recentBookings[0].fields['Checked In At']);
-        const secondsSinceCheckin = (Date.now() - checkedInAt.getTime()) / 1000;
-        if (secondsSinceCheckin < 60) {
-          await sendWhatsApp(phone,
-            `Hi ${guest.fields['Guest Name']}! You're checked in to Villa Liza. 🛏️
-
-When you're ready to leave, reply with a number:
-1 - Check out`
-          );
-          return;
-        }
-      }
-      // F5: was FIND/ARRAYJOIN
-      const bookings = await airtableGetBookingsByGuestId(guest.id, 'Checked In');
-      let roomName = 'your room';
-      if (bookings.length > 0) {
-        const booking = bookings[0];
-        await airtableUpdate('WS_Bookings', booking.id, {
-          'Status': 'Checked Out',
-          'Checkout Confirmed': true
-        });
-        if (booking.fields['Room'] && booking.fields['Room'].length > 0) {
-          const roomId = booking.fields['Room'][0];
-          const roomRecords = await airtableGet('WS_Rooms', `RECORD_ID() = '${roomId}'`);
-          if (roomRecords.length > 0) {
-            roomName = roomRecords[0].fields['Room Name'];
-            await airtableUpdate('WS_Rooms', roomId, { 'Status': 'Cleaning' });
-          }
-        }
-      }
-      // F4: was {Active} = 1
-      const cleaners = await airtableGet('WS_Cleaners', `{Active} = TRUE()`);
-      for (const cleaner of cleaners) {
-        const cleanerPhone = cleaner.fields['Phone Number'];
-        const cleanerName = cleaner.fields['Cleaner Name'];
-        if (cleanerPhone) {
-          await sendWhatsApp(
-            formatPhone(cleanerPhone),
-            `Hi ${cleanerName} 🧹 ${roomName} has just been vacated. Please prepare it with fresh linen immediately.\n\nReply *DONE* when complete.`
-          );
-        }
-      }
-      await airtableUpdate('WS_Guests', guest.id, { 'Session State': 'NEW' });
-      logToAxiom('info', 'state_transition', { phone, guestId: guest.id, from: 'CHECKED_IN', to: 'NEW', reason: 'checkout', roomName });
-      await sendWhatsApp(phone,
-        `Thank you for staying with us at Villa Liza! 🌟\n\nWe hope you enjoyed your stay. You're welcome back anytime.\n\nSafe travels! 👋`
-      );
-      return;
+    // Step 6: notify party
+    if (notifyPhone) {
+      await sendWhatsApp(notifyPhone, msg('gateNotify', {
+        guestName: ctx.guest.fields['Guest Name'],
+        roomInfo: assignedRoomName
+          ? msg('gateRoomAssignedInfo', { roomName: assignedRoomName })
+          : msg('gateNoRoomInfo'),
+        phone: ctx.phone
+      }));
     }
 
-    // F9: fallback — show numbered menu
-    await sendWhatsApp(phone,
-      `Hi ${guest.fields['Guest Name']}! You're checked in. 🛏️\n\nReply with a number:\n1 - Check out`
-    );
-    return;
+    // Step 7: tell guest
+    await sendWhatsApp(ctx.phone, assignedRoomName
+      ? msg('welcomeAssigned', { roomName: assignedRoomName })
+      : msg('welcomeUnassigned'));
+  },
+
+  // CONFIRMED → "2": cancel
+  async cancelBooking(ctx) {
+    // F5: was FIND/ARRAYJOIN
+    const bookings = await airtableGetBookingsByGuestId(ctx.guest.id, 'Confirmed');
+    if (bookings.length > 0) {
+      await airtableUpdate('WS_Bookings', bookings[0].id, { 'Status': 'Cancelled' });
+    }
+    await airtableUpdate('WS_Guests', ctx.guest.id, { 'Session State': ctx.next });
+    logToAxiom('info', 'state_transition', { phone: ctx.phone, guestId: ctx.guest.id, from: 'CONFIRMED', to: ctx.next, reason: 'cancel' });
+    await sendWhatsApp(ctx.phone, msg('cancelled'));
+  },
+
+  // CONFIRMED fallback menu (F9)
+  async showConfirmedMenu(ctx) {
+    await sendWhatsApp(ctx.phone, msg('confirmedMenu', { guestName: ctx.guest.fields['Guest Name'] }));
+  },
+
+  // CHECKED_IN → "1": checkout + cleaner dispatch
+  async checkout(ctx) {
+    // F14: gate cooldown guard — checkout < 60s after check-in is ignored
+    const recentBookings = await airtableGetBookingsByGuestId(ctx.guest.id, 'Checked In');
+    if (recentBookings.length > 0 && recentBookings[0].fields['Checked In At']) {
+      const checkedInAt = new Date(recentBookings[0].fields['Checked In At']);
+      const secondsSinceCheckin = (Date.now() - checkedInAt.getTime()) / 1000;
+      if (secondsSinceCheckin < 60) {
+        await sendWhatsApp(ctx.phone, msg('gateCooldownMenu', { guestName: ctx.guest.fields['Guest Name'] }));
+        return; // stay CHECKED_IN
+      }
+    }
+    // F5: was FIND/ARRAYJOIN
+    const bookings = await airtableGetBookingsByGuestId(ctx.guest.id, 'Checked In');
+    let roomName = 'your room';
+    if (bookings.length > 0) {
+      const booking = bookings[0];
+      await airtableUpdate('WS_Bookings', booking.id, {
+        'Status': 'Checked Out',
+        'Checkout Confirmed': true
+      });
+      if (booking.fields['Room'] && booking.fields['Room'].length > 0) {
+        const roomId = booking.fields['Room'][0];
+        const roomRecords = await airtableGet('WS_Rooms', `RECORD_ID() = '${roomId}'`);
+        if (roomRecords.length > 0) {
+          roomName = roomRecords[0].fields['Room Name'];
+          await airtableUpdate('WS_Rooms', roomId, { 'Status': 'Cleaning' });
+        }
+      }
+    }
+    // F4: was {Active} = 1
+    const cleaners = await airtableGet('WS_Cleaners', `{Active} = TRUE()`);
+    for (const cleaner of cleaners) {
+      const cleanerPhone = cleaner.fields['Phone Number'];
+      const cleanerName = cleaner.fields['Cleaner Name'];
+      if (cleanerPhone) {
+        await sendWhatsApp(formatPhone(cleanerPhone), msg('cleanerDispatch', { cleanerName, roomName }));
+      }
+    }
+    await airtableUpdate('WS_Guests', ctx.guest.id, { 'Session State': ctx.next });
+    logToAxiom('info', 'state_transition', { phone: ctx.phone, guestId: ctx.guest.id, from: 'CHECKED_IN', to: ctx.next, reason: 'checkout', roomName });
+    await sendWhatsApp(ctx.phone, msg('checkoutThanks'));
+  },
+
+  // CHECKED_IN fallback menu (F9)
+  async showCheckedInMenu(ctx) {
+    await sendWhatsApp(ctx.phone, msg('checkedInMenu', { guestName: ctx.guest.fields['Guest Name'] }));
+  },
+
+  // Unknown session state: reset to NEW
+  async unknownStateReset(ctx) {
+    if (ctx.guest) {
+      await airtableUpdate('WS_Guests', ctx.guest.id, { 'Session State': ctx.next });
+    }
+    await sendWhatsApp(ctx.phone, msg('unknownFallback'));
+  }
+};
+
+// ─── DISPATCHER ──────────────────────────────────────────────────────────────
+// Reads states.json: global rows first (guarded), then the current state's rows.
+// A row matches when `inputs` is "*" or contains the lowercased message.
+
+function matchTransition(rows, text) {
+  return rows.find(t => t.inputs === '*' || t.inputs.includes(text)) || null;
+}
+
+async function handleMessage(from, messageText) {
+  const phone = formatPhone(from);
+  const text = messageText.trim().toLowerCase();
+  console.log(`[handleMessage] from: ${phone} | text: ${text}`);
+  logToAxiom('info', 'message_received', { phone, text: messageText.slice(0, 100) });
+
+  const guestRecords = await airtableGet('WS_Guests', `{Phone Number} = '${phone}'`);
+  const guest = guestRecords[0] || null;
+  const sessionState = guest ? guest.fields['Session State'] : null;
+  console.log(`[State] guest: ${guest ? guest.id : 'none'} | state: ${sessionState}`);
+
+  const ctx = { phone, text, messageText, guest, next: null, cleaner: null };
+
+  // Global transitions (cleaner DONE) — guard decides, any state
+  for (const t of STATES.global) {
+    if (t.inputs !== '*' && !t.inputs.includes(text)) continue;
+    if (t.guard && !(await guards[t.guard](ctx))) continue;
+    ctx.next = t.next || null;
+    console.log(`[Dispatch] global → ${t.action}`);
+    return actions[t.action](ctx);
   }
 
-  // ── FALLBACK ─────────────────────────────────────────────────────────────
-  if (guest) {
-    await airtableUpdate('WS_Guests', guest.id, { 'Session State': 'NEW' });
-  }
-  await sendWhatsApp(phone, `Hi! Reply with your name and dates to make a booking, or *CHECKING OUT* if you are leaving today.`);
+  // State routing: no guest / no state / NEW all route to NEW; unknown states to "*"
+  const stateKey = (!guest || !sessionState || sessionState === 'NEW')
+    ? 'NEW'
+    : (STATES.states[sessionState] ? sessionState : '*');
+
+  const transition = matchTransition(STATES.states[stateKey], text);
+  if (!transition) return; // unreachable while every state has a "*" row
+  ctx.next = transition.next || null;
+  console.log(`[Dispatch] ${stateKey} → ${transition.action}${ctx.next ? ' → ' + ctx.next : ''}`);
+  return actions[transition.action](ctx);
 }
 
 // ─── MAIN HANDLER ────────────────────────────────────────────────────────────
@@ -511,6 +526,7 @@ module.exports = async function handler(req, res) {
 
     if (!messages || messages.length === 0) {
       // F2: respond 200 before returning on no-message events (status updates etc)
+      // NOTE: delivery-status callbacks are dropped here — B3 changes this deliberately
       res.status(200).send('OK');
       return;
     }
@@ -527,7 +543,6 @@ module.exports = async function handler(req, res) {
     }
 
     // F2: handleMessage runs FULLY before we respond 200
-    // Previous code sent 200 first — Vercel could kill the function mid-execution
     try {
       await handleMessage(from, messageText);
     } catch (err) {

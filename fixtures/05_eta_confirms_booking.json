@@ -1,0 +1,23 @@
+{
+  "name": "ETA: free-text ETA confirms the Enquiry booking (F5 lookup) and moves guest to CONFIRMED",
+  "seed": {
+    "WS_Guests": [
+      { "id": "recG1", "fields": { "Guest Name": "John Smith", "Phone Number": "27821234567", "Session State": "AWAITING_ETA" } }
+    ],
+    "WS_Bookings": [
+      { "id": "recB1", "fields": { "Guest": ["recG1"], "Status": "Enquiry", "Booking Type": "Overnight" } }
+    ],
+    "WS_Cleaners": []
+  },
+  "message": { "from": "27821234567", "text": "around 2pm" },
+  "expect": {
+    "status": 200,
+    "writes": [
+      { "op": "update", "table": "WS_Bookings", "id": "recB1", "fields": { "ETA": "around 2pm", "Status": "Confirmed" } },
+      { "op": "update", "table": "WS_Guests", "id": "recG1", "fields": { "Session State": "CONFIRMED" } }
+    ],
+    "sends": [
+      { "to": "27821234567", "includes": ["See you at *around 2pm*", "1 - I'm at the gate", "2 - Cancel my booking"] }
+    ]
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "name": "cleaner DONE: room back to Available, cleaner thanked, owner notified",
+  "seed": {
+    "WS_Cleaners": [
+      { "id": "recC1", "fields": { "Cleaner Name": "Thandi", "Phone Number": "27821110000", "Active": true } }
+    ],
+    "WS_Rooms": [
+      { "id": "recR1", "fields": { "Room Name": "Room 1", "Status": "Cleaning" } },
+      { "id": "recR2", "fields": { "Room Name": "Room 2", "Status": "Available" } }
+    ],
+    "WS_Guests": []
+  },
+  "message": { "from": "27821110000", "text": "DONE" },
+  "expect": {
+    "status": 200,
+    "writes": [
+      { "op": "update", "table": "WS_Rooms", "id": "recR1", "fields": { "Status": "Available" } }
+    ],
+    "sends": [
+      { "to": "27821110000", "includes": ["Thank you! Room 1 is marked as clean and available"] },
+      { "to": "27830000001", "includes": ["Room 1 has been cleaned and is now available"] }
+    ]
+  }
+}

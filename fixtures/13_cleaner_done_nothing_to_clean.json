@@ -1,0 +1,20 @@
+{
+  "name": "cleaner DONE with no rooms in Cleaning: polite no-op, no writes",
+  "seed": {
+    "WS_Cleaners": [
+      { "id": "recC1", "fields": { "Cleaner Name": "Thandi", "Phone Number": "27821110000", "Active": true } }
+    ],
+    "WS_Rooms": [
+      { "id": "recR1", "fields": { "Room Name": "Room 1", "Status": "Available" } }
+    ],
+    "WS_Guests": []
+  },
+  "message": { "from": "27821110000", "text": "done" },
+  "expect": {
+    "status": 200,
+    "writes": [],
+    "sends": [
+      { "to": "27821110000", "includes": ["No rooms currently marked for cleaning"] }
+    ]
+  }
+}

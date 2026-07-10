@@ -1,0 +1,54 @@
+{
+  "comment": "Wabistay state machine (H0). state → input → action → next state, plus all outbound message copy. Handlers in api/wabistay/webhook.js read this table — no nested if-state logic. Inputs are matched against the trimmed, lowercased message; \"*\" is the fallback row. \"next\" is the Session State the action writes (handlers control write ordering; a handler may stay in-state, e.g. invalid details or the F14 cooldown guard).",
+
+  "global": [
+    { "inputs": ["done"], "guard": "senderIsCleaner", "action": "cleanerDone" }
+  ],
+
+  "states": {
+    "NEW": [
+      { "inputs": "*", "action": "greetAndAskDetails", "next": "AWAITING_DETAILS" }
+    ],
+    "AWAITING_DETAILS": [
+      { "inputs": "*", "action": "collectDetails", "next": "AWAITING_ETA" }
+    ],
+    "AWAITING_ETA": [
+      { "inputs": "*", "action": "recordEta", "next": "CONFIRMED" }
+    ],
+    "CONFIRMED": [
+      { "inputs": ["1", "here", "arrived", "at the gate"], "action": "gateArrival", "next": "CHECKED_IN" },
+      { "inputs": ["2", "cancel"], "action": "cancelBooking", "next": "NEW" },
+      { "inputs": "*", "action": "showConfirmedMenu" }
+    ],
+    "CHECKED_IN": [
+      { "inputs": ["1", "checking out", "checkout", "check out"], "action": "checkout", "next": "NEW" },
+      { "inputs": "*", "action": "showCheckedInMenu" }
+    ],
+    "*": [
+      { "inputs": "*", "action": "unknownStateReset", "next": "NEW" }
+    ]
+  },
+
+  "messages": {
+    "greeting": "Hi! 👋 Welcome to Villa Liza Guest Lodge, Boksburg.\n\nWe currently have *{roomCountText}* available.\n\n*Our rates:*\n{rateText}\n\nTo make an *overnight booking*, please send:\n1. Your full name\n2. Check-in date (e.g. 25 June)\n3. Check-out date (e.g. 27 June)\n\nSend all three, each on a new line.\n\n_For short stay bookings, reply HOURLY and we'll assist you._",
+    "detailsReprompt": "Sorry, I didn't quite get that. Please reply with your:\n1. Full name\n2. Check-in date (e.g. 25 June)\n3. Check-out date (e.g. 27 June)\n\nSend each on a new line.",
+    "ownerNewBooking": "📋 New booking enquiry from {guestName}\nPhone: {phone}\nRef: {bookingRef}\nCheck-in: {checkIn}\nCheck-out: {checkOut}",
+    "bookingReceived": "Thanks {guestName}! 🙏\n\nYour booking enquiry has been received.\n\n*Ref:* {bookingRef}\n*Check-in:* {checkIn}\n*Check-out:* {checkOut}\n{rateLine}\n\nWhat time do you expect to arrive? (e.g. \"around 2pm\" or \"after 5\")",
+    "etaConfirmed": "Perfect! We'll have your room ready for you. 🛏️\n\nSee you at *{eta}*.\n\nWhen you arrive, reply with a number:\n1 - I'm at the gate\n2 - Cancel my booking\n\nWe look forward to hosting you at Villa Liza! 🌟",
+    "gateNotify": "🔔 {guestName} is at the gate. {roomInfo}\nPhone: {phone}",
+    "gateRoomAssignedInfo": "{roomName} assigned.",
+    "gateNoRoomInfo": "No rooms available — please assign manually.",
+    "welcomeAssigned": "Welcome to Villa Liza! 🌟 You've been assigned *{roomName}*.\n\nSomeone is on their way to open the gate for you. Enjoy your stay!\n\nWhen you're ready to leave, reply with a number:\n1 - Check out",
+    "welcomeUnassigned": "Welcome to Villa Liza! 🌟 We've notified someone to assist you at the gate.\n\nEnjoy your stay! When you're ready to leave, reply with a number:\n1 - Check out",
+    "cancelled": "Your booking has been cancelled. No problem at all — we hope to see you another time. 👋",
+    "confirmedMenu": "Hi {guestName}! Your booking is confirmed. 🛏️\n\nReply with a number:\n1 - I'm at the gate\n2 - Cancel my booking",
+    "gateCooldownMenu": "Hi {guestName}! You're checked in to Villa Liza. 🛏️\n\nWhen you're ready to leave, reply with a number:\n1 - Check out",
+    "checkedInMenu": "Hi {guestName}! You're checked in. 🛏️\n\nReply with a number:\n1 - Check out",
+    "cleanerDispatch": "Hi {cleanerName} 🧹 {roomName} has just been vacated. Please prepare it with fresh linen immediately.\n\nReply *DONE* when complete.",
+    "checkoutThanks": "Thank you for staying with us at Villa Liza! 🌟\n\nWe hope you enjoyed your stay. You're welcome back anytime.\n\nSafe travels! 👋",
+    "cleanerThanks": "Thank you! {roomName} is marked as clean and available. ✅",
+    "ownerRoomCleaned": "✅ {roomName} has been cleaned and is now available for new bookings.",
+    "cleanerNothingToClean": "Thanks! No rooms currently marked for cleaning — nothing to update.",
+    "unknownFallback": "Hi! Reply with your name and dates to make a booking, or *CHECKING OUT* if you are leaving today."
+  }
+}

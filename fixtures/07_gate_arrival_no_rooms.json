@@ -1,0 +1,30 @@
+{
+  "name": "gate arrival with no available rooms: no room write, notify party told to assign manually, guest still CHECKED_IN",
+  "seed": {
+    "WS_Properties": [
+      { "id": "recP1", "fields": { "Property Name": "Villa Liza Guest Lodge", "Notify Phone": "27831112222" } }
+    ],
+    "WS_Rooms": [
+      { "id": "recR1", "fields": { "Room Name": "Room 1", "Status": "Occupied" } }
+    ],
+    "WS_Guests": [
+      { "id": "recG1", "fields": { "Guest Name": "John Smith", "Phone Number": "27821234567", "Session State": "CONFIRMED" } }
+    ],
+    "WS_Bookings": [
+      { "id": "recB1", "fields": { "Guest": ["recG1"], "Status": "Confirmed" } }
+    ],
+    "WS_Cleaners": []
+  },
+  "message": { "from": "27821234567", "text": "1" },
+  "expect": {
+    "status": 200,
+    "writes": [
+      { "op": "update", "table": "WS_Bookings", "id": "recB1", "fields": { "Status": "Checked In", "Checked In At": "re:^\\d{4}-\\d{2}-\\d{2}T" } },
+      { "op": "update", "table": "WS_Guests", "id": "recG1", "fields": { "Session State": "CHECKED_IN" } }
+    ],
+    "sends": [
+      { "to": "27831112222", "includes": ["John Smith is at the gate", "No rooms available — please assign manually"] },
+      { "to": "27821234567", "includes": ["notified someone to assist you at the gate", "1 - Check out"] }
+    ]
+  }
+}

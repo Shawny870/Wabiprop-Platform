@@ -1,0 +1,19 @@
+{
+  "name": "status callback (no messages array): 200 OK, nothing sent, nothing written — CURRENT behaviour; B3 will change this deliberately",
+  "seed": {},
+  "payload": {
+    "object": "whatsapp_business_account",
+    "entry": [{
+      "id": "WABA_TEST",
+      "changes": [{
+        "field": "messages",
+        "value": {
+          "messaging_product": "whatsapp",
+          "metadata": { "display_phone_number": "27000000000", "phone_number_id": "111000111000" },
+          "statuses": [{ "id": "wamid.sent.test", "status": "delivered", "timestamp": "1750000000", "recipient_id": "27821234567" }]
+        }
+      }]
+    }]
+  },
+  "expect": { "status": 200, "writes": [], "sends": [] }
+}
