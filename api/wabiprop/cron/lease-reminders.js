@@ -4,6 +4,13 @@
 // after rent-reminders (04:00 UTC) rather than the same instant.
 // Manual trigger: GET https://wabiprop-platform.vercel.app/api/wabiprop/cron/lease-reminders
 //
+// PARKED 11 Jul 2026 (Builder_Brief_Complete_Cutover.md): removed from vercel.json
+// "crons" — Wabiprop's WhatsApp number was reassigned to Wabistay as its permanent
+// production number, and Wabiprop's replacement number is not yet sourced. Handler
+// left intact, not deleted. Re-add the vercel.json cron entry once a new Wabiprop
+// number lands. Manual trigger above still resolves but sends will fail loudly
+// (WP_PHONE_NUMBER_ID is cleared, not repointed) rather than silently misfiring.
+//
 // RECONCILED POST-SESSION: originally shipped tenant-facing (one message per
 // tenant, mirroring Group 10 exactly). CEO decision: switch to agent-facing --
 // renewal/vacate decisions are agent work, and 7/3/1 days is too short a lead

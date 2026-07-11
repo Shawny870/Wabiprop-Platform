@@ -3,6 +3,13 @@
 // Schedule: Monday 07:00 SAST = 05:00 UTC (vercel.json: "0 5 * * 1")
 // Manual trigger: GET https://wabiprop-platform.vercel.app/api/wabiprop/cron/owner-weekly
 //
+// PARKED 11 Jul 2026 (Builder_Brief_Complete_Cutover.md): removed from vercel.json
+// "crons" — Wabiprop's WhatsApp number was reassigned to Wabistay as its permanent
+// production number, and Wabiprop's replacement number is not yet sourced. Handler
+// left intact, not deleted. Re-add the vercel.json cron entry once a new Wabiprop
+// number lands. Manual trigger above still resolves but sends will fail loudly
+// (WP_PHONE_NUMBER_ID is cleared, not repointed) rather than silently misfiring.
+//
 // Content per Brief: prior month's rental income summary + outstanding maintenance
 // spend for the period. Plain outbound message -- no interactive menu (matches
 // Group 6's owner-notification pattern; the fuller "Owner Monthly Summary" template

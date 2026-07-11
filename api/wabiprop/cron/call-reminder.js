@@ -3,6 +3,13 @@
 // Schedule: hourly (vercel.json: "0 * * * *")
 // Manual trigger: GET https://wabiprop-platform.vercel.app/api/wabiprop/cron/call-reminder
 //
+// PARKED 11 Jul 2026 (Builder_Brief_Complete_Cutover.md): removed from vercel.json
+// "crons" — Wabiprop's WhatsApp number was reassigned to Wabistay as its permanent
+// production number, and Wabiprop's replacement number is not yet sourced. Handler
+// left intact, not deleted. Re-add the vercel.json cron entry once a new Wabiprop
+// number lands. Manual trigger above still resolves but sends will fail loudly
+// (WP_PHONE_NUMBER_ID is cleared, not repointed) rather than silently misfiring.
+//
 // Any issue in Call Requested status with no reminder sent yet, older than N hours
 // (Date Reported is the anchor -- each call request creates its own WP_Issues
 // record per Menu Spec Flow T2, so Date Reported is the call-request timestamp),
