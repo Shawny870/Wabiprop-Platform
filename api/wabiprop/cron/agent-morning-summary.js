@@ -3,6 +3,13 @@
 // Schedule: Daily 07:00 SAST = 05:00 UTC (vercel.json: "0 5 * * *")
 // Manual trigger: GET https://wabiprop-platform.vercel.app/api/wabiprop/cron/agent-morning-summary
 //
+// PARKED 11 Jul 2026 (Builder_Brief_Complete_Cutover.md): removed from vercel.json
+// "crons" — Wabiprop's WhatsApp number was reassigned to Wabistay as its permanent
+// production number, and Wabiprop's replacement number is not yet sourced. Handler
+// left intact, not deleted. Re-add the vercel.json cron entry once a new Wabiprop
+// number lands. Manual trigger above still resolves but sends will fail loudly
+// (WP_PHONE_NUMBER_ID is cleared, not repointed) rather than silently misfiring.
+//
 // Content per Brief (narrower than Menu Spec Section 5.6's fuller Flow A5 template):
 // open issues count, stale issues count, "anything awaiting agent action".
 //

@@ -192,4 +192,4 @@ function assertFixture(assert, expect, ctx, res) {
   });
 }
 
-module.exports = { installEnv, runFixture, assertFixture, metaTextPayload, makeRes, TEST_ENV };
+module.exports = { installEnv, runFixture, assertFixture, metaTextPayload, makeRes, TEST_ENV, installFetch, MockAirtable };

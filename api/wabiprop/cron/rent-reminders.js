@@ -3,6 +3,13 @@
 // Schedule: Daily 06:00 SAST = 04:00 UTC (vercel.json: "0 4 * * *")
 // Manual trigger: GET https://wabiprop-platform.vercel.app/api/wabiprop/cron/rent-reminders
 //
+// PARKED 11 Jul 2026 (Builder_Brief_Complete_Cutover.md): removed from vercel.json
+// "crons" — Wabiprop's WhatsApp number was reassigned to Wabistay as its permanent
+// production number, and Wabiprop's replacement number is not yet sourced. Handler
+// left intact, not deleted. Re-add the vercel.json cron entry once a new Wabiprop
+// number lands. Manual trigger above still resolves but sends will fail loudly
+// (WP_PHONE_NUMBER_ID is cleared, not repointed) rather than silently misfiring.
+//
 // Content per Brief: 7/3/1 day before rent due date -> message to tenant.
 // Due-date source is WP_Leases."Rent Due Day" (day-of-month number) -- CEO decision,
 // NOT WP_Payments."Expected Payment Date". This cron computes each lease's next

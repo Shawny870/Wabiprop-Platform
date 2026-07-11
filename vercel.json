@@ -9,11 +9,5 @@
   "rewrites": [
     { "source": "/dashboard", "destination": "/api/dashboard" }
   ],
-  "crons": [
-    { "path": "/api/wabiprop/cron/owner-weekly", "schedule": "0 5 * * 1" },
-    { "path": "/api/wabiprop/cron/agent-morning-summary", "schedule": "0 5 * * *" },
-    { "path": "/api/wabiprop/cron/rent-reminders", "schedule": "0 4 * * *" },
-    { "path": "/api/wabiprop/cron/call-reminder", "schedule": "0 * * * *" },
-    { "path": "/api/wabiprop/cron/lease-reminders", "schedule": "30 4 * * *" }
-  ]
+  "crons": []
 }

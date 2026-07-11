@@ -22,8 +22,14 @@ const AXIOM_TOKEN        = process.env.AXIOM_TOKEN;
 // ─── PHONE NUMBER ID DISPATCH CONSTANTS ─────────────────────────────────────
 // Two separate WABAs. Routing is decided by the receiving phone_number_id,
 // not by sender identity lookup. Confirmed by Design Engineer — Option A.
-const WP_PHONE_NUMBER_ID_CONST = '1157302750805659';
-const WS_PHONE_NUMBER_ID_CONST = '1158666973993969';
+//
+// 11 Jul 2026 cutover (Builder_Brief_Complete_Cutover.md): Wabiprop's number
+// was reassigned to Wabistay as its permanent production number. Wabiprop's
+// WhatsApp integration is PARKED (not migrated) until a replacement number is
+// sourced — WP_PHONE_NUMBER_ID_CONST is null until then. Do not remove the
+// WP_Leads dispatch branch below; it is needed again once a number lands.
+const WP_PHONE_NUMBER_ID_CONST = null; // Wabiprop parked — no number assigned. Update when sourced.
+const WS_PHONE_NUMBER_ID_CONST = '1157302750805659';
 
 // ─── PRODUCT HANDLERS ────────────────────────────────────────────────────────
 // Required at module load. Each exports module.exports = async function handler(req, res).
