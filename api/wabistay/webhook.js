@@ -473,11 +473,16 @@ const actions = {
     }
     // F4: was {Active} = 1
     const cleaners = await airtableGet('WS_Cleaners', `{Active} = TRUE()`);
+    // DIAG (temporary — cleaner-notify send path instrumentation, remove once resolved):
+    console.log(`[Cleaner Dispatch DIAG] cleaner count: ${cleaners.length} | raw phone fields:`, JSON.stringify(cleaners.map(c => c.fields['Phone Number'])));
     for (const cleaner of cleaners) {
       const cleanerPhone = cleaner.fields['Phone Number'];
       const cleanerName = cleaner.fields['Cleaner Name'];
       if (cleanerPhone) {
-        await sendWhatsApp(formatPhone(cleanerPhone), msg('cleanerDispatch', { cleanerName, roomName }));
+        const formattedCleanerPhone = formatPhone(cleanerPhone);
+        console.log(`[Cleaner Dispatch DIAG] formatted phone about to be used: ${formattedCleanerPhone}`);
+        const sendResult = await sendWhatsApp(formattedCleanerPhone, msg('cleanerDispatch', { cleanerName, roomName }));
+        console.log(`[Cleaner Dispatch DIAG] raw sendWhatsApp return value:`, JSON.stringify(sendResult));
       }
     }
     await airtableUpdate('WS_Guests', ctx.guest.id, { 'Session State': ctx.next });
