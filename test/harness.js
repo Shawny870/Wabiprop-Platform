@@ -34,13 +34,57 @@ class MockAirtable {
   }
 
   // Supports exactly the formula patterns webhook.js uses:
-  //   {Field} = 'value'   ·   {Field} = TRUE()   ·   RECORD_ID() = 'recXXX'
+  //   {Field} = 'value'   ·   {Field} = TRUE()   ·   {Field} = BLANK()
+  //   RECORD_ID() = 'recXXX'   ·   AND(...)   ·   FIND('id', ARRAYJOIN({Field}))
+  // 6.4: added AND/FIND/ARRAYJOIN/BLANK for property-scoped queries.
   evalFormula(formula, rec) {
+    return this.evalExpr(formula.trim(), rec);
+  }
+
+  evalExpr(expr, rec) {
+    expr = expr.trim();
     let m;
-    if ((m = formula.match(/^\{(.+?)\}\s*=\s*TRUE\(\)$/))) return !!rec.fields[m[1]];
-    if ((m = formula.match(/^RECORD_ID\(\)\s*=\s*'(.*)'$/))) return rec.id === m[1];
-    if ((m = formula.match(/^\{(.+?)\}\s*=\s*'(.*)'$/))) return String(rec.fields[m[1]] ?? '') === m[2];
-    throw new Error('Formula pattern not supported by mock: ' + formula);
+    if ((m = expr.match(/^AND\((.*)\)$/s))) {
+      return this.splitTopLevelArgs(m[1]).every(sub => this.evalExpr(sub, rec));
+    }
+    if ((m = expr.match(/^OR\((.*)\)$/s))) {
+      return this.splitTopLevelArgs(m[1]).some(sub => this.evalExpr(sub, rec));
+    }
+    if ((m = expr.match(/^\{(.+?)\}\s*=\s*TRUE\(\)$/))) return !!rec.fields[m[1]];
+    if ((m = expr.match(/^\{(.+?)\}\s*=\s*BLANK\(\)$/))) {
+      const v = rec.fields[m[1]];
+      return v === undefined || v === null || v === '' || (Array.isArray(v) && v.length === 0);
+    }
+    if ((m = expr.match(/^RECORD_ID\(\)\s*=\s*'(.*)'$/))) return rec.id === m[1];
+    if ((m = expr.match(/^FIND\('(.*?)',\s*ARRAYJOIN\(\{(.+?)\}\)\)$/))) {
+      const needle = m[1];
+      const arr = rec.fields[m[2]] || [];
+      return arr.join(',').includes(needle);
+    }
+    if ((m = expr.match(/^\{(.+?)\}\s*=\s*'(.*)'$/))) return String(rec.fields[m[1]] ?? '') === m[2];
+    throw new Error('Formula pattern not supported by mock: ' + expr);
+  }
+
+  // Splits top-level comma-separated args, respecting nested parens/quotes
+  // (needed for AND({Status} = 'x', FIND('y', ARRAYJOIN({Field}))) etc.)
+  splitTopLevelArgs(s) {
+    const args = [];
+    let depth = 0, inQuote = false, cur = '';
+    for (const ch of s) {
+      if (ch === "'") inQuote = !inQuote;
+      if (!inQuote) {
+        if (ch === '(') depth++;
+        if (ch === ')') depth--;
+      }
+      if (ch === ',' && depth === 0 && !inQuote) {
+        args.push(cur);
+        cur = '';
+      } else {
+        cur += ch;
+      }
+    }
+    if (cur.trim()) args.push(cur);
+    return args.map(a => a.trim());
   }
 
   list(table, formula) {

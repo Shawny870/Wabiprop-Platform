@@ -2,11 +2,11 @@
   "name": "gate arrival: '1' assigns first available room (F11), books Checked In with timestamp, notifies Notify Phone from WS_Properties",
   "seed": {
     "WS_Properties": [
-      { "id": "recP1", "fields": { "Property Name": "Villa Liza Guest Lodge", "Notify Phone": "27831112222" } }
+      { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222" } }
     ],
     "WS_Rooms": [
-      { "id": "recR1", "fields": { "Room Name": "Room 1", "Status": "Available" } },
-      { "id": "recR2", "fields": { "Room Name": "Room 2", "Status": "Available" } }
+      { "id": "recR1", "fields": { "Room Name": "Room 1", "Status": "Available", "Property": ["recP1"] } },
+      { "id": "recR2", "fields": { "Room Name": "Room 2", "Status": "Available", "Property": ["recP1"] } }
     ],
     "WS_Guests": [
       { "id": "recG1", "fields": { "Guest Name": "John Smith", "Phone Number": "27821234567", "Session State": "CONFIRMED" } }
@@ -26,7 +26,7 @@
     ],
     "sends": [
       { "to": "27831112222", "includes": ["John Smith is at the gate", "Room 1 assigned", "Phone: 27821234567"] },
-      { "to": "27821234567", "includes": ["assigned *Room 1*", "1 - Check out"] }
+      { "to": "27821234567", "includes": ["Welcome to Test Lodge!", "assigned *Room 1*", "1 - Check out"] }
     ]
   }
 }

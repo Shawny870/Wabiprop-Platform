@@ -1,6 +1,9 @@
 {
   "name": "F14 gate cooldown: checkout trigger < 60s after check-in is ignored, menu re-shown, NO writes",
   "seed": {
+    "WS_Properties": [
+      { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222" } }
+    ],
     "WS_Guests": [
       { "id": "recG1", "fields": { "Guest Name": "John Smith", "Phone Number": "27821234567", "Session State": "CHECKED_IN" } }
     ],
@@ -17,7 +20,7 @@
     "status": 200,
     "writes": [],
     "sends": [
-      { "to": "27821234567", "includes": ["You're checked in", "1 - Check out"] }
+      { "to": "27821234567", "includes": ["You're checked in to Test Lodge", "1 - Check out"] }
     ]
   }
 }

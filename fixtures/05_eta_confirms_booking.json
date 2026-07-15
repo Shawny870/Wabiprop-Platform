@@ -1,6 +1,9 @@
 {
   "name": "ETA: free-text ETA confirms the Enquiry booking (F5 lookup) and moves guest to CONFIRMED",
   "seed": {
+    "WS_Properties": [
+      { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222" } }
+    ],
     "WS_Guests": [
       { "id": "recG1", "fields": { "Guest Name": "John Smith", "Phone Number": "27821234567", "Session State": "AWAITING_ETA" } }
     ],
@@ -17,7 +20,7 @@
       { "op": "update", "table": "WS_Guests", "id": "recG1", "fields": { "Session State": "CONFIRMED" } }
     ],
     "sends": [
-      { "to": "27821234567", "includes": ["See you at *around 2pm*", "1 - I'm at the gate", "2 - Cancel my booking"] }
+      { "to": "27821234567", "includes": ["See you at *around 2pm*", "1 - I'm at the gate", "2 - Cancel my booking", "hosting you at Test Lodge"] }
     ]
   }
 }

@@ -1,6 +1,9 @@
 {
   "name": "CONFIRMED fallback: unrecognised input re-shows the numbered menu (F9), no writes",
   "seed": {
+    "WS_Properties": [
+      { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222" } }
+    ],
     "WS_Guests": [
       { "id": "recG1", "fields": { "Guest Name": "John Smith", "Phone Number": "27821234567", "Session State": "CONFIRMED" } }
     ],
