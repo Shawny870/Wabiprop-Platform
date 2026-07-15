@@ -20,7 +20,7 @@
     "status": 200,
     "writes": [],
     "sends": [
-      { "to": "27821234567", "includes": ["You're checked in to Test Lodge", "1 - Check out"] }
+      { "to": "27821234567", "includes": ["Just checked you in", "Reply 1 again in a bit"] }
     ]
   }
 }
