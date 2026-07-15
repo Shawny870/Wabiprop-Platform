@@ -42,7 +42,7 @@
     "welcomeUnassigned": "Welcome to {propertyName}! 🌟 We've notified someone to assist you at the gate.\n\nEnjoy your stay! When you're ready to leave, reply with a number:\n1 - Check out",
     "cancelled": "Your booking has been cancelled. No problem at all — we hope to see you another time. 👋",
     "confirmedMenu": "Hi {guestName}! Your booking is confirmed. 🛏️\n\nReply with a number:\n1 - I'm at the gate\n2 - Cancel my booking",
-    "gateCooldownMenu": "Hi {guestName}! You're checked in to {propertyName}. 🛏️\n\nWhen you're ready to leave, reply with a number:\n1 - Check out",
+    "gateCooldownMenu": "Just checked you in — give it a minute before checking out. Reply 1 again in a bit if you still need to leave.",
     "checkedInMenu": "Hi {guestName}! You're checked in. 🛏️\n\nReply with a number:\n1 - Check out",
     "cleanerDispatch": "Hi {cleanerName} 🧹 {roomName} has just been vacated. Please prepare it with fresh linen immediately.\n\nReply *DONE* when complete.",
     "checkoutThanks": "Thank you for staying with us at {propertyName}! 🌟\n\nWe hope you enjoyed your stay. You're welcome back anytime.\n\nSafe travels! 👋",
