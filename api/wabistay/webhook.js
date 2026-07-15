@@ -220,12 +220,15 @@ const actions = {
   // set (not an error) — a formula bug here would silently show 0 rooms/rates
   // rather than fail loudly, so this is the single highest-risk line in 6.4.
   async greetAndAskDetails(ctx) {
-    const availableRooms = await airtableGet('WS_Rooms',
-      `AND({Status} = 'Available', FIND('${ctx.property.id}', ARRAYJOIN({Property})))`);
+    // F5-style: FIND/ARRAYJOIN confirmed unreliable for this filter (live-tested
+    // 6.4 verification — matched 0 of 3 correctly-linked rooms). Fetch unscoped,
+    // filter by property inclusion in JS, same pattern as airtableGetBookingsByGuestId.
+    const allAvailableRooms = await airtableGet('WS_Rooms', `{Status} = 'Available'`);
+    const availableRooms = allAvailableRooms.filter(r => (r.fields['Property'] || []).includes(ctx.property.id));
     const roomCount = availableRooms.length;
     // F4: was {Active} = 1
-    const activeRates = await airtableGet('WS_Rates',
-      `AND({Active} = TRUE(), FIND('${ctx.property.id}', ARRAYJOIN({Property})))`);
+    const allActiveRates = await airtableGet('WS_Rates', `{Active} = TRUE()`);
+    const activeRates = allActiveRates.filter(r => (r.fields['Property'] || []).includes(ctx.property.id));
     const rateText = activeRates.length > 0
       ? activeRates.map(r =>
           `• ${r.fields['Rate Name']}: R${r.fields['Amount']} ${r.fields['Rate Type'] === 'Per Night' ? 'per night' : 'per hour'}`
@@ -303,8 +306,9 @@ const actions = {
     // 6.4: scoped to ctx.property — not in the original spec's call-site list,
     // but left unscoped this call would apply another property's rate to the
     // booking, same bug class as the greeting queries (Rule 1: formula unverified live)
-    const activeRates = await airtableGet('WS_Rates',
-      `AND({Active} = TRUE(), FIND('${ctx.property.id}', ARRAYJOIN({Property})))`);
+    // F5-style: see greetAndAskDetails — FIND/ARRAYJOIN confirmed unreliable, JS-filter instead
+    const allActiveRates = await airtableGet('WS_Rates', `{Active} = TRUE()`);
+    const activeRates = allActiveRates.filter(r => (r.fields['Property'] || []).includes(ctx.property.id));
     const rate = activeRates[0] || null;
 
     const bookingData = {
@@ -375,8 +379,9 @@ const actions = {
 
     // Step 2: first available room, scoped to this property (6.4 — unscoped
     // would let a guest be assigned a room belonging to a different property)
-    const availableRooms = await airtableGet('WS_Rooms',
-      `AND({Status} = 'Available', FIND('${ctx.property.id}', ARRAYJOIN({Property})))`);
+    // F5-style: see greetAndAskDetails — FIND/ARRAYJOIN confirmed unreliable, JS-filter instead
+    const allAvailableRoomsForArrival = await airtableGet('WS_Rooms', `{Status} = 'Available'`);
+    const availableRooms = allAvailableRoomsForArrival.filter(r => (r.fields['Property'] || []).includes(ctx.property.id));
     let assignedRoomName = null;
     let assignedRoomId = null;
     if (availableRooms.length > 0) {
