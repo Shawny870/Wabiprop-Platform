@@ -1,0 +1,25 @@
+{
+  "name": "details: check-out before check-in re-prompts with NO writes (B7/F15)",
+  "comment": "Relative words are used deliberately instead of two absolute dates. '20 August' / '18 August' would also be reversed for most of the year, but in the two-day window between the 18th and 20th of August the year-roll rule sends only the earlier one to next year and the pair stops being reversed — the fixture would fail on those two days a year and pass on the other 363. 'tomorrow' then 'today' is reversed at every instant, on any clock.",
+  "seed": {
+    "WS_Properties": [
+      { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222" } }
+    ],
+    "WS_Rates": [
+      { "id": "recRATE1", "fields": { "Rate Name": "Standard Overnight", "Rate Type": "Per Night", "Amount": 350, "Active": true, "Property": ["recP1"] } }
+    ],
+    "WS_Guests": [
+      { "id": "recG1", "fields": { "Guest Name": "Unknown", "Phone Number": "27821234567", "Session State": "AWAITING_DETAILS" } }
+    ],
+    "WS_Cleaners": [],
+    "WS_Bookings": []
+  },
+  "message": { "from": "27821234567", "text": "John Smith\ntomorrow\ntoday" },
+  "expect": {
+    "status": 200,
+    "writes": [],
+    "sends": [
+      { "to": "27821234567", "includes": ["Sorry, I didn't quite get that", "1. Full name", "2. Check-in date", "3. Check-out date"] }
+    ]
+  }
+}

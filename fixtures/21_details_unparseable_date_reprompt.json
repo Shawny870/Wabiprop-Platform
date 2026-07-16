@@ -1,0 +1,25 @@
+{
+  "name": "details: date-shaped but unparseable input re-prompts with NO writes — never stores a garbage date (B7/F15)",
+  "comment": "'32 June' passes the date classifier (it contains 'jun') but is not a real date. Pre-B7 it was stored verbatim in Notes and the booking was created; B7 must re-prompt instead, because a booking whose structured dates are absent or wrong is invisible to — or poisons — B8's overlap check. This is the 'don't silently store garbage' rule, and it is the reason the parse happens before any write: the write count here must be zero, exactly as in fixture 04.",
+  "seed": {
+    "WS_Properties": [
+      { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222" } }
+    ],
+    "WS_Rates": [
+      { "id": "recRATE1", "fields": { "Rate Name": "Standard Overnight", "Rate Type": "Per Night", "Amount": 350, "Active": true, "Property": ["recP1"] } }
+    ],
+    "WS_Guests": [
+      { "id": "recG1", "fields": { "Guest Name": "Unknown", "Phone Number": "27821234567", "Session State": "AWAITING_DETAILS" } }
+    ],
+    "WS_Cleaners": [],
+    "WS_Bookings": []
+  },
+  "message": { "from": "27821234567", "text": "John Smith\n32 June\n35 June" },
+  "expect": {
+    "status": 200,
+    "writes": [],
+    "sends": [
+      { "to": "27821234567", "includes": ["Sorry, I didn't quite get that", "1. Full name", "2. Check-in date", "3. Check-out date"] }
+    ]
+  }
+}
