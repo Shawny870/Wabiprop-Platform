@@ -597,9 +597,25 @@ module.exports = async function handler(req, res) {
 
     console.log(`[POST] entry: ${!!entry} | messages: ${messages?.length || 0}`);
 
+    // B3: delivery-status callbacks (sent/delivered/read/failed) — log each to Axiom,
+    // then return. Mutually exclusive with `messages` in Meta's payload shape. In
+    // production this branch is normally pre-empted by the master router's own copy
+    // of this same check (api/webhook.js), which is the actual Meta-configured
+    // entry point — kept here too so this handler is still correct if it's ever
+    // invoked directly (its own dedicated webhook URL, or in tests).
+    const statuses = value?.statuses;
+    if (statuses && statuses.length > 0) {
+      for (const s of statuses) {
+        const detail = { wamid: s.id, status: s.status, timestamp: s.timestamp, recipient: s.recipient_id };
+        if (s.status === 'failed' && s.errors) detail.errors = s.errors;
+        logToAxiom('info', 'whatsapp_status_callback', detail);
+      }
+      res.status(200).send('OK');
+      return;
+    }
+
     if (!messages || messages.length === 0) {
       // F2: respond 200 before returning on no-message events (status updates etc)
-      // NOTE: delivery-status callbacks are dropped here — B3 changes this deliberately
       res.status(200).send('OK');
       return;
     }

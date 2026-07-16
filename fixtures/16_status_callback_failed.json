@@ -1,0 +1,45 @@
+{
+  "name": "B3: status callback (failed) — logged to Axiom including Meta's errors array, no writes, no sends",
+  "seed": {},
+  "payload": {
+    "object": "whatsapp_business_account",
+    "entry": [{
+      "id": "WABA_TEST",
+      "changes": [{
+        "field": "messages",
+        "value": {
+          "messaging_product": "whatsapp",
+          "metadata": { "display_phone_number": "27000000000", "phone_number_id": "111000111000" },
+          "statuses": [{
+            "id": "wamid.failed.test",
+            "status": "failed",
+            "timestamp": "1750000100",
+            "recipient_id": "27821234567",
+            "errors": [
+              { "code": 131026, "title": "Message undeliverable", "message": "Message failed to send", "error_data": { "details": "recipient could not be reached" } }
+            ]
+          }]
+        }
+      }]
+    }]
+  },
+  "expect": {
+    "status": 200,
+    "writes": [],
+    "sends": [],
+    "axiom": [
+      {
+        "event": "whatsapp_status_callback",
+        "fields": {
+          "wamid": "wamid.failed.test",
+          "status": "failed",
+          "timestamp": "1750000100",
+          "recipient": "27821234567",
+          "errors": [
+            { "code": 131026, "title": "Message undeliverable", "message": "Message failed to send", "error_data": { "details": "recipient could not be reached" } }
+          ]
+        }
+      }
+    ]
+  }
+}

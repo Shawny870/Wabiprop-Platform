@@ -234,6 +234,22 @@ function assertFixture(assert, expect, ctx, res) {
       matchValue(assert, got.fields[field], val, `write[${i}] ${exp.table}.${field}`);
     }
   });
+
+  // Opt-in only: axiom logging already happens unasserted in every other fixture
+  // (message_received, state_transition, etc.), so this only checks anything when
+  // a fixture explicitly declares `expect.axiom` — unlike sends/writes above, its
+  // absence does not assert zero Axiom events.
+  if (expect.axiom) {
+    assert.strictEqual(ctx.axiom.length, expect.axiom.length,
+      `axiom event count — actual: ${JSON.stringify(ctx.axiom)}`);
+    expect.axiom.forEach((exp, i) => {
+      const got = ctx.axiom[i];
+      assert.strictEqual(got.event, exp.event, `axiom[${i}].event`);
+      for (const [field, val] of Object.entries(exp.fields || {})) {
+        matchValue(assert, got[field], val, `axiom[${i}].${field}`);
+      }
+    });
+  }
 }
 
 module.exports = { installEnv, runFixture, assertFixture, metaTextPayload, makeRes, TEST_ENV, installFetch, MockAirtable };

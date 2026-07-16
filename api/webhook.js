@@ -135,7 +135,22 @@ module.exports = async function handler(req, res) {
     // Receiving phone_number_id — determines which WABA/product this message belongs to
     const phoneNumberId = body?.entry?.[0]?.changes?.[0]?.value?.metadata?.phone_number_id;
 
-    // Status updates (delivery receipts, read receipts) — ignore, return 200 immediately
+    // B3: delivery-status callbacks (sent/delivered/read/failed) — Meta sends these
+    // on the same `messages` webhook field, shaped as `value.statuses` instead of
+    // `value.messages`. This router is the single Meta-configured entry point, and
+    // it short-circuits below before ever forwarding to a product handler — so this
+    // is the only place a status callback can be observed for traffic routed here.
+    const statuses = body?.entry?.[0]?.changes?.[0]?.value?.statuses;
+    if (statuses && statuses.length > 0) {
+      for (const s of statuses) {
+        const detail = { wamid: s.id, status: s.status, timestamp: s.timestamp, recipient: s.recipient_id, phone_number_id: phoneNumberId };
+        if (s.status === 'failed' && s.errors) detail.errors = s.errors;
+        logToAxiom('info', 'whatsapp_status_callback', detail);
+      }
+      return res.status(200).send('OK');
+    }
+
+    // Neither a status callback nor a message — genuinely empty/unsupported payload
     const messages = body?.entry?.[0]?.changes?.[0]?.value?.messages;
     if (!messages || messages.length === 0) {
       return res.status(200).send('OK');

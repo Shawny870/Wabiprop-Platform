@@ -77,3 +77,67 @@ test('router: WP_PHONE_NUMBER_ID_CONST is null — an unrecognized phone_number_
     'logged as router_unknown_number_id, confirming it hit the "neither known id" branch, not a silent Wabiprop match'
   );
 });
+
+// ── B3: delivery-status callbacks ────────────────────────────────────────────
+// Production traffic hits this router first — Meta's single configured webhook
+// URL is /api/webhook, not the product handlers directly. So this is the branch
+// that actually runs for real status callbacks; wabistay/webhook.js's own copy
+// (test/wabistay.replay.test.js fixtures 14/16) only fires if that handler is
+// ever invoked directly, which does not happen for traffic routed through here.
+
+function statusPayload(phoneNumberId, status) {
+  return {
+    object: 'whatsapp_business_account',
+    entry: [{
+      id: 'WABA_TEST',
+      changes: [{
+        field: 'messages',
+        value: {
+          messaging_product: 'whatsapp',
+          metadata: { display_phone_number: '27000000000', phone_number_id: phoneNumberId },
+          statuses: [status]
+        }
+      }]
+    }]
+  };
+}
+
+test('router: status callback (delivered) is logged to Axiom and never reaches a product handler', async () => {
+  const ctx = { airtable: new MockAirtable({}), sends: [], axiom: [] };
+  installFetch(ctx);
+  const res = makeRes();
+
+  const status = { id: 'wamid.router.delivered.test', status: 'delivered', timestamp: '1750000200', recipient_id: '27821234567' };
+  await router({ method: 'POST', body: statusPayload('1157302750805659', status) }, res);
+
+  assert.strictEqual(res.statusCode, 200, 'router returns 200');
+  assert.strictEqual(ctx.sends.length, 0, 'no WhatsApp send — a status callback never triggers dispatch');
+  assert.strictEqual(ctx.airtable.log.length, 0, 'no Airtable calls at all — neither wabistayHandler nor wabipropHandler ran');
+  const logged = ctx.axiom.find(e => e.event === 'whatsapp_status_callback');
+  assert.ok(logged, 'whatsapp_status_callback logged to Axiom');
+  assert.strictEqual(logged.wamid, 'wamid.router.delivered.test');
+  assert.strictEqual(logged.status, 'delivered');
+  assert.strictEqual(logged.recipient, '27821234567');
+  assert.strictEqual(logged.phone_number_id, '1157302750805659');
+});
+
+test('router: status callback (failed) includes Meta\'s errors array in the Axiom log', async () => {
+  const ctx = { airtable: new MockAirtable({}), sends: [], axiom: [] };
+  installFetch(ctx);
+  const res = makeRes();
+
+  const status = {
+    id: 'wamid.router.failed.test',
+    status: 'failed',
+    timestamp: '1750000300',
+    recipient_id: '27821234567',
+    errors: [{ code: 131026, title: 'Message undeliverable', message: 'Message failed to send', error_data: { details: 'recipient could not be reached' } }]
+  };
+  await router({ method: 'POST', body: statusPayload('1157302750805659', status) }, res);
+
+  assert.strictEqual(res.statusCode, 200);
+  const logged = ctx.axiom.find(e => e.event === 'whatsapp_status_callback');
+  assert.ok(logged, 'whatsapp_status_callback logged to Axiom');
+  assert.strictEqual(logged.status, 'failed');
+  assert.deepStrictEqual(logged.errors, status.errors, 'errors array carried through verbatim');
+});
