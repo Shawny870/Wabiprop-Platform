@@ -180,13 +180,58 @@ function propertyCityLine(property) {
 
 // ─── GUARDS ──────────────────────────────────────────────────────────────────
 
+// Matches a cleaner's free-text reply against a room's identifying fields.
+// Deliberately loose (exact name, exact number, name-as-substring, or number
+// as a whole word) since this only ever runs after senderIsCleaner-equivalent
+// confirms the sender is a registered cleaner -- never evaluated against guest
+// messages, so a loose match here can't misfire on unrelated guest traffic.
+function roomMatchesText(room, text) {
+  const t = String(text || '').trim().toLowerCase();
+  if (!t) return false;
+  const name = String(room.fields['Room Name'] || '').trim().toLowerCase();
+  const number = room.fields['Room Number'];
+  if (name && (t === name || t.includes(name))) return true;
+  if (number !== undefined && number !== null) {
+    return new RegExp(`\\b${number}\\b`).test(t);
+  }
+  return false;
+}
+
 const guards = {
   async senderIsCleaner(ctx) {
     const cleanerRecords = await airtableGet('WS_Cleaners', `{Phone Number} = '${ctx.phone}'`);
     ctx.cleaner = cleanerRecords[0] || null;
     return cleanerRecords.length > 0;
+  },
+
+  // Room-ambiguity fix: catches a cleaner's reply naming a specific room (any
+  // time, not just right after "done") so cleanerDone never has to guess which
+  // of several Cleaning rooms to resolve. Cheap check first (registered cleaner)
+  // before the extra WS_Rooms lookup, so non-cleaner traffic only pays for one
+  // Airtable call, same as it would if this guard didn't exist.
+  async senderIsCleanerNamingRoom(ctx) {
+    const cleanerRecords = await airtableGet('WS_Cleaners', `{Phone Number} = '${ctx.phone}'`);
+    if (cleanerRecords.length === 0) return false;
+    const cleaningRooms = await airtableGet('WS_Rooms', `{Status} = 'Cleaning'`);
+    const match = cleaningRooms.find(r => roomMatchesText(r, ctx.text));
+    if (!match) return false;
+    ctx.cleaner = cleanerRecords[0];
+    ctx.matchedCleaningRoom = match;
+    return true;
   }
 };
+
+// Shared by cleanerDone (unambiguous case) and cleanerRoomReply (disambiguated
+// case) -- same side effects either way: room -> Available, thank the cleaner,
+// notify the owner.
+async function resolveRoomClean(ctx, room) {
+  await airtableUpdate('WS_Rooms', room.id, { 'Status': 'Available' });
+  logToAxiom('info', 'state_transition', { phone: ctx.phone, roomId: room.id, roomName: room.fields['Room Name'], from: 'Cleaning', to: 'Available', reason: 'cleaner_done' });
+  await sendWhatsApp(ctx.phone, msg('cleanerThanks', { roomName: room.fields['Room Name'] }));
+  if (OWNER_PHONE) {
+    await sendWhatsApp(OWNER_PHONE, msg('ownerRoomCleaned', { roomName: room.fields['Room Name'] }));
+  }
+}
 
 // ─── ACTION HANDLERS ─────────────────────────────────────────────────────────
 // Each handler owns its side effects and write ORDER (frozen by fixtures).
@@ -197,17 +242,25 @@ const actions = {
   async cleanerDone(ctx) {
     // F4: was {Active} = 1 — Airtable checkbox requires TRUE()
     const cleaningRooms = await airtableGet('WS_Rooms', `{Status} = 'Cleaning'`);
-    if (cleaningRooms.length > 0) {
-      const room = cleaningRooms[0];
-      await airtableUpdate('WS_Rooms', room.id, { 'Status': 'Available' });
-      logToAxiom('info', 'state_transition', { phone: ctx.phone, roomId: room.id, roomName: room.fields['Room Name'], from: 'Cleaning', to: 'Available', reason: 'cleaner_done' });
-      await sendWhatsApp(ctx.phone, msg('cleanerThanks', { roomName: room.fields['Room Name'] }));
-      if (OWNER_PHONE) {
-        await sendWhatsApp(OWNER_PHONE, msg('ownerRoomCleaned', { roomName: room.fields['Room Name'] }));
-      }
-    } else {
+    if (cleaningRooms.length === 0) {
       await sendWhatsApp(ctx.phone, msg('cleanerNothingToClean'));
+      return;
     }
+    if (cleaningRooms.length > 1) {
+      // Ambiguity fix: more than one room in Cleaning -- ask, don't guess.
+      // The cleaner's answer (any later message naming a room) is caught by
+      // the cleanerRoomReply global transition below, whenever it arrives.
+      const roomList = cleaningRooms.map(r => r.fields['Room Name']).join(', ');
+      await sendWhatsApp(ctx.phone, msg('cleanerWhichRoom', { roomList }));
+      return;
+    }
+    await resolveRoomClean(ctx, cleaningRooms[0]);
+  },
+
+  // Cleaner names a specific room (e.g. after being asked which one) --
+  // resolves only that room, never touches any other room in Cleaning.
+  async cleanerRoomReply(ctx) {
+    await resolveRoomClean(ctx, ctx.matchedCleaningRoom);
   },
 
   // NEW guest (or reset): greet with availability + rates, ask for details (F10)
@@ -468,6 +521,13 @@ const actions = {
         if (roomRecords.length > 0) {
           roomName = roomRecords[0].fields['Room Name'];
           await airtableUpdate('WS_Rooms', roomId, { 'Status': 'Cleaning' });
+          // Separate call, deliberately not combined with the Status update above:
+          // 'Cleaning Started At' does not exist on WS_Rooms in Airtable yet (confirmed
+          // live via meta API) -- Airtable rejects an entire PATCH if any field in it is
+          // unrecognized, so bundling this would risk the Status transition itself
+          // failing too, once the field is added and typo'd, or before it exists at all.
+          // Logs an error (non-fatal) until the field is created in Airtable.
+          await airtableUpdate('WS_Rooms', roomId, { 'Cleaning Started At': new Date().toISOString() });
         }
       }
     }
