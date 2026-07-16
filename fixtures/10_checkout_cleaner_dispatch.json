@@ -24,6 +24,7 @@
     "writes": [
       { "op": "update", "table": "WS_Bookings", "id": "recB1", "fields": { "Status": "Checked Out", "Checkout Confirmed": true } },
       { "op": "update", "table": "WS_Rooms", "id": "recR1", "fields": { "Status": "Cleaning" } },
+      { "op": "update", "table": "WS_Rooms", "id": "recR1", "fields": { "Cleaning Started At": "re:^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}" } },
       { "op": "update", "table": "WS_Guests", "id": "recG1", "fields": { "Session State": "NEW" } }
     ],
     "sends": [

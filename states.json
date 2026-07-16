@@ -2,7 +2,8 @@
   "comment": "Wabistay state machine (H0). state → input → action → next state, plus all outbound message copy. Handlers in api/wabistay/webhook.js read this table — no nested if-state logic. Inputs are matched against the trimmed, lowercased message; \"*\" is the fallback row. \"next\" is the Session State the action writes (handlers control write ordering; a handler may stay in-state, e.g. invalid details or the F14 cooldown guard).",
 
   "global": [
-    { "inputs": ["done"], "guard": "senderIsCleaner", "action": "cleanerDone" }
+    { "inputs": ["done"], "guard": "senderIsCleaner", "action": "cleanerDone" },
+    { "inputs": "*", "guard": "senderIsCleanerNamingRoom", "action": "cleanerRoomReply" }
   ],
 
   "states": {
@@ -49,6 +50,7 @@
     "cleanerThanks": "Thank you! {roomName} is marked as clean and available. ✅",
     "ownerRoomCleaned": "✅ {roomName} has been cleaned and is now available for new bookings.",
     "cleanerNothingToClean": "Thanks! No rooms currently marked for cleaning — nothing to update.",
+    "cleanerWhichRoom": "Which room? Reply with the room number or name. Currently cleaning: {roomList}",
     "unknownFallback": "Hi! Reply with your name and dates to make a booking, or *CHECKING OUT* if you are leaving today.",
     "numberNotConfigured": "Sorry, this number isn't configured yet. Please contact support."
   }

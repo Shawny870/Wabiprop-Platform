@@ -1,0 +1,27 @@
+{
+  "name": "cleaner replies with a bare room number (not the room name) while 2 are Cleaning: still resolves only that room",
+  "seed": {
+    "WS_Properties": [
+      { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222" } }
+    ],
+    "WS_Cleaners": [
+      { "id": "recC1", "fields": { "Cleaner Name": "Thandi", "Phone Number": "27821110000", "Active": true } }
+    ],
+    "WS_Rooms": [
+      { "id": "recR1", "fields": { "Room Name": "Room 04", "Room Number": 4, "Status": "Cleaning" } },
+      { "id": "recR2", "fields": { "Room Name": "Room 07", "Room Number": 7, "Status": "Cleaning" } }
+    ],
+    "WS_Guests": []
+  },
+  "message": { "from": "27821110000", "text": "7" },
+  "expect": {
+    "status": 200,
+    "writes": [
+      { "op": "update", "table": "WS_Rooms", "id": "recR2", "fields": { "Status": "Available" } }
+    ],
+    "sends": [
+      { "to": "27821110000", "includes": ["Thank you! Room 07 is marked as clean and available"] },
+      { "to": "27830000001", "includes": ["Room 07 has been cleaned and is now available"] }
+    ]
+  }
+}

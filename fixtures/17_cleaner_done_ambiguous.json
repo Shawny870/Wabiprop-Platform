@@ -1,0 +1,24 @@
+{
+  "name": "cleaner DONE with 2 rooms in Cleaning: asks which room instead of guessing, no writes",
+  "seed": {
+    "WS_Properties": [
+      { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222" } }
+    ],
+    "WS_Cleaners": [
+      { "id": "recC1", "fields": { "Cleaner Name": "Thandi", "Phone Number": "27821110000", "Active": true } }
+    ],
+    "WS_Rooms": [
+      { "id": "recR1", "fields": { "Room Name": "Room 04", "Room Number": 4, "Status": "Cleaning" } },
+      { "id": "recR2", "fields": { "Room Name": "Room 07", "Room Number": 7, "Status": "Cleaning" } }
+    ],
+    "WS_Guests": []
+  },
+  "message": { "from": "27821110000", "text": "DONE" },
+  "expect": {
+    "status": 200,
+    "writes": [],
+    "sends": [
+      { "to": "27821110000", "includes": ["Which room?", "Room 04", "Room 07"] }
+    ]
+  }
+}
