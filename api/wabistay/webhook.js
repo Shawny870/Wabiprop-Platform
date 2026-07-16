@@ -123,6 +123,127 @@ function formatPhone(raw) {
   return clean;
 }
 
+// ─── SAST DATES (B7) ─────────────────────────────────────────────────────────
+// South Africa Standard Time is UTC+2 all year — the country has never observed
+// DST — so the offset is a constant, not a timezone lookup. Every relative date
+// ("today", "tomorrow") resolves against the SAST calendar; UTC appears only at
+// the Airtable write boundary (sastToUtcIso). Vercel runs UTC, so a bare
+// new Date() day-boundary is wrong between 00:00 and 01:59 SAST, when the UTC
+// date is still the previous day — that window is what these helpers exist for.
+
+const SAST_OFFSET_MS = 2 * 60 * 60 * 1000;
+
+// CEO-confirmed overnight defaults (16 July). Per-property overrides are a
+// later step's problem — do not derive these from the property record yet.
+const OVERNIGHT_CHECKIN_HOUR = 14;
+const OVERNIGHT_CHECKOUT_HOUR = 10;
+
+const MONTHS = {
+  jan: 1, january: 1, feb: 2, february: 2, mar: 3, march: 3, apr: 4, april: 4,
+  may: 5, jun: 6, june: 6, jul: 7, july: 7, aug: 8, august: 8, sep: 9, sept: 9,
+  september: 9, oct: 10, october: 10, nov: 11, november: 11, dec: 12, december: 12
+};
+
+const RELATIVE_DATE_WORDS = ['today', 'tomorrow'];
+
+// The SAST wall-clock date at a given UTC instant.
+function sastCalendarDate(nowUtc) {
+  const shifted = new Date(nowUtc.getTime() + SAST_OFFSET_MS);
+  return { y: shifted.getUTCFullYear(), m: shifted.getUTCMonth() + 1, d: shifted.getUTCDate() };
+}
+
+// The one and only UTC conversion — a SAST calendar date + SAST hour → the ISO
+// string Airtable stores. Nothing else in this file may build a booking datetime.
+function sastToUtcIso(date, sastHour) {
+  return new Date(Date.UTC(date.y, date.m - 1, date.d, sastHour) - SAST_OFFSET_MS).toISOString();
+}
+
+function addSastDays(date, days) {
+  const shifted = new Date(Date.UTC(date.y, date.m - 1, date.d + days));
+  return { y: shifted.getUTCFullYear(), m: shifted.getUTCMonth() + 1, d: shifted.getUTCDate() };
+}
+
+function compareYmd(a, b) {
+  return (a.y - b.y) || (a.m - b.m) || (a.d - b.d);
+}
+
+// Rejects 31 June, 29 Feb in a non-leap year, etc. — Date.UTC silently rolls
+// those forward, so round-trip the components and check they survived.
+function isValidCalendarDate(y, m, d) {
+  if (m < 1 || m > 12 || d < 1 || d > 31) return false;
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d;
+}
+
+// Guests book the future, so a bare day+month that has already passed this year
+// means next year (CEO-confirmed 16 July). Only this year and next are
+// considered: "29 February" in a two-non-leap-year window returns null and
+// re-prompts rather than silently landing three years out.
+function resolveYear(month, day, today) {
+  for (const year of [today.y, today.y + 1]) {
+    if (!isValidCalendarDate(year, month, day)) continue;
+    if (compareYmd({ y: year, m: month, d: day }, today) >= 0) return year;
+  }
+  return null;
+}
+
+function buildFromMonthName(day, monthWord, explicitYear, today) {
+  const month = MONTHS[monthWord];
+  if (month === undefined) return null;
+  if (explicitYear) {
+    const y = Number(explicitYear);
+    return isValidCalendarDate(y, month, day) ? { y, m: month, d: day } : null;
+  }
+  const y = resolveYear(month, day, today);
+  return y === null ? null : { y, m: month, d: day };
+}
+
+function normalizeDateText(text) {
+  return String(text || '')
+    .trim()
+    .toLowerCase()
+    .replace(/,/g, ' ')
+    .replace(/(\d)(st|nd|rd|th)\b/g, '$1')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Free text → a SAST calendar date, or null if it isn't one. `nowUtc` is passed
+// in rather than read from the clock so the near-midnight cases are testable.
+// Returns calendar parts only: the time-of-day default is the caller's choice,
+// because it differs per booking type (overnight 14:00/10:00 today; hourly later).
+function parseBookingDate(text, nowUtc) {
+  const t = normalizeDateText(text);
+  if (!t) return null;
+
+  const today = sastCalendarDate(nowUtc);
+  if (t === 'today') return today;
+  if (t === 'tomorrow') return addSastDays(today, 1);
+
+  let m;
+  // "25 june", "25jun", "25 jun 2027"
+  if ((m = t.match(/^(\d{1,2}) ?([a-z]+)\.?(?: (\d{4}))?$/))) {
+    return buildFromMonthName(Number(m[1]), m[2], m[3], today);
+  }
+  // "june 25", "jun 25 2027"
+  if ((m = t.match(/^([a-z]+)\.? ?(\d{1,2})(?: (\d{4}))?$/))) {
+    return buildFromMonthName(Number(m[2]), m[1], m[3], today);
+  }
+  // "25/06", "25-6", "25/06/2027", "25/06/27" — day-first (SA convention, and
+  // what the pre-B7 detection regex already assumed). Never MM/DD.
+  if ((m = t.match(/^(\d{1,2})[\/\-](\d{1,2})(?:[\/\-](\d{2}|\d{4}))?$/))) {
+    const day = Number(m[1]);
+    const month = Number(m[2]);
+    if (m[3]) {
+      const y = m[3].length === 2 ? 2000 + Number(m[3]) : Number(m[3]);
+      return isValidCalendarDate(y, month, day) ? { y, m: month, d: day } : null;
+    }
+    const y = resolveYear(month, day, today);
+    return y === null ? null : { y, m: month, d: day };
+  }
+  return null;
+}
+
 // ─── AXIOM LOGGER ────────────────────────────────────────────────────────────
 // F12: fire-and-forget log to Axiom HTTP API
 // Never awaited in critical path — cannot block or break the state machine
@@ -324,6 +445,7 @@ const actions = {
 
   // AWAITING_DETAILS: parse name + dates, create Enquiry booking (F7, F13)
   async collectDetails(ctx) {
+    const now = new Date();
     const lines = ctx.messageText.trim().split('\n').map(l => l.trim()).filter(Boolean);
     let guestName = ctx.guest.fields['Guest Name'] !== 'Unknown' ? ctx.guest.fields['Guest Name'] : null;
     let checkIn = null;
@@ -334,7 +456,11 @@ const actions = {
 
     lines.forEach((line, i) => {
       const lower = line.toLowerCase();
-      const hasDate = dateKeywords.some(d => lower.includes(d)) || /\d{1,2}[\/\-]\d{1,2}/.test(lower);
+      // B7: relative words join the month keywords, so "today"/"tomorrow" are
+      // classified as dates instead of falling through to the re-prompt (12.1).
+      const hasDate = dateKeywords.some(d => lower.includes(d))
+        || RELATIVE_DATE_WORDS.some(w => lower.includes(w))
+        || /\d{1,2}[\/\-]\d{1,2}/.test(lower);
       if (i === 0 && !hasDate && !guestName) {
         guestName = line;
       } else if (hasDate && !checkIn) {
@@ -346,6 +472,31 @@ const actions = {
 
     if (!guestName || !checkIn) {
       // Stay in AWAITING_DETAILS — no writes, reprompt only
+      await sendWhatsApp(ctx.phone, msg('detailsReprompt'));
+      return;
+    }
+
+    // B7: a line can look like a date to the classifier above and still not be
+    // one. Parse before any write so an unusable date re-prompts (no writes,
+    // same as the garbage path) rather than creating a booking whose structured
+    // dates are absent or wrong — B8's overlap check is only as good as these.
+    // The raw text keeps feeding Notes and the guest/owner copy untouched;
+    // these parsed values are additional, not a replacement.
+    const checkInDate = parseBookingDate(checkIn, now);
+    const checkOutDate = checkOut ? parseBookingDate(checkOut, now) : null;
+    // A missing check-out line stays "TBC" (pre-B7 behaviour); a check-out line
+    // we can't parse is a re-prompt, not a silent downgrade to TBC.
+    const datesUnusable = !checkInDate
+      || (checkOut && !checkOutDate)
+      // Overnight stays span at least one night: 14:00 → 10:00 on a reversed or
+      // same-day range is a negative stay, and would poison B8 (CEO 16 July).
+      || (checkOutDate && compareYmd(checkOutDate, checkInDate) <= 0);
+    if (datesUnusable) {
+      logToAxiom('info', 'booking_date_unparsed', {
+        phone: ctx.phone,
+        checkInText: checkIn,
+        checkOutText: checkOut || null
+      });
       await sendWhatsApp(ctx.phone, msg('detailsReprompt'));
       return;
     }
@@ -373,6 +524,13 @@ const actions = {
       'Notes': `Check-in: ${checkIn}${checkOut ? ' | Check-out: ' + checkOut : ''}`,
       'Payment Status': 'Unpaid'
     };
+    // B7: structured dates in addition to the Notes string above, which keeps its
+    // exact pre-B7 format — it is the human-readable record of what the guest
+    // actually typed, and these fields are what B8 will query.
+    bookingData['Check In'] = sastToUtcIso(checkInDate, OVERNIGHT_CHECKIN_HOUR);
+    if (checkOutDate) {
+      bookingData['Check Out'] = sastToUtcIso(checkOutDate, OVERNIGHT_CHECKOUT_HOUR);
+    }
     if (rate) {
       bookingData['Rate Applied'] = [rate.id];
       bookingData['Amount Due'] = rate.fields['Amount'];
@@ -705,3 +863,10 @@ module.exports = async function handler(req, res) {
 
   res.status(405).send('Method Not Allowed');
 };
+
+// B7: exported for test/dates.test.js only. The SAST parser's interesting cases
+// are near-midnight ones that need a frozen clock, which the fixture replay
+// harness has no way to express — so they're unit-tested against these directly.
+module.exports.parseBookingDate = parseBookingDate;
+module.exports.sastToUtcIso = sastToUtcIso;
+module.exports.sastCalendarDate = sastCalendarDate;

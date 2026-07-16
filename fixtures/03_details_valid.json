@@ -1,5 +1,6 @@
 {
-  "name": "details: name + dates creates Enquiry booking, writes Booking Ref (F13), notifies owner (F7), asks ETA",
+  "name": "details: name + dates creates Enquiry booking with structured SAST datetimes (B7/F15), writes Booking Ref (F13), notifies owner (F7), asks ETA",
+  "comment": "B7: the year in Check In/Check Out is deliberately a regex wildcard. '25 June' resolves against the real clock, so it means 2026 until 25 June 2026 passes and 2027 thereafter — pinning a year here would make this fixture rot on a calendar date. The month/day/time are exact, and test/dates.test.js pins the year rule against a frozen clock. Notes stays asserted byte-for-byte: B7 must not change it.",
   "seed": {
     "WS_Properties": [
       { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222" } }
@@ -27,6 +28,8 @@
           "Status": "Enquiry",
           "Logged By": "WhatsApp Bot",
           "Notes": "Check-in: 25 June | Check-out: 27 June",
+          "Check In": "re:^\\d{4}-06-25T12:00:00\\.000Z$",
+          "Check Out": "re:^\\d{4}-06-27T08:00:00\\.000Z$",
           "Payment Status": "Unpaid",
           "Rate Applied": ["recRATE1"],
           "Amount Due": 350

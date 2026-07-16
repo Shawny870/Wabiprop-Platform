@@ -18,6 +18,8 @@ Backfilled from the `api/wabistay/webhook.js` header (WS1 build):
 - F13 — Booking Ref written back to WS_Bookings after CREATE
 - F14 — Gate cooldown guard: ignores checkout trigger if checked in < 60s ago
 
+- F15 — Structured booking dates: guest free-text check-in/check-out parsed to SAST-anchored datetimes and written to `WS_Bookings.Check In`/`Check Out` (overnight defaults 14:00/10:00 SAST), alongside the unchanged `Notes` string. Relative dates ("today"/"tomorrow") now parse instead of re-prompting (closes Master Transfer v4 §12.1). Unparseable, reversed and same-day-overnight ranges re-prompt with zero writes rather than storing a date B8 cannot use.
+
 ## H0 — Harness (5 July 2026, PR "H0: Harness")
 
 - schema.json generated from live base metadata (WS_ tables only) + `scripts/schema-diff.js` drift check. `--write` is Shawn-only, after deliberate schema changes — never to clear a failing diff.
