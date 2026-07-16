@@ -81,3 +81,4 @@ NO frameworks, NO TypeScript, NO ORMs, NO npm bloat. Deterministic state machine
 - BUG-08: "Questions? Reply" prompt has no inbound handler
 - BUG-09: WhatsApp profile displays "MyNumber" not "Wabiprop"
 - Dispatch layer defect: Wabistay messages routing through Wabiprop handler (current session priority)
+- BUG-10: `test/router.dispatch.test.js`'s "dispatches to Wabistay handler cleanly" test has no `WS_Properties` seed row, so it now hits the 6.4 `resolveProperty()` refusal path instead of the real greeting — same fix pattern as the fixture `WS_Properties` seed sync done for all 14 fixtures after the 6.4 merge, just never applied to this one test.
