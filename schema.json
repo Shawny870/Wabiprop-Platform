@@ -40,6 +40,10 @@
         "Property": {
           "id": "fldmHdoCRHqg0kkLy",
           "type": "multipleRecordLinks"
+        },
+        "Cleaning Started At": {
+          "id": "fld0nw2xpr3Ga1be1",
+          "type": "dateTime"
         }
       }
     },
@@ -306,5 +310,5 @@
       }
     }
   },
-  "pulledAt": "2026-07-10T19:12:37.146Z"
+  "pulledAt": "2026-07-16T21:09:44.454Z"
 }
