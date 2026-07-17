@@ -1,0 +1,35 @@
+{
+  "name": "availability: same-day turnover — check-out 10:00 and a new check-in 14:00 the same day on the same room is allowed (B8/F16)",
+  "comment": "recB0 occupies Room 1 until TODAY 10:00 SAST; the guest checks in TODAY 14:00 SAST and gets that same room. Worth proving on its own — it is the revenue case, and losing it would cost a sellable night on every turnover. NOT an exclusive-bounds proof, despite what the build spec called it: exclusive and inclusive bounds disagree on exactly one input, a check-in instant equal to a check-out instant, and the overnight defaults compare 14:00 against 10:00, so this fixture passes under both definitions. Verified by mutation — flipping rangesOverlap to <=/>= leaves every fixture green. The bounds rule is pinned in test/availability.test.js instead, where the shared instant is reachable. Room 1 is seeded as Cleaning on purpose: a real turnover leaves the room mid-clean, so this doubles as proof that the status allowlist keeps Cleaning rooms sellable.",
+  "seed": {
+    "WS_Properties": [
+      { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222" } }
+    ],
+    "WS_Rates": [
+      { "id": "recRATE1", "fields": { "Rate Name": "Standard Overnight", "Rate Type": "Per Night", "Amount": 350, "Active": true, "Property": ["recP1"] } }
+    ],
+    "WS_Rooms": [
+      { "id": "recR1", "fields": { "Room Name": "Room 1", "Status": "Cleaning", "Property": ["recP1"] } }
+    ],
+    "WS_Guests": [
+      { "id": "recG1", "fields": { "Guest Name": "Unknown", "Phone Number": "27821234567", "Session State": "AWAITING_DETAILS" } }
+    ],
+    "WS_Bookings": [
+      { "id": "recB0", "fields": { "Status": "Checked In", "Room": ["recR1"], "Check In": "$SAST(-2,14)", "Check Out": "$SAST(0,10)" } }
+    ],
+    "WS_Cleaners": []
+  },
+  "message": { "from": "27821234567", "text": "John Smith\ntoday\ntomorrow" },
+  "expect": {
+    "status": 200,
+    "writes": [
+      { "op": "update", "table": "WS_Guests", "id": "recG1", "fields": { "Guest Name": "John Smith", "Session State": "AWAITING_ETA" } },
+      { "op": "create", "table": "WS_Bookings", "fields": { "Status": "Enquiry", "Room": ["recR1"], "Check In": "re:T12:00:00\\.000Z$" } },
+      { "op": "update", "table": "WS_Bookings", "fields": { "Booking Ref": "re:^WS-[A-Z0-9]{6}$" } }
+    ],
+    "sends": [
+      { "to": "27830000001", "includes": ["New booking enquiry from John Smith"] },
+      { "to": "27821234567", "includes": ["Thanks John Smith", "What time do you expect to arrive"] }
+    ]
+  }
+}

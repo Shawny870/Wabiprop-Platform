@@ -1,0 +1,30 @@
+{
+  "name": "availability: an enquiry overlapping an existing hold on the property's only room is refused — no writes, guest offered different dates (B8/F16)",
+  "comment": "The core B8 case. recB0 holds the only room from today 14:00 to day+2 10:00; the guest asks for today -> tomorrow, which overlaps it. Pre-B8 this guest was accepted and the collision only surfaced when two people arrived at the gate. Refusal writes nothing and leaves the guest in AWAITING_DETAILS, so their next message is another attempt at dates — same shape as B7's reject paths.",
+  "seed": {
+    "WS_Properties": [
+      { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222" } }
+    ],
+    "WS_Rates": [
+      { "id": "recRATE1", "fields": { "Rate Name": "Standard Overnight", "Rate Type": "Per Night", "Amount": 350, "Active": true, "Property": ["recP1"] } }
+    ],
+    "WS_Rooms": [
+      { "id": "recR1", "fields": { "Room Name": "Room 1", "Status": "Available", "Property": ["recP1"] } }
+    ],
+    "WS_Guests": [
+      { "id": "recG1", "fields": { "Guest Name": "Unknown", "Phone Number": "27821234567", "Session State": "AWAITING_DETAILS" } }
+    ],
+    "WS_Bookings": [
+      { "id": "recB0", "fields": { "Status": "Confirmed", "Room": ["recR1"], "Check In": "$SAST(0,14)", "Check Out": "$SAST(2,10)" } }
+    ],
+    "WS_Cleaners": []
+  },
+  "message": { "from": "27821234567", "text": "John Smith\ntoday\ntomorrow" },
+  "expect": {
+    "status": 200,
+    "writes": [],
+    "sends": [
+      { "to": "27821234567", "includes": ["Sorry John Smith", "fully booked", "try different dates", "1. Full name"] }
+    ]
+  }
+}
