@@ -1,0 +1,34 @@
+{
+  "name": "gate arrival: held room taken between enquiry and arrival — re-verify catches it and re-offers a different room rather than failing silently (B8/F16)",
+  "comment": "Airtable is not transactional (CLAUDE.md), so a hold is a claim, not a lock. recB1 held Room 1 at enquiry; by the time the guest reaches the gate, recB2 (Checked In) occupies Room 1 over the same range. The re-verify must notice and hand out Room 2. This is also the case that needs excludeBookingId: recB1 overlaps its own range by definition, so without excluding itself every booking would decide its own held room had been taken and re-offer for no reason.",
+  "seed": {
+    "WS_Properties": [
+      { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222" } }
+    ],
+    "WS_Rooms": [
+      { "id": "recR1", "fields": { "Room Name": "Room 1", "Status": "Available", "Property": ["recP1"] } },
+      { "id": "recR2", "fields": { "Room Name": "Room 2", "Status": "Available", "Property": ["recP1"] } }
+    ],
+    "WS_Guests": [
+      { "id": "recG1", "fields": { "Guest Name": "John Smith", "Phone Number": "27821234567", "Session State": "CONFIRMED" } }
+    ],
+    "WS_Bookings": [
+      { "id": "recB1", "fields": { "Guest": ["recG1"], "Status": "Confirmed", "Room": ["recR1"], "Check In": "$SAST(0,14)", "Check Out": "$SAST(1,10)" } },
+      { "id": "recB2", "fields": { "Status": "Checked In", "Room": ["recR1"], "Check In": "$SAST(0,14)", "Check Out": "$SAST(1,10)" } }
+    ],
+    "WS_Cleaners": []
+  },
+  "message": { "from": "27821234567", "text": "1" },
+  "expect": {
+    "status": 200,
+    "writes": [
+      { "op": "update", "table": "WS_Rooms", "id": "recR2", "fields": { "Status": "Occupied" } },
+      { "op": "update", "table": "WS_Bookings", "id": "recB1", "fields": { "Status": "Checked In", "Room": ["recR2"] } },
+      { "op": "update", "table": "WS_Guests", "id": "recG1", "fields": { "Session State": "CHECKED_IN" } }
+    ],
+    "sends": [
+      { "to": "27831112222", "includes": ["John Smith is at the gate", "Room 2 assigned"] },
+      { "to": "27821234567", "includes": ["Welcome to Test Lodge!", "assigned *Room 2*"] }
+    ]
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "name": "availability: a booking on dates that don't overlap an existing one is accepted and holds the SAME room (B8/F16)",
+  "comment": "recB0 holds Room 1 five days out. The guest wants today -> tomorrow, which does not overlap, so the same room is sold twice for different ranges — the point of date-based availability rather than a Status flag. If the check were per-room-Status instead of per-range, Room 1 would look taken and this guest would be turned away for no reason.",
+  "seed": {
+    "WS_Properties": [
+      { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222" } }
+    ],
+    "WS_Rates": [
+      { "id": "recRATE1", "fields": { "Rate Name": "Standard Overnight", "Rate Type": "Per Night", "Amount": 350, "Active": true, "Property": ["recP1"] } }
+    ],
+    "WS_Rooms": [
+      { "id": "recR1", "fields": { "Room Name": "Room 1", "Status": "Available", "Property": ["recP1"] } }
+    ],
+    "WS_Guests": [
+      { "id": "recG1", "fields": { "Guest Name": "Unknown", "Phone Number": "27821234567", "Session State": "AWAITING_DETAILS" } }
+    ],
+    "WS_Bookings": [
+      { "id": "recB0", "fields": { "Status": "Confirmed", "Room": ["recR1"], "Check In": "$SAST(5,14)", "Check Out": "$SAST(7,10)" } }
+    ],
+    "WS_Cleaners": []
+  },
+  "message": { "from": "27821234567", "text": "John Smith\ntoday\ntomorrow" },
+  "expect": {
+    "status": 200,
+    "writes": [
+      { "op": "update", "table": "WS_Guests", "id": "recG1", "fields": { "Guest Name": "John Smith", "Session State": "AWAITING_ETA" } },
+      { "op": "create", "table": "WS_Bookings", "fields": { "Status": "Enquiry", "Room": ["recR1"] } },
+      { "op": "update", "table": "WS_Bookings", "fields": { "Booking Ref": "re:^WS-[A-Z0-9]{6}$" } }
+    ],
+    "sends": [
+      { "to": "27830000001", "includes": ["New booking enquiry from John Smith"] },
+      { "to": "27821234567", "includes": ["Thanks John Smith", "What time do you expect to arrive"] }
+    ]
+  }
+}

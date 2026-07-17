@@ -178,9 +178,32 @@ function makeRes() {
   return res;
 }
 
+// B8: "$SAST(days,hour)" becomes that many days from today's SAST date, at that
+// SAST hour, as the UTC ISO string Airtable stores — e.g. "$SAST(0,14)" is today
+// 14:00 SAST, "$SAST(2,10)" is 10:00 SAST two days out. Availability fixtures
+// seed existing bookings relative to the run date so they can't rot: pinning a
+// literal ISO date would quietly stop overlapping the guest's parsed dates once
+// the year-roll moved them, and the fixture would pass while proving nothing.
+//
+// The arithmetic here is deliberately independent of the webhook's own
+// sastToUtcIso rather than importing it — a fixture that computed its
+// expectations with the same helper it is testing would agree with that helper
+// even when both are wrong. SAST is UTC+2 year-round (no DST).
+const SAST_OFFSET_MS = 2 * 60 * 60 * 1000;
+function sastSeedDate(days, hour) {
+  const nowSast = new Date(Date.now() + SAST_OFFSET_MS);
+  return new Date(Date.UTC(
+    nowSast.getUTCFullYear(), nowSast.getUTCMonth(), nowSast.getUTCDate() + days, hour
+  ) - SAST_OFFSET_MS).toISOString();
+}
+
 // Seed values of "$NOW" become the current time (used by the F14 cooldown fixture).
 function resolveNow(value) {
   if (value === '$NOW') return new Date().toISOString();
+  if (typeof value === 'string') {
+    const m = value.match(/^\$SAST\((-?\d+),\s*(\d{1,2})\)$/);
+    if (m) return sastSeedDate(Number(m[1]), Number(m[2]));
+  }
   if (Array.isArray(value)) return value.map(resolveNow);
   if (value && typeof value === 'object') {
     return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, resolveNow(v)]));

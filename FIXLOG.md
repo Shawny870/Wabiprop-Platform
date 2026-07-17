@@ -20,6 +20,8 @@ Backfilled from the `api/wabistay/webhook.js` header (WS1 build):
 
 - F15 — Structured booking dates: guest free-text check-in/check-out parsed to SAST-anchored datetimes and written to `WS_Bookings.Check In`/`Check Out` (overnight defaults 14:00/10:00 SAST), alongside the unchanged `Notes` string. Relative dates ("today"/"tomorrow") now parse instead of re-prompting (closes Master Transfer v4 §12.1). Unparseable, reversed and same-day-overnight ranges re-prompt with zero writes rather than storing a date B8 cannot use.
 
+- F16 — Real availability: rooms are held at enquiry (`WS_Bookings.Room` written in `collectDetails`, not first at `gateArrival`) and `findAvailableRoom` refuses any range overlapping an existing hold — exclusive bounds, `newIn < existingOut && newOut > existingIn`. Only Enquiry/Confirmed/Checked In block; only non-Maintenance rooms are sellable (status allowlist, fail closed). `gateArrival` re-verifies the hold and re-offers rather than failing silently. B7's "TBC" path removed: check-out is now required, since a booking with no check-out would hold a room against a range the overlap check cannot see.
+
 ## H0 — Harness (5 July 2026, PR "H0: Harness")
 
 - schema.json generated from live base metadata (WS_ tables only) + `scripts/schema-diff.js` drift check. `--write` is Shawn-only, after deliberate schema changes — never to clear a failing diff.

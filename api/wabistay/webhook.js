@@ -299,6 +299,80 @@ function propertyCityLine(property) {
   return city ? `, ${city}` : '';
 }
 
+// ─── AVAILABILITY (B8) ───────────────────────────────────────────────────────
+// Rooms are held at enquiry, not at arrival: without a Room link on the booking
+// there is nothing for an overlap check to compare against, and two guests
+// asking for the same dates would both be accepted. The hold is also what ties a
+// booking to a property — WS_Bookings has no Property field of its own.
+//
+// Two different axes, deliberately not conflated:
+//   · Check In/Check Out — a future range. This is what decides availability.
+//   · WS_Rooms.Status    — a fact about right now. Only a serviceability gate.
+// A room occupied tonight is still sellable for next month, and same-day
+// turnover means offering a room that is mid-clean — so Status cannot filter on
+// the booking axis. Maintenance is the one status that means "not sellable at
+// all", and it is excluded via an allowlist rather than a `!= Maintenance`
+// denylist so that any status added to Airtable later is unsellable until
+// someone deliberately allows it (fail closed, as resolveProperty does).
+
+const BLOCKING_BOOKING_STATUSES = ['Enquiry', 'Confirmed', 'Checked In'];
+const BOOKABLE_ROOM_STATUSES = ['Available', 'Occupied', 'Cleaning'];
+
+function orFormula(field, values) {
+  return `OR(${values.map(v => `{${field}} = '${v}'`).join(', ')})`;
+}
+
+// Exclusive bounds, strict inequalities — the locked definition. A room checked
+// out of at 10:00 IS available for a 14:00 check-in the same day; inclusive
+// bounds would silently cost every room a sellable night on every turnover.
+function rangesOverlap(aStart, aEnd, bStart, bEnd) {
+  return Date.parse(aStart) < Date.parse(bEnd) && Date.parse(aEnd) > Date.parse(bStart);
+}
+
+// A booking only blocks if it has both dates. Pre-B7 records (and any Walk-in
+// row created by hand without dates) have nothing to compare, so they take no
+// part — per the locked migration decision.
+function bookingBlocksRange(booking, checkInIso, checkOutIso) {
+  const bookedIn = booking.fields['Check In'];
+  const bookedOut = booking.fields['Check Out'];
+  if (!bookedIn || !bookedOut) return false;
+  return rangesOverlap(checkInIso, checkOutIso, bookedIn, bookedOut);
+}
+
+// Returns the room record to use for this range, or null if the property is full.
+// `preferRoomId` re-verifies an existing hold: it returns that room when it is
+// still free, and silently re-offers a different one when it is not.
+// `excludeBookingId` is essential for that re-verify — a booking overlaps its
+// own range by definition, so without it a booking would always report its own
+// held room as taken.
+async function findAvailableRoom(propertyId, checkInIso, checkOutIso, opts = {}) {
+  const { excludeBookingId = null, preferRoomId = null } = opts;
+
+  // F5-style JS-side filter — FIND/ARRAYJOIN on linked records is unreliable.
+  const allRooms = await airtableGet('WS_Rooms', orFormula('Status', BOOKABLE_ROOM_STATUSES));
+  const rooms = allRooms.filter(r => (r.fields['Property'] || []).includes(propertyId));
+  if (rooms.length === 0) return null;
+
+  // Only statuses that actually block: a Cancelled or Checked Out booking must
+  // not hold inventory. Bookings carry no Property field, so they are scoped to
+  // this property by the room link itself — a booking on another property's room
+  // can never mark one of these rooms taken.
+  const blocking = await airtableGet('WS_Bookings', orFormula('Status', BLOCKING_BOOKING_STATUSES));
+  const takenRoomIds = new Set();
+  for (const booking of blocking) {
+    if (excludeBookingId && booking.id === excludeBookingId) continue;
+    if (!bookingBlocksRange(booking, checkInIso, checkOutIso)) continue;
+    for (const roomId of booking.fields['Room'] || []) takenRoomIds.add(roomId);
+  }
+
+  const free = rooms.filter(r => !takenRoomIds.has(r.id));
+  if (preferRoomId) {
+    const held = free.find(r => r.id === preferRoomId);
+    if (held) return held;
+  }
+  return free[0] || null;
+}
+
 // ─── GUARDS ──────────────────────────────────────────────────────────────────
 
 // Matches a cleaner's free-text reply against a room's identifying fields.
@@ -470,7 +544,12 @@ const actions = {
       }
     });
 
-    if (!guestName || !checkIn) {
+    // B8: check-out is now required. B7 allowed a check-in-only booking that
+    // rendered as "TBC"; once a booking holds a room, one with no check-out
+    // holds it against a range the overlap check cannot see, re-introducing the
+    // double-booking B8 exists to prevent — via a rarer door. The greeting has
+    // always asked for all three; this is the code enforcing what the copy says.
+    if (!guestName || !checkIn || !checkOut) {
       // Stay in AWAITING_DETAILS — no writes, reprompt only
       await sendWhatsApp(ctx.phone, msg('detailsReprompt'));
       return;
@@ -483,14 +562,12 @@ const actions = {
     // The raw text keeps feeding Notes and the guest/owner copy untouched;
     // these parsed values are additional, not a replacement.
     const checkInDate = parseBookingDate(checkIn, now);
-    const checkOutDate = checkOut ? parseBookingDate(checkOut, now) : null;
-    // A missing check-out line stays "TBC" (pre-B7 behaviour); a check-out line
-    // we can't parse is a re-prompt, not a silent downgrade to TBC.
+    const checkOutDate = parseBookingDate(checkOut, now);
     const datesUnusable = !checkInDate
-      || (checkOut && !checkOutDate)
+      || !checkOutDate
       // Overnight stays span at least one night: 14:00 → 10:00 on a reversed or
       // same-day range is a negative stay, and would poison B8 (CEO 16 July).
-      || (checkOutDate && compareYmd(checkOutDate, checkInDate) <= 0);
+      || compareYmd(checkOutDate, checkInDate) <= 0;
     if (datesUnusable) {
       logToAxiom('info', 'booking_date_unparsed', {
         phone: ctx.phone,
@@ -498,6 +575,25 @@ const actions = {
         checkOutText: checkOut || null
       });
       await sendWhatsApp(ctx.phone, msg('detailsReprompt'));
+      return;
+    }
+
+    const checkInIso = sastToUtcIso(checkInDate, OVERNIGHT_CHECKIN_HOUR);
+    const checkOutIso = sastToUtcIso(checkOutDate, OVERNIGHT_CHECKOUT_HOUR);
+
+    // B8: the real double-booking fix — decided here, at enquiry, not at the gate.
+    // Before this, the first collision anyone noticed was two guests at the door.
+    // Refusing costs nothing and writes nothing; the guest keeps their turn in
+    // AWAITING_DETAILS and can offer different dates.
+    const room = await findAvailableRoom(ctx.property.id, checkInIso, checkOutIso);
+    if (!room) {
+      logToAxiom('info', 'booking_no_availability', {
+        phone: ctx.phone,
+        propertyId: ctx.property.id,
+        checkIn: checkInIso,
+        checkOut: checkOutIso
+      });
+      await sendWhatsApp(ctx.phone, msg('noAvailability', { guestName, checkIn, checkOut }));
       return;
     }
 
@@ -526,11 +622,12 @@ const actions = {
     };
     // B7: structured dates in addition to the Notes string above, which keeps its
     // exact pre-B7 format — it is the human-readable record of what the guest
-    // actually typed, and these fields are what B8 will query.
-    bookingData['Check In'] = sastToUtcIso(checkInDate, OVERNIGHT_CHECKIN_HOUR);
-    if (checkOutDate) {
-      bookingData['Check Out'] = sastToUtcIso(checkOutDate, OVERNIGHT_CHECKOUT_HOUR);
-    }
+    // actually typed, and these fields are what B8 queries.
+    bookingData['Check In'] = checkInIso;
+    bookingData['Check Out'] = checkOutIso;
+    // B8: hold the room from this moment. Room Status deliberately stays as it
+    // is — the guest is not in the room yet, and a hold is not occupancy.
+    bookingData['Room'] = [room.id];
     if (rate) {
       bookingData['Rate Applied'] = [rate.id];
       bookingData['Amount Due'] = rate.fields['Amount'];
@@ -588,29 +685,59 @@ const actions = {
       ? ctx.property.fields['Notify Phone'].replace(/[\s\-\+]/g, '')
       : OWNER_PHONE;
 
-    // Step 2: first available room, scoped to this property (6.4 — unscoped
-    // would let a guest be assigned a room belonging to a different property)
+    // Step 2: settle which room this guest actually gets.
     // F5-style: see greetAndAskDetails — FIND/ARRAYJOIN confirmed unreliable, JS-filter instead
-    const allAvailableRoomsForArrival = await airtableGet('WS_Rooms', `{Status} = 'Available'`);
-    const availableRooms = allAvailableRoomsForArrival.filter(r => (r.fields['Property'] || []).includes(ctx.property.id));
-    let assignedRoomName = null;
-    let assignedRoomId = null;
-    if (availableRooms.length > 0) {
-      assignedRoomId = availableRooms[0].id;
-      assignedRoomName = availableRooms[0].fields['Room Name'];
-      // Step 3: room → Occupied
+    const bookings = await airtableGetBookingsByGuestId(ctx.guest.id, 'Confirmed');
+    const booking = bookings[0] || null;
+    const heldRoomId = (booking && (booking.fields['Room'] || [])[0]) || null;
+    const bookedIn = booking && booking.fields['Check In'];
+    const bookedOut = booking && booking.fields['Check Out'];
+
+    let room = null;
+    if (bookedIn && bookedOut) {
+      // B8: re-verify the hold rather than trust it. Airtable is not
+      // transactional (CLAUDE.md), so the room held at enquiry may have been
+      // taken since. preferRoomId returns the held room when it is still free
+      // and re-offers a different one when it is not — never fails silently.
+      room = await findAvailableRoom(ctx.property.id, bookedIn, bookedOut, {
+        excludeBookingId: booking.id,
+        preferRoomId: heldRoomId
+      });
+      if (heldRoomId && room && room.id !== heldRoomId) {
+        logToAxiom('warn', 'held_room_reassigned', {
+          phone: ctx.phone, bookingId: booking.id,
+          heldRoomId, reassignedTo: room.id, reason: 'held room taken before arrival'
+        });
+      } else if (heldRoomId && !room) {
+        logToAxiom('warn', 'held_room_lost_no_alternative', {
+          phone: ctx.phone, bookingId: booking.id, heldRoomId
+        });
+      }
+    } else {
+      // No range to check against: a booking created before B8 (no hold, no
+      // dates), or none at all. Falls through to the original F11 behaviour —
+      // first physically-available room. Fixtures 06 and 07 hold this path.
+      const allAvailableRoomsForArrival = await airtableGet('WS_Rooms', `{Status} = 'Available'`);
+      const availableRooms = allAvailableRoomsForArrival.filter(r => (r.fields['Property'] || []).includes(ctx.property.id));
+      room = availableRooms[0] || null;
+    }
+
+    const assignedRoomId = room ? room.id : null;
+    const assignedRoomName = room ? room.fields['Room Name'] : null;
+
+    // Step 3: room → Occupied. Now it really is occupancy, not a hold.
+    if (assignedRoomId) {
       await airtableUpdate('WS_Rooms', assignedRoomId, { 'Status': 'Occupied' });
     }
 
     // Step 4: booking → Checked In + link room + timestamp
-    const bookings = await airtableGetBookingsByGuestId(ctx.guest.id, 'Confirmed');
-    if (bookings.length > 0) {
+    if (booking) {
       const bookingUpdate = {
         'Status': 'Checked In',
         'Checked In At': new Date().toISOString()
       };
       if (assignedRoomId) bookingUpdate['Room'] = [assignedRoomId];
-      await airtableUpdate('WS_Bookings', bookings[0].id, bookingUpdate);
+      await airtableUpdate('WS_Bookings', booking.id, bookingUpdate);
     }
 
     // Step 5: session → CHECKED_IN
@@ -870,3 +997,8 @@ module.exports = async function handler(req, res) {
 module.exports.parseBookingDate = parseBookingDate;
 module.exports.sastToUtcIso = sastToUtcIso;
 module.exports.sastCalendarDate = sastCalendarDate;
+// B8: exported for test/availability.test.js. The exclusive-bounds behaviour is
+// only observable when a check-in instant exactly equals a check-out instant,
+// which the overnight flow can never produce (14:00 never equals 10:00) — so it
+// is unreachable through a fixture and has to be tested here. See that file.
+module.exports.rangesOverlap = rangesOverlap;
