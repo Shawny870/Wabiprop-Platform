@@ -1,0 +1,106 @@
+{
+  "name": "hourly: selecting 1hr completes the booking at this property's 1hr rate, holds a room, notifies the owner (B9/F17)",
+  "comment": "Happy path for 1hr. The pending row is seeded with Check In at 14:00 SAST tomorrow, so Check Out must land exactly 1 hour(s) later at 15:00 SAST (13:00Z) — this is the assertion the duration-arithmetic mutation test breaks. Amount Due comes from the property's Hourly Rate 1hr field; Rate Applied is deliberately left blank because it links to WS_Rates and hourly prices are WS_Properties fields, which cannot be linked to. The row is completed rather than re-created, so the guest never ends up with two open Enquiry bookings.",
+  "seed": {
+    "WS_Properties": [
+      {
+        "id": "recP1",
+        "fields": {
+          "Property Name": "Test Lodge",
+          "Phone Number ID": "111000111000",
+          "City": "Testville",
+          "Notify Phone": "27831112222",
+          "Hourly Rate 1hr": 120,
+          "Hourly Rate 2hr": 250,
+          "Hourly Rate 3hr": 320
+        }
+      }
+    ],
+    "WS_Rooms": [
+      {
+        "id": "recR1",
+        "fields": {
+          "Room Name": "Room 1",
+          "Status": "Available",
+          "Property": [
+            "recP1"
+          ]
+        }
+      }
+    ],
+    "WS_Guests": [
+      {
+        "id": "recG1",
+        "fields": {
+          "Guest Name": "John Smith",
+          "Phone Number": "27821234567",
+          "Session State": "AWAITING_HOURLY_DURATION"
+        }
+      }
+    ],
+    "WS_Bookings": [
+      {
+        "id": "recHourlyPend0001",
+        "fields": {
+          "Guest": [
+            "recG1"
+          ],
+          "Booking Type": "Hourly",
+          "Status": "Enquiry",
+          "Check In": "$SAST(1,14)",
+          "Payment Status": "Unpaid"
+        }
+      }
+    ],
+    "WS_Cleaners": []
+  },
+  "message": {
+    "from": "27821234567",
+    "text": "1"
+  },
+  "expect": {
+    "status": 200,
+    "writes": [
+      {
+        "op": "update",
+        "table": "WS_Bookings",
+        "id": "recHourlyPend0001",
+        "fields": {
+          "Check Out": "re:^\\d{4}-\\d{2}-\\d{2}T13:00:00\\.000Z$",
+          "Room": [
+            "recR1"
+          ],
+          "Booking Ref": "re:^WS-[A-Z0-9]{6}$",
+          "Amount Due": 120
+        }
+      },
+      {
+        "op": "update",
+        "table": "WS_Guests",
+        "id": "recG1",
+        "fields": {
+          "Session State": "CONFIRMED"
+        }
+      }
+    ],
+    "sends": [
+      {
+        "to": "27830000001",
+        "includes": [
+          "New *short stay* booking from John Smith",
+          "Duration: 1 hour",
+          "Rate: R120"
+        ]
+      },
+      {
+        "to": "27821234567",
+        "includes": [
+          "Thanks John Smith",
+          "Duration:* 1 hour",
+          "Rate:* R120",
+          "1 - I'm at the gate"
+        ]
+      }
+    ]
+  }
+}

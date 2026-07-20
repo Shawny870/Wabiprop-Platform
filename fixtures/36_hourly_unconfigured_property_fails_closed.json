@@ -1,0 +1,24 @@
+{
+  "name": "hourly: a property with no hourly rates configured routes to overnight instead of quoting R0 (B9/F17, fail closed)",
+  "comment": "A second guesthouse onboarded before its hourly pricing is set has blank rate fields. Quoting R0 or booking free would be a silent revenue hole, so the whole hourly feature switches off for that property and the guest is redirected to overnight — the same landing state as the >3hr case, so there is one recovery path rather than two. Deliberately checked at the entry point, before the duration menu is ever rendered: a menu with a broken option is worse than no menu. The rule is all-or-nothing per property — the unit tests cover partially-configured and zero-valued variants.",
+  "seed": {
+    "WS_Properties": [
+      { "id": "recP1", "fields": { "Property Name": "New Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222" } }
+    ],
+    "WS_Guests": [
+      { "id": "recG1", "fields": { "Guest Name": "Unknown", "Phone Number": "27821234567", "Session State": "AWAITING_DETAILS" } }
+    ],
+    "WS_Cleaners": [],
+    "WS_Bookings": []
+  },
+  "message": { "from": "27821234567", "text": "hourly" },
+  "expect": {
+    "status": 200,
+    "writes": [
+      { "op": "update", "table": "WS_Guests", "id": "recG1", "fields": { "Session State": "AWAITING_DETAILS" } }
+    ],
+    "sends": [
+      { "to": "27821234567", "includes": ["short stays aren't available at New Lodge", "overnight instead", "2. Check-in date"] }
+    ]
+  }
+}

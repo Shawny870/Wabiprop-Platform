@@ -1,0 +1,34 @@
+{
+  "name": "hourly: name + arrival time parks a pending booking and offers the 1/2/3 duration menu at this property's rates (B9/F17)",
+  "comment": "The arrival time has to survive until the guest's NEXT message, which is a separate serverless invocation with no shared memory. It is persisted as a booking row with Check In set and Check Out still blank — per B8's blank-date rule that row holds no room and blocks nothing, so an abandoned one is inert rather than phantom inventory. Check In is asserted by time-of-day only (12:00Z = 14:00 SAST): whether it lands today or tomorrow depends on the clock at run time, and that roll is itself pinned in test/hourly.test.js.",
+  "seed": {
+    "WS_Properties": [
+      { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222", "Hourly Rate 1hr": 120, "Hourly Rate 2hr": 250, "Hourly Rate 3hr": 320 } }
+    ],
+    "WS_Guests": [
+      { "id": "recG1", "fields": { "Guest Name": "Unknown", "Phone Number": "27821234567", "Session State": "AWAITING_HOURLY_DETAILS" } }
+    ],
+    "WS_Cleaners": [],
+    "WS_Bookings": []
+  },
+  "message": { "from": "27821234567", "text": "John Smith\n2pm" },
+  "expect": {
+    "status": 200,
+    "writes": [
+      { "op": "update", "table": "WS_Guests", "id": "recG1", "fields": { "Guest Name": "John Smith", "Session State": "AWAITING_HOURLY_DURATION" } },
+      {
+        "op": "create", "table": "WS_Bookings",
+        "fields": {
+          "Guest": ["recG1"],
+          "Booking Type": "Hourly",
+          "Status": "Enquiry",
+          "Check In": "re:^\\d{4}-\\d{2}-\\d{2}T12:00:00\\.000Z$",
+          "Payment Status": "Unpaid"
+        }
+      }
+    ],
+    "sends": [
+      { "to": "27821234567", "includes": ["John Smith", "at 2:00pm", "1 - 1 hour (R120)", "2 - 2 hours (R250)", "3 - 3 hours (R320)", "longer than 3 hours"] }
+    ]
+  }
+}

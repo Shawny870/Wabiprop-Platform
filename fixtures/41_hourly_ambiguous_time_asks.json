@@ -1,0 +1,22 @@
+{
+  "name": "hourly: a bare hour like '9' asks am or pm instead of guessing (B9/F17)",
+  "comment": "Guessing wrong on a bare 1-11 puts the booking twelve hours from where the guest meant: the wrong window is held, the wrong room is blocked, and the guest arrives to a room that was never theirs. One extra question is far cheaper than that, so ambiguity asks. 0 and 12-23 are unambiguous 24-hour readings and parse straight through — covered in test/hourly.test.js. No writes: the guest stays in AWAITING_HOURLY_DETAILS and their next message completes the step.",
+  "seed": {
+    "WS_Properties": [
+      { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222", "Hourly Rate 1hr": 120, "Hourly Rate 2hr": 250, "Hourly Rate 3hr": 320 } }
+    ],
+    "WS_Guests": [
+      { "id": "recG1", "fields": { "Guest Name": "Unknown", "Phone Number": "27821234567", "Session State": "AWAITING_HOURLY_DETAILS" } }
+    ],
+    "WS_Cleaners": [],
+    "WS_Bookings": []
+  },
+  "message": { "from": "27821234567", "text": "John Smith\n9" },
+  "expect": {
+    "status": 200,
+    "writes": [],
+    "sends": [
+      { "to": "27821234567", "includes": ["did you mean", "9am", "9pm"] }
+    ]
+  }
+}

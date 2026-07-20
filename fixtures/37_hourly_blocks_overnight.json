@@ -1,0 +1,30 @@
+{
+  "name": "availability: an existing HOURLY booking blocks an overlapping OVERNIGHT enquiry on the same room (B9/F17)",
+  "comment": "Proof that the two booking types share one availability system rather than two parallel ones. recB0 is a 3-hour short stay today 14:00-17:00 SAST on the only room; the overnight guest wants today 14:00 through tomorrow 10:00, which swallows that window whole. B8's findAvailableRoom is reused unforked, so this falls out of the datetime comparison with no hourly-specific logic — the only reason it works is that hourly writes real datetimes into the same Check In/Check Out fields.",
+  "seed": {
+    "WS_Properties": [
+      { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222", "Hourly Rate 1hr": 120, "Hourly Rate 2hr": 250, "Hourly Rate 3hr": 320 } }
+    ],
+    "WS_Rates": [
+      { "id": "recRATE1", "fields": { "Rate Name": "Standard Overnight", "Rate Type": "Per Night", "Amount": 350, "Active": true, "Property": ["recP1"] } }
+    ],
+    "WS_Rooms": [
+      { "id": "recR1", "fields": { "Room Name": "Room 1", "Status": "Available", "Property": ["recP1"] } }
+    ],
+    "WS_Guests": [
+      { "id": "recG1", "fields": { "Guest Name": "Unknown", "Phone Number": "27821234567", "Session State": "AWAITING_DETAILS" } }
+    ],
+    "WS_Bookings": [
+      { "id": "recHourlyExist001", "fields": { "Booking Type": "Hourly", "Status": "Confirmed", "Room": ["recR1"], "Check In": "$SAST(0,14)", "Check Out": "$SAST(0,17)" } }
+    ],
+    "WS_Cleaners": []
+  },
+  "message": { "from": "27821234567", "text": "John Smith\ntoday\ntomorrow" },
+  "expect": {
+    "status": 200,
+    "writes": [],
+    "sends": [
+      { "to": "27821234567", "includes": ["Sorry John Smith", "fully booked", "try different dates"] }
+    ]
+  }
+}

@@ -8,10 +8,18 @@
 
   "states": {
     "NEW": [
+      { "inputs": ["hourly"], "action": "startHourly", "next": "AWAITING_HOURLY_DETAILS" },
       { "inputs": "*", "action": "greetAndAskDetails", "next": "AWAITING_DETAILS" }
     ],
     "AWAITING_DETAILS": [
+      { "inputs": ["hourly"], "action": "startHourly", "next": "AWAITING_HOURLY_DETAILS" },
       { "inputs": "*", "action": "collectDetails", "next": "AWAITING_ETA" }
+    ],
+    "AWAITING_HOURLY_DETAILS": [
+      { "inputs": "*", "action": "collectHourlyDetails", "next": "AWAITING_HOURLY_DURATION" }
+    ],
+    "AWAITING_HOURLY_DURATION": [
+      { "inputs": "*", "action": "selectHourlyDuration", "next": "CONFIRMED" }
     ],
     "AWAITING_ETA": [
       { "inputs": "*", "action": "recordEta", "next": "CONFIRMED" }
@@ -35,6 +43,16 @@
     "detailsReprompt": "Sorry, I didn't quite get that. Please reply with your:\n1. Full name\n2. Check-in date (e.g. 25 June)\n3. Check-out date (e.g. 27 June)\n\nSend each on a new line.",
     "noAvailability": "Sorry {guestName}, we're fully booked from *{checkIn}* to *{checkOut}*. 😔\n\nWe'd still love to host you — would you like to try different dates? Please reply with your:\n1. Full name\n2. Check-in date (e.g. 25 June)\n3. Check-out date (e.g. 27 June)\n\nSend each on a new line.",
     "ownerNewBooking": "📋 New booking enquiry from {guestName}\nPhone: {phone}\nRef: {bookingRef}\nCheck-in: {checkIn}\nCheck-out: {checkOut}",
+    "hourlyAskDetails": "Great — let's set up your *short stay* at {propertyName}. 🕐\n\nPlease send:\n1. Your full name\n2. What time you'll arrive (e.g. 2pm or 14:00)\n\nSend both, each on a new line.",
+    "hourlyDetailsReprompt": "Sorry, I didn't quite get that. Please reply with your:\n1. Full name\n2. Arrival time (e.g. 2pm or 14:00)\n\nSend each on a new line.",
+    "hourlyTimeAmbiguous": "Just to be sure — did you mean *{value}am* or *{value}pm*?\n\nPlease reply with the full time, e.g. \"{value}pm\".",
+    "hourlyDurationMenu": "Great {guestName}! 🕐 Arriving *{arrivalText}*.\n\nHow long do you need? Reply with a number:\n1 - 1 hour (R{rate1})\n2 - 2 hours (R{rate2})\n3 - 3 hours (R{rate3})\n\n_Staying longer than 3 hours? Reply 4 and we'll set up an overnight booking instead._",
+    "hourlyBookingReceived": "Thanks {guestName}! 🙏\n\nYour *short stay* is booked.\n\n*Ref:* {bookingRef}\n*Arriving:* {checkInText}\n*Until:* {checkOutText}\n*Duration:* {durationText}\n*Rate:* R{amount}\n\nWhen you arrive, reply with a number:\n1 - I'm at the gate\n2 - Cancel my booking",
+    "hourlyOwnerNewBooking": "📋 New *short stay* booking from {guestName}\nPhone: {phone}\nRef: {bookingRef}\nArriving: {checkInText}\nUntil: {checkOutText}\nDuration: {durationText}\nRate: R{amount}",
+    "hourlyNoAvailability": "Sorry {guestName}, we're fully booked from *{checkInText}* to *{checkOutText}*. 😔\n\nWould you like to try a different time? Please reply with your:\n1. Full name\n2. Arrival time (e.g. 2pm or 14:00)\n\nSend each on a new line.",
+    "hourlyTooLong": "No problem — for stays longer than 3 hours we'll book you overnight instead. 🛏️\n\nPlease send:\n1. Your full name\n2. Check-in date (e.g. 25 June)\n3. Check-out date (e.g. 27 June)\n\nSend all three, each on a new line.",
+    "hourlyUnavailable": "Sorry, short stays aren't available at {propertyName} at the moment. 😔\n\nWe'd be happy to book you overnight instead. Please send:\n1. Your full name\n2. Check-in date (e.g. 25 June)\n3. Check-out date (e.g. 27 June)\n\nSend all three, each on a new line.",
+    "gateTooEarly": "Hi {guestName}! Your booking is for *{bookingDate}*, not today. 📅\n\nWe'll see you then! If you need to change your booking, just let us know.",
     "bookingReceived": "Thanks {guestName}! 🙏\n\nYour booking enquiry has been received.\n\n*Ref:* {bookingRef}\n*Check-in:* {checkIn}\n*Check-out:* {checkOut}\n{rateLine}\n\nWhat time do you expect to arrive? (e.g. \"around 2pm\" or \"after 5\")",
     "etaConfirmed": "Perfect! We'll have your room ready for you. 🛏️\n\nSee you at *{eta}*.\n\nWhen you arrive, reply with a number:\n1 - I'm at the gate\n2 - Cancel my booking\n\nWe look forward to hosting you at {propertyName}! 🌟",
     "gateNotify": "🔔 {guestName} is at the gate. {roomInfo}\nPhone: {phone}",

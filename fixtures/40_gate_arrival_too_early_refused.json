@@ -1,0 +1,27 @@
+{
+  "name": "gate arrival: a guest arriving days before their booking's check-in date is told the real date and assigned no room (B9/F17)",
+  "comment": "Observed live during B8 device testing — a guest sent '1 - I'm at the gate' two days before their booking started and was checked into a room they had not booked for that night, silently taking it out of inventory. The check is SAST day-granularity and deliberately one-sided: only a FUTURE check-in is refused. A guest who is LATE is still a guest, and turning them away at the gate would be worse than the bug being fixed. Day granularity also protects the guest who booked 'today' at 23:30 and reaches the gate at 00:30, now technically the next SAST day. No writes at all: the booking stays Confirmed and the guest can simply arrive on the right day.",
+  "seed": {
+    "WS_Properties": [
+      { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222" } }
+    ],
+    "WS_Rooms": [
+      { "id": "recR1", "fields": { "Room Name": "Room 1", "Status": "Available", "Property": ["recP1"] } }
+    ],
+    "WS_Guests": [
+      { "id": "recG1", "fields": { "Guest Name": "John Smith", "Phone Number": "27821234567", "Session State": "CONFIRMED" } }
+    ],
+    "WS_Bookings": [
+      { "id": "recB1", "fields": { "Guest": ["recG1"], "Status": "Confirmed", "Room": ["recR1"], "Check In": "$SAST(2,14)", "Check Out": "$SAST(4,10)" } }
+    ],
+    "WS_Cleaners": []
+  },
+  "message": { "from": "27821234567", "text": "1" },
+  "expect": {
+    "status": 200,
+    "writes": [],
+    "sends": [
+      { "to": "27821234567", "includes": ["Hi John Smith", "Your booking is for", "not today", "We'll see you then"] }
+    ]
+  }
+}

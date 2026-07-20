@@ -1,0 +1,30 @@
+{
+  "name": "availability: an existing OVERNIGHT booking blocks an overlapping HOURLY selection on the same room (B9/F17)",
+  "comment": "The inverse of fixture 37, and the direction that would break first if hourly had been given its own availability path. recB0 occupies the only room from today 14:00 SAST until tomorrow 10:00; the short-stay guest asks for 15:00 today for one hour, which sits entirely inside that. Guest returns to AWAITING_HOURLY_DETAILS to offer a different time, and the pending row keeps its blank Check Out — still inert, and reused rather than duplicated when they try again.",
+  "seed": {
+    "WS_Properties": [
+      { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222", "Hourly Rate 1hr": 120, "Hourly Rate 2hr": 250, "Hourly Rate 3hr": 320 } }
+    ],
+    "WS_Rooms": [
+      { "id": "recR1", "fields": { "Room Name": "Room 1", "Status": "Available", "Property": ["recP1"] } }
+    ],
+    "WS_Guests": [
+      { "id": "recG1", "fields": { "Guest Name": "John Smith", "Phone Number": "27821234567", "Session State": "AWAITING_HOURLY_DURATION" } }
+    ],
+    "WS_Bookings": [
+      { "id": "recOvernightEx01", "fields": { "Booking Type": "Overnight", "Status": "Confirmed", "Room": ["recR1"], "Check In": "$SAST(0,14)", "Check Out": "$SAST(1,10)" } },
+      { "id": "recHourlyPend0001", "fields": { "Guest": ["recG1"], "Booking Type": "Hourly", "Status": "Enquiry", "Check In": "$SAST(0,15)", "Payment Status": "Unpaid" } }
+    ],
+    "WS_Cleaners": []
+  },
+  "message": { "from": "27821234567", "text": "1" },
+  "expect": {
+    "status": 200,
+    "writes": [
+      { "op": "update", "table": "WS_Guests", "id": "recG1", "fields": { "Session State": "AWAITING_HOURLY_DETAILS" } }
+    ],
+    "sends": [
+      { "to": "27821234567", "includes": ["Sorry John Smith", "fully booked", "different time", "2. Arrival time"] }
+    ]
+  }
+}

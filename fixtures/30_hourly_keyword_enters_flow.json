@@ -1,0 +1,24 @@
+{
+  "name": "hourly: the HOURLY keyword enters a real short-stay flow instead of falling through to the overnight re-prompt (B9/F17, closes F10)",
+  "comment": "F10 added HOURLY as a placeholder in the WS1 build and it has been dead ever since — sending it landed on the AWAITING_DETAILS fallback and re-prompted for overnight dates, which is what the live device test in v4 observed. Seeded from AWAITING_DETAILS rather than NEW on purpose: the greeting that advertises 'reply HOURLY' is itself what moves the guest out of NEW, so this is the state a real guest is actually in when they type it.",
+  "seed": {
+    "WS_Properties": [
+      { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222", "Hourly Rate 1hr": 120, "Hourly Rate 2hr": 250, "Hourly Rate 3hr": 320 } }
+    ],
+    "WS_Guests": [
+      { "id": "recG1", "fields": { "Guest Name": "Unknown", "Phone Number": "27821234567", "Session State": "AWAITING_DETAILS" } }
+    ],
+    "WS_Cleaners": [],
+    "WS_Bookings": []
+  },
+  "message": { "from": "27821234567", "text": "HOURLY" },
+  "expect": {
+    "status": 200,
+    "writes": [
+      { "op": "update", "table": "WS_Guests", "id": "recG1", "fields": { "Session State": "AWAITING_HOURLY_DETAILS" } }
+    ],
+    "sends": [
+      { "to": "27821234567", "includes": ["short stay", "Test Lodge", "1. Your full name", "2. What time you'll arrive"] }
+    ]
+  }
+}

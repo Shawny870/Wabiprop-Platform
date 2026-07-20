@@ -77,6 +77,14 @@ async function airtableUpdate(table, recordId, fields) {
   return data;
 }
 
+// B9: the guest's half-built hourly booking — Check In recorded, duration not
+// yet chosen, so Check Out is still blank. Blank Check Out is exactly what makes
+// it inert to B8's overlap check while the guest is mid-conversation.
+async function findPendingHourlyBooking(guestId) {
+  const enquiries = await airtableGetBookingsByGuestId(guestId, 'Enquiry');
+  return enquiries.find(b => b.fields['Booking Type'] === 'Hourly' && !b.fields['Check Out']) || null;
+}
+
 // F5: direct record ID lookup — replaces FIND/ARRAYJOIN pattern
 async function airtableGetBookingsByGuestId(guestId, status) {
   // Airtable linked record filter via FIND/ARRAYJOIN is unreliable —
@@ -152,10 +160,12 @@ function sastCalendarDate(nowUtc) {
   return { y: shifted.getUTCFullYear(), m: shifted.getUTCMonth() + 1, d: shifted.getUTCDate() };
 }
 
-// The one and only UTC conversion — a SAST calendar date + SAST hour → the ISO
+// The one and only UTC conversion — a SAST calendar date + SAST time → the ISO
 // string Airtable stores. Nothing else in this file may build a booking datetime.
-function sastToUtcIso(date, sastHour) {
-  return new Date(Date.UTC(date.y, date.m - 1, date.d, sastHour) - SAST_OFFSET_MS).toISOString();
+// B9 added the minute argument for hourly arrival times ("2:30pm"); overnight
+// callers omit it and get :00, exactly as before.
+function sastToUtcIso(date, sastHour, sastMinute = 0) {
+  return new Date(Date.UTC(date.y, date.m - 1, date.d, sastHour, sastMinute) - SAST_OFFSET_MS).toISOString();
 }
 
 function addSastDays(date, days) {
@@ -297,6 +307,94 @@ async function resolveProperty(phoneNumberId) {
 function propertyCityLine(property) {
   const city = property.fields['City'];
   return city ? `, ${city}` : '';
+}
+
+// ─── HOURLY / SHORT STAY (B9) ────────────────────────────────────────────────
+// Hourly bookings write real start/end datetimes into the same Check In/Check Out
+// fields as overnight, so B8's findAvailableRoom blocks hourly-vs-hourly and
+// hourly-vs-overnight with no extra logic. There is deliberately no second date
+// system — the only difference from overnight is the hour granularity and the
+// fact that check-out is computed from a duration rather than parsed.
+//
+// Rates come from three per-property currency fields (names verified against
+// live Airtable metadata, per Rule 1 — never typed from memory).
+
+const HOURLY_DURATIONS = [1, 2, 3];
+const HOURLY_RATE_FIELDS = {
+  1: 'Hourly Rate 1hr',
+  2: 'Hourly Rate 2hr',
+  3: 'Hourly Rate 3hr'
+};
+
+// Fail closed: a property with any hourly rate blank or zero has not configured
+// short stays, and must never quote R0 or fall through to a free booking. The
+// whole feature is switched off for that property and the guest is routed to the
+// overnight flow instead — the same redirect the >3hr case uses.
+function hourlyRates(property) {
+  const rates = {};
+  for (const hours of HOURLY_DURATIONS) {
+    const raw = property.fields[HOURLY_RATE_FIELDS[hours]];
+    const amount = Number(raw);
+    if (raw === undefined || raw === null || raw === '' || !Number.isFinite(amount) || amount <= 0) return null;
+    rates[hours] = amount;
+  }
+  return rates;
+}
+
+// Bare hours 1–11 are genuinely ambiguous ("9" could be morning or night) and
+// guessing wrong puts the booking twelve hours from where the guest meant —
+// wrong window held, wrong room blocked, guest arrives to nothing. One extra
+// question is cheaper than that, so ambiguity re-prompts instead of assuming.
+// Returns { hour, minute } in SAST, { ambiguous: n }, or null.
+function parseArrivalTime(text) {
+  const t = String(text || '')
+    .trim().toLowerCase()
+    .replace(/^(from|at|around|about|approx\.?|approximately|after|before|roughly)\s+/g, '')
+    .replace(/\s+/g, '');
+  if (!t) return null;
+
+  const m = t.match(/^(\d{1,2})(?::|h|\.)?(\d{2})?(am|pm)?$/);
+  if (!m) return null;
+  let hour = Number(m[1]);
+  const minute = m[2] === undefined ? 0 : Number(m[2]);
+  const meridiem = m[3];
+  if (minute > 59) return null;
+
+  if (meridiem) {
+    if (hour < 1 || hour > 12) return null;
+    if (meridiem === 'pm' && hour !== 12) hour += 12;
+    if (meridiem === 'am' && hour === 12) hour = 0;
+    return { hour, minute };
+  }
+  if (hour > 23) return null;
+  // 0 and 12–23 can only be 24-hour clock; 1–11 could be either.
+  if (hour >= 1 && hour <= 11) return { ambiguous: hour };
+  return { hour, minute };
+}
+
+// The load-bearing duration arithmetic: get this wrong and every hourly overlap
+// check silently examines the wrong window. Kept as one tiny function so it can
+// be mutation-tested directly.
+function addHoursToIso(iso, hours) {
+  return new Date(Date.parse(iso) + hours * 60 * 60 * 1000).toISOString();
+}
+
+const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+// Renders a stored UTC instant back in SAST for guest-facing copy. Times are
+// always shown with their date: an hourly booking that rolled to tomorrow must
+// not read as if it were today.
+function formatSastDateTime(iso) {
+  const d = new Date(Date.parse(iso) + SAST_OFFSET_MS);
+  const h24 = d.getUTCHours();
+  const meridiem = h24 < 12 ? 'am' : 'pm';
+  const h12 = h24 % 12 === 0 ? 12 : h24 % 12;
+  const time = `${h12}:${String(d.getUTCMinutes()).padStart(2, '0')}${meridiem}`;
+  return `${d.getUTCDate()} ${MONTH_ABBR[d.getUTCMonth()]} at ${time}`;
+}
+
+function durationText(hours) {
+  return hours === 1 ? '1 hour' : `${hours} hours`;
 }
 
 // ─── AVAILABILITY (B8) ───────────────────────────────────────────────────────
@@ -661,6 +759,224 @@ const actions = {
     }));
   },
 
+  // NEW / AWAITING_DETAILS + "HOURLY": enter the short-stay flow (closes F10 —
+  // the keyword has been a placeholder since WS1 and fell through to the
+  // overnight re-prompt). Wired into AWAITING_DETAILS as well as NEW because the
+  // greeting that advertises HOURLY is itself what moves the guest out of NEW,
+  // so almost every real guest types it from AWAITING_DETAILS.
+  async startHourly(ctx) {
+    const rates = hourlyRates(ctx.property);
+    if (!rates) {
+      // Property has not configured short stays — fail closed, never quote R0.
+      logToAxiom('info', 'hourly_not_configured', { phone: ctx.phone, propertyId: ctx.property.id });
+      if (ctx.guest) {
+        await airtableUpdate('WS_Guests', ctx.guest.id, { 'Session State': 'AWAITING_DETAILS' });
+      } else {
+        await airtableCreate('WS_Guests', {
+          'Guest Name': 'Unknown',
+          'Phone Number': ctx.phone,
+          'Guest Type': 'WhatsApp',
+          'Session State': 'AWAITING_DETAILS',
+          'First Visit': new Date().toISOString().split('T')[0]
+        });
+      }
+      await sendWhatsApp(ctx.phone, msg('hourlyUnavailable', {
+        propertyName: ctx.property.fields['Property Name']
+      }));
+      return;
+    }
+
+    if (ctx.guest) {
+      await airtableUpdate('WS_Guests', ctx.guest.id, { 'Session State': ctx.next });
+    } else {
+      await airtableCreate('WS_Guests', {
+        'Guest Name': 'Unknown',
+        'Phone Number': ctx.phone,
+        'Guest Type': 'WhatsApp',
+        'Session State': ctx.next,
+        'First Visit': new Date().toISOString().split('T')[0]
+      });
+    }
+    await sendWhatsApp(ctx.phone, msg('hourlyAskDetails', {
+      propertyName: ctx.property.fields['Property Name']
+    }));
+  },
+
+  // AWAITING_HOURLY_DETAILS: name + arrival time, then offer the duration menu.
+  // Duration is a separate state because a numbered menu cannot share a message
+  // with free text — "2" must mean two hours, never part of a name or a time.
+  async collectHourlyDetails(ctx) {
+    const lines = ctx.messageText.trim().split('\n').map(l => l.trim()).filter(Boolean);
+    let guestName = ctx.guest.fields['Guest Name'] !== 'Unknown' ? ctx.guest.fields['Guest Name'] : null;
+    let arrival = null;
+    let ambiguousHour = null;
+
+    for (const line of lines) {
+      const parsed = parseArrivalTime(line);
+      if (parsed && parsed.ambiguous !== undefined) {
+        if (ambiguousHour === null) ambiguousHour = parsed.ambiguous;
+      } else if (parsed && !arrival) {
+        arrival = parsed;
+      } else if (!parsed && !guestName) {
+        guestName = line;
+      }
+    }
+
+    if (!arrival && ambiguousHour !== null) {
+      // Stay in AWAITING_HOURLY_DETAILS — ask which half of the clock they meant.
+      await sendWhatsApp(ctx.phone, msg('hourlyTimeAmbiguous', { value: ambiguousHour }));
+      return;
+    }
+    if (!guestName || !arrival) {
+      await sendWhatsApp(ctx.phone, msg('hourlyDetailsReprompt'));
+      return;
+    }
+
+    // An arrival time already past today means the next occurrence of that time,
+    // same principle as B7's year-roll: guests book the future, and a bookable
+    // answer beats a re-prompt. The confirmation always states the full date, so
+    // a roll to tomorrow is visible rather than silent.
+    const now = new Date();
+    const today = sastCalendarDate(now);
+    let arrivalDate = today;
+    if (Date.parse(sastToUtcIso(today, arrival.hour, arrival.minute)) <= now.getTime()) {
+      arrivalDate = addSastDays(today, 1);
+    }
+    const checkInIso = sastToUtcIso(arrivalDate, arrival.hour, arrival.minute);
+
+    const rates = hourlyRates(ctx.property);
+    if (!rates) {
+      // Rates removed mid-conversation — same fail-closed redirect as entry.
+      await airtableUpdate('WS_Guests', ctx.guest.id, { 'Session State': 'AWAITING_DETAILS' });
+      await sendWhatsApp(ctx.phone, msg('hourlyUnavailable', { propertyName: ctx.property.fields['Property Name'] }));
+      return;
+    }
+
+    await airtableUpdate('WS_Guests', ctx.guest.id, {
+      'Guest Name': guestName,
+      'Session State': ctx.next
+    });
+
+    // The duration menu arrives as a separate WhatsApp message — a separate
+    // serverless invocation with no shared memory — so the arrival time has to
+    // be persisted. It goes on a booking record rather than scratch storage,
+    // the same way WS1 parks the ETA: this row IS the guest's booking, just not
+    // yet priced. With Check Out still blank it holds no room and blocks
+    // nothing (B8's blank-date rule), so an abandoned one is inert rather than
+    // phantom inventory. Reused rather than duplicated if the guest re-enters
+    // a time after being told there is no availability.
+    const pending = await findPendingHourlyBooking(ctx.guest.id);
+    if (pending) {
+      await airtableUpdate('WS_Bookings', pending.id, { 'Check In': checkInIso });
+    } else {
+      await airtableCreate('WS_Bookings', {
+        'Guest': [ctx.guest.id],
+        'Booking Type': 'Hourly',
+        'Source': 'WhatsApp',
+        'Status': 'Enquiry',
+        'Logged By': 'WhatsApp Bot',
+        'Check In': checkInIso,
+        'Payment Status': 'Unpaid'
+      });
+    }
+
+    await sendWhatsApp(ctx.phone, msg('hourlyDurationMenu', {
+      guestName,
+      arrivalText: formatSastDateTime(checkInIso),
+      rate1: rates[1], rate2: rates[2], rate3: rates[3]
+    }));
+  },
+
+  // AWAITING_HOURLY_DURATION: 1/2/3 creates the booking; 4+ redirects to overnight.
+  async selectHourlyDuration(ctx) {
+    const choice = Number(ctx.text.replace(/\s*(hours?|hrs?)\s*$/, '').trim());
+    const pending = await findPendingHourlyBooking(ctx.guest.id);
+    const rates = hourlyRates(ctx.property);
+
+    if (choice > 3 && Number.isInteger(choice)) {
+      // Locked decision: >3hr is an overnight stay, not an error and not a
+      // fourth hourly option. Cancel the half-built hourly booking on the way
+      // out so the guest does not end up with two open Enquiry rows, which
+      // would make recordEta ambiguous about which one to confirm.
+      if (pending) await airtableUpdate('WS_Bookings', pending.id, { 'Status': 'Cancelled' });
+      await airtableUpdate('WS_Guests', ctx.guest.id, { 'Session State': 'AWAITING_DETAILS' });
+      logToAxiom('info', 'hourly_redirect_overnight', { phone: ctx.phone, requestedHours: choice });
+      await sendWhatsApp(ctx.phone, msg('hourlyTooLong'));
+      return;
+    }
+
+    const checkInIso = pending && pending.fields['Check In'];
+    if (!Number.isInteger(choice) || choice < 1 || !checkInIso || !rates) {
+      // Unreadable choice, or the flow lost its footing (no pending booking,
+      // rates pulled mid-conversation). Re-offer rather than dead-end.
+      if (!checkInIso || !rates) {
+        await airtableUpdate('WS_Guests', ctx.guest.id, { 'Session State': 'AWAITING_DETAILS' });
+        await sendWhatsApp(ctx.phone, msg('hourlyUnavailable', { propertyName: ctx.property.fields['Property Name'] }));
+        return;
+      }
+      await sendWhatsApp(ctx.phone, msg('hourlyDurationMenu', {
+        guestName: ctx.guest.fields['Guest Name'],
+        arrivalText: formatSastDateTime(checkInIso),
+        rate1: rates[1], rate2: rates[2], rate3: rates[3]
+      }));
+      return;
+    }
+
+    const checkOutIso = addHoursToIso(checkInIso, choice);
+    const amount = rates[choice];
+    const guestName = ctx.guest.fields['Guest Name'];
+
+    // Same availability helper as overnight, unforked — this is what makes an
+    // hourly booking block an overnight one on the same room and vice versa.
+    const room = await findAvailableRoom(ctx.property.id, checkInIso, checkOutIso);
+    if (!room) {
+      logToAxiom('info', 'hourly_no_availability', {
+        phone: ctx.phone, propertyId: ctx.property.id, checkIn: checkInIso, checkOut: checkOutIso
+      });
+      // Booking stays pending with Check Out blank — inert, and reused when the
+      // guest offers a different time.
+      await airtableUpdate('WS_Guests', ctx.guest.id, { 'Session State': 'AWAITING_HOURLY_DETAILS' });
+      await sendWhatsApp(ctx.phone, msg('hourlyNoAvailability', {
+        guestName,
+        checkInText: formatSastDateTime(checkInIso),
+        checkOutText: formatSastDateTime(checkOutIso)
+      }));
+      return;
+    }
+
+    // Completes the pending row rather than creating a second one: Check Out and
+    // the room hold are what turn it from inert into a real, blocking booking.
+    const bookingRef = `WS-${pending.id.slice(-6).toUpperCase()}`;
+    await airtableUpdate('WS_Bookings', pending.id, {
+      'Check Out': checkOutIso,
+      'Room': [room.id],
+      'Booking Ref': bookingRef,
+      'Notes': `Short stay: ${durationText(choice)} from ${formatSastDateTime(checkInIso)}`,
+      // Amount Due carries the price. Rate Applied is deliberately left empty:
+      // it links to WS_Rates, and hourly prices live as WS_Properties fields,
+      // which cannot be linked to. Blank, not dangling — B17 aggregates on
+      // Amount Due, which is populated for every booking type.
+      'Amount Due': amount
+    });
+    logToAxiom('info', 'booking_create', {
+      phone: ctx.phone, guestName, bookingRef, bookingType: 'Hourly',
+      hours: choice, airtableId: pending.id
+    });
+
+    await airtableUpdate('WS_Guests', ctx.guest.id, { 'Session State': ctx.next });
+
+    const view = {
+      guestName, bookingRef, amount,
+      durationText: durationText(choice),
+      checkInText: formatSastDateTime(checkInIso),
+      checkOutText: formatSastDateTime(checkOutIso)
+    };
+    if (OWNER_PHONE) {
+      await sendWhatsApp(OWNER_PHONE, msg('hourlyOwnerNewBooking', { ...view, phone: ctx.phone }));
+    }
+    await sendWhatsApp(ctx.phone, msg('hourlyBookingReceived', view));
+  },
+
   // AWAITING_ETA: record ETA, confirm booking
   async recordEta(ctx) {
     const eta = ctx.messageText.trim();
@@ -692,6 +1008,30 @@ const actions = {
     const heldRoomId = (booking && (booking.fields['Room'] || [])[0]) || null;
     const bookedIn = booking && booking.fields['Check In'];
     const bookedOut = booking && booking.fields['Check Out'];
+
+    // B9: refuse a gate arrival before the booking's own check-in date. Without
+    // this a guest could check in days early and take a room they had not booked
+    // (observed live during B8 testing). Compared at SAST day granularity, and
+    // deliberately one-sided — only a FUTURE check-in is refused. A guest who is
+    // late is still a guest: turning them away at the gate would be worse than
+    // the bug. Day granularity also avoids refusing someone who booked "today"
+    // at 23:30 and arrives at 00:30, now technically the next day.
+    if (bookedIn) {
+      const bookedDate = sastCalendarDate(new Date(Date.parse(bookedIn)));
+      const todayDate = sastCalendarDate(new Date());
+      if (compareYmd(bookedDate, todayDate) > 0) {
+        logToAxiom('info', 'gate_arrival_too_early', {
+          phone: ctx.phone, bookingId: booking.id, checkIn: bookedIn
+        });
+        // No writes, no state change — the booking is untouched and the guest
+        // can still arrive on the right day.
+        await sendWhatsApp(ctx.phone, msg('gateTooEarly', {
+          guestName: ctx.guest.fields['Guest Name'],
+          bookingDate: formatSastDateTime(bookedIn)
+        }));
+        return;
+      }
+    }
 
     let room = null;
     if (bookedIn && bookedOut) {
@@ -1002,3 +1342,10 @@ module.exports.sastCalendarDate = sastCalendarDate;
 // which the overnight flow can never produce (14:00 never equals 10:00) — so it
 // is unreachable through a fixture and has to be tested here. See that file.
 module.exports.rangesOverlap = rangesOverlap;
+// B9: duration arithmetic and arrival-time parsing. addHoursToIso is the piece
+// the mutation test targets — wrong by an hour and every hourly availability
+// check silently examines the wrong window.
+module.exports.parseArrivalTime = parseArrivalTime;
+module.exports.addHoursToIso = addHoursToIso;
+module.exports.hourlyRates = hourlyRates;
+module.exports.formatSastDateTime = formatSastDateTime;

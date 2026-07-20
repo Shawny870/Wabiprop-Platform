@@ -1,0 +1,30 @@
+{
+  "name": "hourly: a request longer than 3 hours redirects into the overnight flow instead of erroring or dead-ending (B9/F17)",
+  "comment": "Locked decision: >3hr is an overnight stay, not a fourth hourly option and not an error. The half-built hourly row is Cancelled on the way out rather than orphaned — leaving it Enquiry would give the guest two open Enquiry bookings once collectDetails creates the overnight one, and recordEta takes bookings[0], so it could confirm the wrong row. Guest lands in AWAITING_DETAILS, which is exactly where WS1's date collection picks up.",
+  "seed": {
+    "WS_Properties": [
+      { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222", "Hourly Rate 1hr": 120, "Hourly Rate 2hr": 250, "Hourly Rate 3hr": 320 } }
+    ],
+    "WS_Rooms": [
+      { "id": "recR1", "fields": { "Room Name": "Room 1", "Status": "Available", "Property": ["recP1"] } }
+    ],
+    "WS_Guests": [
+      { "id": "recG1", "fields": { "Guest Name": "John Smith", "Phone Number": "27821234567", "Session State": "AWAITING_HOURLY_DURATION" } }
+    ],
+    "WS_Bookings": [
+      { "id": "recHourlyPend0001", "fields": { "Guest": ["recG1"], "Booking Type": "Hourly", "Status": "Enquiry", "Check In": "$SAST(1,14)", "Payment Status": "Unpaid" } }
+    ],
+    "WS_Cleaners": []
+  },
+  "message": { "from": "27821234567", "text": "4" },
+  "expect": {
+    "status": 200,
+    "writes": [
+      { "op": "update", "table": "WS_Bookings", "id": "recHourlyPend0001", "fields": { "Status": "Cancelled" } },
+      { "op": "update", "table": "WS_Guests", "id": "recG1", "fields": { "Session State": "AWAITING_DETAILS" } }
+    ],
+    "sends": [
+      { "to": "27821234567", "includes": ["longer than 3 hours", "overnight", "2. Check-in date", "3. Check-out date"] }
+    ]
+  }
+}

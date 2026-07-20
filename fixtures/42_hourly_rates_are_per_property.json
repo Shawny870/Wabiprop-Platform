@@ -1,0 +1,43 @@
+{
+  "name": "hourly: a second property's guest is quoted that property's own rates, not the first property's (B9/F17)",
+  "comment": "Locked decision: each owner sets three independent numbers, with no shared formula and no cross-property default. Two properties are seeded with deliberately different pricing and this message arrives on the SECOND property's phone_number_id, so the rates rendered prove resolveProperty scoping reaches the rate read. A custom payload is used rather than the harness default because metaTextPayload hard-codes the first property's phone_number_id. If rates ever leaked across properties, this fixture shows R120/R250/R320 instead of R80/R150/R200.",
+  "seed": {
+    "WS_Properties": [
+      { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222", "Hourly Rate 1hr": 120, "Hourly Rate 2hr": 250, "Hourly Rate 3hr": 320 } },
+      { "id": "recP2", "fields": { "Property Name": "Second Lodge", "Phone Number ID": "222000222000", "City": "Othertown", "Notify Phone": "27834445555", "Hourly Rate 1hr": 80, "Hourly Rate 2hr": 150, "Hourly Rate 3hr": 200 } }
+    ],
+    "WS_Rooms": [
+      { "id": "recR2", "fields": { "Room Name": "Room A", "Status": "Available", "Property": ["recP2"] } }
+    ],
+    "WS_Guests": [
+      { "id": "recG1", "fields": { "Guest Name": "Unknown", "Phone Number": "27821234567", "Session State": "AWAITING_HOURLY_DETAILS" } }
+    ],
+    "WS_Cleaners": [],
+    "WS_Bookings": []
+  },
+  "payload": {
+    "object": "whatsapp_business_account",
+    "entry": [{
+      "id": "WABA_TEST",
+      "changes": [{
+        "field": "messages",
+        "value": {
+          "messaging_product": "whatsapp",
+          "metadata": { "display_phone_number": "27000000001", "phone_number_id": "222000222000" },
+          "contacts": [{ "profile": { "name": "Test" }, "wa_id": "27821234567" }],
+          "messages": [{ "from": "27821234567", "id": "wamid.incoming.test", "timestamp": "1750000000", "type": "text", "text": { "body": "John Smith\n2pm" } }]
+        }
+      }]
+    }]
+  },
+  "expect": {
+    "status": 200,
+    "writes": [
+      { "op": "update", "table": "WS_Guests", "id": "recG1", "fields": { "Guest Name": "John Smith", "Session State": "AWAITING_HOURLY_DURATION" } },
+      { "op": "create", "table": "WS_Bookings", "fields": { "Booking Type": "Hourly", "Status": "Enquiry" } }
+    ],
+    "sends": [
+      { "to": "27821234567", "includes": ["1 - 1 hour (R80)", "2 - 2 hours (R150)", "3 - 3 hours (R200)"] }
+    ]
+  }
+}
