@@ -123,6 +123,10 @@
           "id": "fldgqHtyMWRs9lvBh",
           "type": "formula"
         },
+        "Notes": {
+          "id": "fldn5xj8nRC8bkwPE",
+          "type": "multilineText"
+        },
         "Amount Due": {
           "id": "fld6LlM1SuBxNCtsS",
           "type": "currency"
@@ -138,10 +142,6 @@
         "Payment Status": {
           "id": "fldGEbc8DIIxAlspk",
           "type": "singleSelect"
-        },
-        "Notes": {
-          "id": "fldn5xj8nRC8bkwPE",
-          "type": "multilineText"
         },
         "Special Requests": {
           "id": "fldGTnxER9qDFGKyq",
@@ -232,6 +232,10 @@
         "Notes": {
           "id": "fldlOPboO0Fg2QWAV",
           "type": "multilineText"
+        },
+        "Assigned Property": {
+          "id": "fldWzTeMsoG1og0z0",
+          "type": "multipleRecordLinks"
         }
       }
     },
@@ -306,9 +310,25 @@
         "City": {
           "id": "fldWkRk0x3KaUK2Xr",
           "type": "singleLineText"
+        },
+        "Hourly Rate 1hr": {
+          "id": "fldAGVFovjGO9x89D",
+          "type": "currency"
+        },
+        "Hourly Rate 2hr": {
+          "id": "fldUvjNOGUSM9aB4F",
+          "type": "currency"
+        },
+        "Hourly Rate 3hr": {
+          "id": "fldfWzWbhL1NBhWfL",
+          "type": "currency"
+        },
+        "WS_Cleaners": {
+          "id": "fldSRqjfrKgmM7std",
+          "type": "multipleRecordLinks"
         }
       }
     }
   },
-  "pulledAt": "2026-07-16T21:09:44.454Z"
+  "pulledAt": "2026-07-21T21:04:36.391Z"
 }

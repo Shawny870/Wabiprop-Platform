@@ -817,7 +817,17 @@ const actions = {
       }
     }
     // F4: was {Active} = 1
-    const cleaners = await airtableGet('WS_Cleaners', `{Active} = TRUE()`);
+    const allActiveCleaners = await airtableGet('WS_Cleaners', `{Active} = TRUE()`);
+    // B11: scope dispatch to cleaners assigned to THIS property. `Assigned Property`
+    // is a link to WS_Properties; the record read returns it as an array of record
+    // ids, so we filter in JS on ctx.property.id — the same idiom used for rooms and
+    // rates above (`(r.fields['Property'] || []).includes(ctx.property.id)`), and
+    // deliberately NOT FIND/ARRAYJOIN on the linked name (same class as the 6.4/F5
+    // fix — a name match collides when one property name is a substring of another).
+    // One property per cleaner is the locked assumption; array-includes would also
+    // pass a multi-property cleaner, but multi-property dispatch is not a built
+    // feature (see B11.5) — do not rely on that incidental behaviour.
+    const cleaners = allActiveCleaners.filter(c => (c.fields['Assigned Property'] || []).includes(ctx.property.id));
     // DIAG (temporary — cleaner-notify send path instrumentation, remove once resolved):
     console.log(`[Cleaner Dispatch DIAG] cleaner count: ${cleaners.length} | raw phone fields:`, JSON.stringify(cleaners.map(c => c.fields['Phone Number'])));
     for (const cleaner of cleaners) {

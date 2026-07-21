@@ -1,0 +1,38 @@
+{
+  "name": "checkout: cleaner dispatch is scoped to the checking-out guest's property — a second property's cleaners, and unassigned cleaners, are NOT notified (B11)",
+  "comment": "B11: WS_Cleaners.Assigned Property links a cleaner to a WS_Properties row; checkout dispatch must only notify cleaners assigned to THIS property. Three cleaners are seeded, all Active, so the Active filter cannot be what excludes anyone — only property scoping can: Thandi is at property A (recP1, the checkout property), Bongani is at property B (recP2), Sipho is unassigned. Correct behaviour sends exactly two messages — Thandi, then the guest's thanks. If the property filter regresses to the old {Active}=TRUE()-only dispatch, Bongani and Sipho are also messaged and the send count jumps from 2 to 4, failing this fixture. The message arrives on recP1's phone_number_id (the harness default 111000111000), so resolveProperty pins ctx.property to A.",
+  "seed": {
+    "WS_Properties": [
+      { "id": "recP1", "fields": { "Property Name": "Villa Liza Guest Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222" } },
+      { "id": "recP2", "fields": { "Property Name": "Second Lodge", "Phone Number ID": "222000222000", "City": "Othertown", "Notify Phone": "27834445555" } }
+    ],
+    "WS_Guests": [
+      { "id": "recG1", "fields": { "Guest Name": "John Smith", "Phone Number": "27821234567", "Session State": "CHECKED_IN" } }
+    ],
+    "WS_Bookings": [
+      { "id": "recB1", "fields": { "Guest": ["recG1"], "Status": "Checked In", "Checked In At": "2026-07-04T10:00:00.000Z", "Room": ["recR1"] } }
+    ],
+    "WS_Rooms": [
+      { "id": "recR1", "fields": { "Room Name": "Room 1", "Status": "Occupied", "Property": ["recP1"] } }
+    ],
+    "WS_Cleaners": [
+      { "id": "recC1", "fields": { "Cleaner Name": "Thandi", "Phone Number": "0821110000", "Active": true, "Assigned Property": ["recP1"] } },
+      { "id": "recC2", "fields": { "Cleaner Name": "Bongani", "Phone Number": "0822220000", "Active": true, "Assigned Property": ["recP2"] } },
+      { "id": "recC3", "fields": { "Cleaner Name": "Sipho", "Phone Number": "0823330000", "Active": true } }
+    ]
+  },
+  "message": { "from": "27821234567", "text": "1" },
+  "expect": {
+    "status": 200,
+    "writes": [
+      { "op": "update", "table": "WS_Bookings", "id": "recB1", "fields": { "Status": "Checked Out", "Checkout Confirmed": true } },
+      { "op": "update", "table": "WS_Rooms", "id": "recR1", "fields": { "Status": "Cleaning" } },
+      { "op": "update", "table": "WS_Rooms", "id": "recR1", "fields": { "Cleaning Started At": "re:^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}" } },
+      { "op": "update", "table": "WS_Guests", "id": "recG1", "fields": { "Session State": "NEW" } }
+    ],
+    "sends": [
+      { "to": "27821110000", "includes": ["Hi Thandi", "Room 1 has just been vacated", "Reply *DONE* when complete"] },
+      { "to": "27821234567", "includes": ["Thank you for staying with us at Villa Liza Guest Lodge"] }
+    ]
+  }
+}
