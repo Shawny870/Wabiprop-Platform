@@ -1,0 +1,30 @@
+{
+  "name": "extend: first EXTEND on a Checked In booking pushes Check Out out, notifies owner once, sets the notified flag (B12/F21)",
+  "comment": "LOCKED 16 July: guests can extend repeatedly (uncapped); owner is notified on the FIRST extension only. Overnight extension increment is +1 day, so Check Out 2026-07-22T08:00Z becomes 2026-07-23T08:00Z. Checkout Warning Sent At is cleared to re-arm the cron for the new window; Extension Owner Notified is set true so later extensions do not re-notify.",
+  "seed": {
+    "WS_Properties": [
+      { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222" } }
+    ],
+    "WS_Guests": [
+      { "id": "recG1", "fields": { "Guest Name": "John Smith", "Phone Number": "27821234567", "Session State": "CHECKED_IN" } }
+    ],
+    "WS_Bookings": [
+      { "id": "recB1", "fields": { "Guest": ["recG1"], "Status": "Checked In", "Booking Type": "Overnight", "Booking Ref": "WS-TEST01", "Room": ["recR1"], "Check In": "2026-07-21T12:00:00.000Z", "Check Out": "2026-07-22T08:00:00.000Z" } }
+    ],
+    "WS_Rooms": [
+      { "id": "recR1", "fields": { "Room Name": "Room 1", "Status": "Occupied" } }
+    ],
+    "WS_Cleaners": []
+  },
+  "message": { "from": "27821234567", "text": "extend" },
+  "expect": {
+    "status": 200,
+    "writes": [
+      { "op": "update", "table": "WS_Bookings", "id": "recB1", "fields": { "Check Out": "2026-07-23T08:00:00.000Z", "Checkout Warning Sent At": null, "Extension Owner Notified": true } }
+    ],
+    "sends": [
+      { "to": "27830000001", "includes": ["has extended their stay", "WS-TEST01"] },
+      { "to": "27821234567", "includes": ["extended your stay"] }
+    ]
+  }
+}

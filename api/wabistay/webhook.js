@@ -146,6 +146,24 @@ const SAST_OFFSET_MS = 2 * 60 * 60 * 1000;
 const OVERNIGHT_CHECKIN_HOUR = 14;
 const OVERNIGHT_CHECKOUT_HOUR = 10;
 
+// B12 (auto-checkout): once a booking is past its Check Out, the cron sends one
+// warning offering an extension; if still unresolved AUTO_CHECKOUT_GRACE_MS
+// after that warning, auto-checkout fires. Comparisons are on absolute instants
+// (Check Out is already stored as the UTC instant of the SAST checkout time via
+// sastToUtcIso), so no further SAST conversion is needed here — the arithmetic
+// is pure milliseconds, which is what the mutation test targets.
+const AUTO_CHECKOUT_GRACE_MS = 15 * 60 * 1000; // 15-minute warning window
+
+// B12: an EXTEND reply pushes Check Out out (uncapped, repeatable). Increment is
+// per booking type. FLAG (genuinely undefined in the brief): these exact
+// durations are a CEO pricing/ops decision — built as a sensible default (one
+// more hour for a short stay, one more night for an overnight) and called out in
+// the PR for confirmation.
+const EXTENSION_MS = {
+  Hourly: 60 * 60 * 1000,        // +1 hour
+  Overnight: 24 * 60 * 60 * 1000 // +1 day
+};
+
 const MONTHS = {
   jan: 1, january: 1, feb: 2, february: 2, mar: 3, march: 3, apr: 4, april: 4,
   may: 5, jun: 6, june: 6, jul: 7, july: 7, aug: 8, august: 8, sep: 9, sept: 9,
@@ -1280,6 +1298,48 @@ const actions = {
     await sendWhatsApp(ctx.phone, msg('checkoutThanks', { propertyName: ctx.property.fields['Property Name'] }));
   },
 
+  // CHECKED_IN + "extend": B12. Push the checkout window out (uncapped, per the
+  // 16 July lock — guests can extend repeatedly). Owner is notified on the FIRST
+  // extension only (one notification per booking), tracked by the
+  // `Extension Owner Notified` checkbox. Clearing `Checkout Warning Sent At`
+  // re-arms the cron so a fresh warning fires when the new checkout time passes.
+  async extendStay(ctx) {
+    const guestName = ctx.guest.fields['Guest Name'];
+    const bookings = await airtableGetBookingsByGuestId(ctx.guest.id, 'Checked In');
+    const booking = bookings[0] || null;
+    if (!booking || !booking.fields['Check Out']) {
+      // Nothing to extend (no active booking, or a date-less legacy row).
+      await sendWhatsApp(ctx.phone, msg('checkedInMenu', { guestName }));
+      return;
+    }
+
+    const extendMs = EXTENSION_MS[booking.fields['Booking Type']] || EXTENSION_MS.Overnight;
+    const newCheckOut = new Date(Date.parse(booking.fields['Check Out']) + extendMs).toISOString();
+    const alreadyNotified = !!booking.fields['Extension Owner Notified'];
+
+    const bookingUpdate = {
+      'Check Out': newCheckOut,
+      // Re-arm the warning cycle for the extended window.
+      'Checkout Warning Sent At': null
+    };
+    // Set the flag only on the first extension — leave it untouched afterwards so
+    // the write log shows no re-notify bookkeeping on later extensions.
+    if (!alreadyNotified) bookingUpdate['Extension Owner Notified'] = true;
+    await airtableUpdate('WS_Bookings', booking.id, bookingUpdate);
+
+    if (!alreadyNotified && OWNER_PHONE) {
+      await sendWhatsApp(OWNER_PHONE, msg('ownerExtension', {
+        guestName,
+        bookingRef: booking.fields['Booking Ref'] || '',
+        checkOut: formatSastDateTime(newCheckOut)
+      }));
+    }
+    logToAxiom('info', 'booking_extended', {
+      phone: ctx.phone, bookingId: booking.id, newCheckOut, ownerNotified: !alreadyNotified
+    });
+    await sendWhatsApp(ctx.phone, msg('extensionConfirmed', { guestName }));
+  },
+
   // CHECKED_IN fallback menu (F9)
   async showCheckedInMenu(ctx) {
     await sendWhatsApp(ctx.phone, msg('checkedInMenu', { guestName: ctx.guest.fields['Guest Name'] }));
@@ -1293,6 +1353,106 @@ const actions = {
     await sendWhatsApp(ctx.phone, msg('unknownFallback'));
   }
 };
+
+// ─── AUTO-CHECKOUT CRON (B12) ────────────────────────────────────────────────
+// Runs on a schedule (vercel.json → cron; Shawn enables at deploy). No guest
+// message triggers it, so it is a separate entry point from handleMessage. For
+// every Checked In booking past its Check Out:
+//   · not yet warned  → send the 15-minute warning, stamp Checkout Warning Sent At
+//   · warned ≥ AUTO_CHECKOUT_GRACE_MS ago → auto-checkout (same side effects and
+//     cleaner-dispatch path as the manual `checkout` action)
+//   · warned, still inside the grace → wait
+// An EXTEND reply pushes Check Out into the future and clears the warning stamp,
+// so an extended booking is simply "not past checkout" here and takes no action
+// until the new time passes. `now` is injected for deterministic timing tests.
+
+// Shared with the manual checkout path in spirit: mirrors the exact write/send
+// ORDER of the `checkout` action (booking → Checked Out; room → Cleaning; room →
+// Cleaning Started At; active cleaners dispatched; guest → NEW; guest thanked),
+// so both routes leave identical state. Kept as its own function rather than
+// refactoring `checkout` (frozen by fixtures 10/43) — a unifying refactor is its
+// own session per CLAUDE.md.
+async function settleAutoCheckout(booking, room, guest, propertyName) {
+  await airtableUpdate('WS_Bookings', booking.id, {
+    'Status': 'Checked Out',
+    'Checkout Confirmed': true
+  });
+  let roomName = 'your room';
+  if (room) {
+    roomName = room.fields['Room Name'];
+    await airtableUpdate('WS_Rooms', room.id, { 'Status': 'Cleaning' });
+    await airtableUpdate('WS_Rooms', room.id, { 'Cleaning Started At': new Date().toISOString() });
+  }
+  const cleaners = await airtableGet('WS_Cleaners', `{Active} = TRUE()`);
+  for (const cleaner of cleaners) {
+    const cleanerPhone = cleaner.fields['Phone Number'];
+    if (cleanerPhone) {
+      await sendWhatsApp(formatPhone(cleanerPhone), msg('cleanerDispatch', {
+        cleanerName: cleaner.fields['Cleaner Name'], roomName
+      }));
+    }
+  }
+  if (guest) {
+    await airtableUpdate('WS_Guests', guest.id, { 'Session State': 'NEW' });
+  }
+  const guestPhone = guest && formatPhone(String(guest.fields['Phone Number'] || ''));
+  if (guestPhone) {
+    await sendWhatsApp(guestPhone, msg('autoCheckoutThanks', { propertyName }));
+  }
+}
+
+async function runAutoCheckout(now = new Date()) {
+  const nowMs = now.getTime();
+  const summary = { warnings: 0, autoCheckouts: 0 };
+
+  const bookings = await airtableGet('WS_Bookings', `{Status} = 'Checked In'`);
+  for (const booking of bookings) {
+    const checkOut = booking.fields['Check Out'];
+    if (!checkOut) continue;                 // date-less legacy row — cron can't manage it
+    if (nowMs < Date.parse(checkOut)) continue; // not past checkout (incl. extended bookings)
+
+    // Resolve guest, room and property for copy / dispatch (RECORD_ID lookups,
+    // the same idiom the manual checkout uses for the room).
+    const guestId = (booking.fields['Guest'] || [])[0];
+    const guest = guestId ? (await airtableGet('WS_Guests', `RECORD_ID() = '${guestId}'`))[0] : null;
+    const roomId = (booking.fields['Room'] || [])[0];
+    const room = roomId ? (await airtableGet('WS_Rooms', `RECORD_ID() = '${roomId}'`))[0] : null;
+    const propId = room && (room.fields['Property'] || [])[0];
+    const property = propId ? (await airtableGet('WS_Properties', `RECORD_ID() = '${propId}'`))[0] : null;
+    const propertyName = property ? property.fields['Property Name'] : '';
+    const guestName = guest ? guest.fields['Guest Name'] : 'there';
+    const guestPhone = guest && formatPhone(String(guest.fields['Phone Number'] || ''));
+
+    const warnedAt = booking.fields['Checkout Warning Sent At'];
+    if (!warnedAt) {
+      // First pass past checkout → warn and stamp the time.
+      await airtableUpdate('WS_Bookings', booking.id, { 'Checkout Warning Sent At': now.toISOString() });
+      if (guestPhone) await sendWhatsApp(guestPhone, msg('checkoutWarning', { guestName, propertyName }));
+      logToAxiom('info', 'auto_checkout_warning', { bookingId: booking.id, phone: guestPhone || null, checkOut });
+      summary.warnings++;
+      continue;
+    }
+    if (nowMs >= Date.parse(warnedAt) + AUTO_CHECKOUT_GRACE_MS) {
+      // Grace elapsed, no extension, no manual checkout → auto-checkout.
+      await settleAutoCheckout(booking, room, guest, propertyName);
+      logToAxiom('info', 'auto_checkout_fired', { bookingId: booking.id, phone: guestPhone || null });
+      summary.autoCheckouts++;
+    }
+    // else: warned, still inside the grace — wait for the next run.
+  }
+  return summary;
+}
+
+async function autoCheckoutHandler(req, res) {
+  try {
+    const summary = await runAutoCheckout();
+    res.status(200).json({ ok: true, ...summary });
+  } catch (err) {
+    console.error('[AUTO-CHECKOUT FATAL]', err.message, err.stack);
+    logToAxiom('error', 'auto_checkout_fatal', { message: err.message, stack: err.stack });
+    res.status(200).json({ ok: false, error: err.message });
+  }
+}
 
 // ─── DISPATCHER ──────────────────────────────────────────────────────────────
 // Reads states.json: global rows first (guarded), then the current state's rows.
@@ -1454,3 +1614,10 @@ module.exports.parseArrivalTime = parseArrivalTime;
 module.exports.addHoursToIso = addHoursToIso;
 module.exports.hourlyRates = hourlyRates;
 module.exports.formatSastDateTime = formatSastDateTime;
+// F20: exported for parser unit coverage — findDateTokens locates the spans,
+// parseBookingDate (already exported) validates them.
+module.exports.findDateTokens = findDateTokens;
+// B12: the auto-checkout cron entry point (autoCheckoutHandler wraps it for the
+// Vercel HTTP cron; runAutoCheckout takes an injected `now` for timing tests).
+module.exports.runAutoCheckout = runAutoCheckout;
+module.exports.autoCheckoutHandler = autoCheckoutHandler;

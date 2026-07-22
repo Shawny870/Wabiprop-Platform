@@ -1,0 +1,29 @@
+{
+  "name": "extend: a second EXTEND still extends but does NOT re-notify the owner (B12/F21)",
+  "comment": "Extension Owner Notified is already true, so this extension pushes Check Out out again and re-arms the warning, but sends the guest confirmation ONLY — no owner message. The single guest-only send is the proof of no re-notify; the flag is left untouched (not re-written).",
+  "seed": {
+    "WS_Properties": [
+      { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222" } }
+    ],
+    "WS_Guests": [
+      { "id": "recG1", "fields": { "Guest Name": "John Smith", "Phone Number": "27821234567", "Session State": "CHECKED_IN" } }
+    ],
+    "WS_Bookings": [
+      { "id": "recB1", "fields": { "Guest": ["recG1"], "Status": "Checked In", "Booking Type": "Overnight", "Booking Ref": "WS-TEST01", "Room": ["recR1"], "Check In": "2026-07-21T12:00:00.000Z", "Check Out": "2026-07-23T08:00:00.000Z", "Extension Owner Notified": true } }
+    ],
+    "WS_Rooms": [
+      { "id": "recR1", "fields": { "Room Name": "Room 1", "Status": "Occupied" } }
+    ],
+    "WS_Cleaners": []
+  },
+  "message": { "from": "27821234567", "text": "extend" },
+  "expect": {
+    "status": 200,
+    "writes": [
+      { "op": "update", "table": "WS_Bookings", "id": "recB1", "fields": { "Check Out": "2026-07-24T08:00:00.000Z", "Checkout Warning Sent At": null } }
+    ],
+    "sends": [
+      { "to": "27821234567", "includes": ["extended your stay"] }
+    ]
+  }
+}

@@ -33,6 +33,7 @@
       { "inputs": "*", "action": "showConfirmedMenu" }
     ],
     "CHECKED_IN": [
+      { "inputs": ["extend", "extend stay", "more time", "stay longer", "longer"], "action": "extendStay" },
       { "inputs": ["1", "checking out", "checkout", "check out"], "action": "checkout", "next": "NEW" },
       { "inputs": "*", "action": "showCheckedInMenu" }
     ],
@@ -70,6 +71,10 @@
     "gateCooldownMenu": "Just checked you in — give it a minute before checking out. Reply 1 again in a bit if you still need to leave.",
     "checkedInMenu": "Hi {guestName}! You're checked in. 🛏️\n\nReply with a number:\n1 - Check out",
     "cleanerDispatch": "Hi {cleanerName} 🧹 {roomName} has just been vacated. Please prepare it with fresh linen immediately.\n\nReply *DONE* when complete.",
+    "checkoutWarning": "Hi {guestName}, checkout time at {propertyName} has arrived. ⏰\n\nNeed more time? Reply *EXTEND* to stay longer.\nReady to go? Reply *1* to check out.\n\nIf we don't hear from you within 15 minutes, we'll check you out automatically.",
+    "extensionConfirmed": "No problem {guestName}! 🛏️ We've extended your stay.\n\nEnjoy — reply *1* to check out whenever you're ready.",
+    "ownerExtension": "⏰ {guestName} has extended their stay ({bookingRef}).\nNew checkout: {checkOut}",
+    "autoCheckoutThanks": "Thanks for staying with us at {propertyName}! 🌟\n\nWe've checked you out automatically as your time was up. We hope you enjoyed your stay — you're welcome back anytime.\n\nSafe travels! 👋",
     "checkoutThanks": "Thank you for staying with us at {propertyName}! 🌟\n\nWe hope you enjoyed your stay. You're welcome back anytime.\n\nSafe travels! 👋",
     "cleanerThanks": "Thank you! {roomName} is marked as clean and available. ✅",
     "ownerRoomCleaned": "✅ {roomName} has been cleaned and is now available for new bookings.",
