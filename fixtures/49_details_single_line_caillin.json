@@ -1,0 +1,44 @@
+{
+  "name": "parser: Caillin's real single-line input 'name 31July 2026 1 August 2026' parses correctly (F20)",
+  "comment": "Confirmed live: Caillin Mendes (a real prospect's guest) sent name + both dates on ONE line and the old three-separate-lines parser re-prompted three times until he abandoned the booking. Name is everything before the first date token; the two date-shaped spans become check-in/check-out. Years are explicit (2026), so the datetimes are pinned exactly. Flow then advances to the F19 occupancy step.",
+  "seed": {
+    "WS_Properties": [
+      { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222" } }
+    ],
+    "WS_Rates": [
+      { "id": "recRATE_S", "fields": { "Rate Name": "Standard Night Single", "Rate Type": "Per Night", "Amount": 250, "Active": true, "Occupancy Type": "Single", "Property": ["recP1"] } }
+    ],
+    "WS_Rooms": [
+      { "id": "recR1", "fields": { "Room Name": "Room 1", "Status": "Available", "Property": ["recP1"] } }
+    ],
+    "WS_Guests": [
+      { "id": "recG1", "fields": { "Guest Name": "Unknown", "Phone Number": "27821234567", "Session State": "AWAITING_DETAILS" } }
+    ],
+    "WS_Cleaners": [],
+    "WS_Bookings": []
+  },
+  "message": { "from": "27821234567", "text": "Caillin Mendes 31July 2026 1 August 2026" },
+  "expect": {
+    "status": 200,
+    "writes": [
+      { "op": "update", "table": "WS_Guests", "id": "recG1", "fields": { "Guest Name": "Caillin Mendes", "Session State": "AWAITING_OCCUPANCY" } },
+      {
+        "op": "create", "table": "WS_Bookings",
+        "fields": {
+          "Guest": ["recG1"],
+          "Booking Type": "Overnight",
+          "Status": "Enquiry",
+          "Notes": "Check-in: 31July 2026 | Check-out: 1 August 2026",
+          "Check In": "re:^2026-07-31T12:00:00\\.000Z$",
+          "Check Out": "re:^2026-08-01T08:00:00\\.000Z$",
+          "Room": ["recR1"]
+        }
+      },
+      { "op": "update", "table": "WS_Bookings", "fields": { "Booking Ref": "re:^WS-[A-Z0-9]{6}$" } }
+    ],
+    "sends": [
+      { "to": "27830000001", "includes": ["New booking enquiry from Caillin Mendes", "Check-in: 31July 2026", "Check-out: 1 August 2026"] },
+      { "to": "27821234567", "includes": ["Thanks Caillin Mendes", "How many of you are staying"] }
+    ]
+  }
+}

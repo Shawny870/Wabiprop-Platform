@@ -254,6 +254,38 @@ function parseBookingDate(text, nowUtc) {
   return null;
 }
 
+// ─── DATE-TOKEN DETECTION (F20 — parser robustness) ──────────────────────────
+// Locates date-shaped SPANS in free text, so collectDetails can accept a name
+// plus two dates all on ONE line — a real prospect (Caillin) sent exactly
+// "Caillin Mendes 31July 2026 1 August 2026" and the old three-separate-lines
+// parser re-prompted three times until he abandoned the booking — as well as
+// the existing newline-separated form. It also closes the month-substring trap:
+// the old classifier used loose `line.includes('may'|'aug'|'jun'…)`, so a NAME
+// containing a month fragment ("May Ndlovu", "Augustine", "Julian") was read as
+// a date. This matches genuine date shapes (day+month, month+day, numeric
+// day-first, today/tomorrow) instead of any substring.
+//
+// This only LOCATES candidates. parseBookingDate remains the gate that validates
+// them downstream, so an over-eager match here re-prompts rather than booking a
+// non-date. Longest month name wins (sorted by length) so "June" is not clipped
+// to "Jun" — the raw token feeds Notes and guest copy, which must stay verbatim.
+const MONTH_NAMES_BY_LEN = Object.keys(MONTHS).sort((a, b) => b.length - a.length).join('|');
+const DATE_TOKEN_SOURCE =
+  '\\d{1,2}\\s*(?:' + MONTH_NAMES_BY_LEN + ')\\.?(?:\\s+\\d{4})?' +     // 31July 2026, 25 June, 1 August 2026
+  '|(?:' + MONTH_NAMES_BY_LEN + ')\\.?\\s*\\d{1,2}(?:\\s+\\d{4})?' +    // June 25, Aug 3 2026
+  '|\\d{1,2}[\\/\\-]\\d{1,2}(?:[\\/\\-]\\d{2,4})?' +                    // 25/06, 25-6-2027
+  '|today|tomorrow';
+
+function findDateTokens(text) {
+  const re = new RegExp(DATE_TOKEN_SOURCE, 'gi');
+  const out = [];
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    if (m[0].trim()) out.push({ text: m[0].trim(), start: m.index, end: m.index + m[0].length });
+  }
+  return out;
+}
+
 // ─── AXIOM LOGGER ────────────────────────────────────────────────────────────
 // F12: fire-and-forget log to Axiom HTTP API
 // Never awaited in critical path — cannot block or break the state machine
@@ -630,29 +662,25 @@ const actions = {
   // AWAITING_DETAILS: parse name + dates, create Enquiry booking (F7, F13)
   async collectDetails(ctx) {
     const now = new Date();
-    const lines = ctx.messageText.trim().split('\n').map(l => l.trim()).filter(Boolean);
+    const rawText = ctx.messageText.trim();
+
+    // F20 (parser robustness): find date-shaped tokens anywhere in the message —
+    // one line or three. The first two are check-in / check-out; whatever precedes
+    // the first date token is the name. Replaces the old per-line month-SUBSTRING
+    // classifier, which required each field on its own line and ate names that
+    // merely contained a month fragment. parseBookingDate below still validates.
+    const dateTokens = findDateTokens(rawText);
+    let checkIn = dateTokens[0] ? dateTokens[0].text : null;
+    let checkOut = dateTokens[1] ? dateTokens[1].text : null;
+
+    // A returning guest already has a name — parse dates only, never re-derive it.
+    // Otherwise the name is the text before the first date token (newline- or
+    // space-separated), collapsed to a single line.
     let guestName = ctx.guest.fields['Guest Name'] !== 'Unknown' ? ctx.guest.fields['Guest Name'] : null;
-    let checkIn = null;
-    let checkOut = null;
-
-    const dateKeywords = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec',
-      'january','february','march','april','june','july','august','september','october','november','december'];
-
-    lines.forEach((line, i) => {
-      const lower = line.toLowerCase();
-      // B7: relative words join the month keywords, so "today"/"tomorrow" are
-      // classified as dates instead of falling through to the re-prompt (12.1).
-      const hasDate = dateKeywords.some(d => lower.includes(d))
-        || RELATIVE_DATE_WORDS.some(w => lower.includes(w))
-        || /\d{1,2}[\/\-]\d{1,2}/.test(lower);
-      if (i === 0 && !hasDate && !guestName) {
-        guestName = line;
-      } else if (hasDate && !checkIn) {
-        checkIn = line;
-      } else if (hasDate && !checkOut) {
-        checkOut = line;
-      }
-    });
+    if (!guestName) {
+      const beforeFirstDate = dateTokens[0] ? rawText.slice(0, dateTokens[0].start) : rawText;
+      guestName = beforeFirstDate.replace(/\s+/g, ' ').trim() || null;
+    }
 
     // B8: check-out is now required. B7 allowed a check-in-only booking that
     // rendered as "TBC"; once a booking holds a room, one with no check-out
