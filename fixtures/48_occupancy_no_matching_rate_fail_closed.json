@@ -1,0 +1,32 @@
+{
+  "name": "occupancy: no rate row matches the chosen occupancy → fail closed, no price quoted, no positional fallback (F19)",
+  "comment": "The property has only a Couple rate configured. The guest answers '1' (Single), for which no WS_Rates row exists. The old activeRates[0] behaviour would have quoted the Couple rate (R400) to a solo guest by position — exactly the silent mispricing F19 exists to stop. Fail closed: no Rate Applied / Amount Due is written to the booking (the single guest-only write below is the proof — there is NO booking update), and the guest is routed to a contact-the-owner message rather than a price. The session still advances to AWAITING_ETA so the already-notified booking can complete with the owner pricing it offline.",
+  "seed": {
+    "WS_Properties": [
+      { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222" } }
+    ],
+    "WS_Rates": [
+      { "id": "recRATE_C", "fields": { "Rate Name": "Standard Night couples", "Rate Type": "Per Night", "Amount": 400, "Active": true, "Occupancy Type": "Couple", "Property": ["recP1"] } }
+    ],
+    "WS_Rooms": [
+      { "id": "recR1", "fields": { "Room Name": "Room 1", "Status": "Available", "Property": ["recP1"] } }
+    ],
+    "WS_Guests": [
+      { "id": "recG1", "fields": { "Guest Name": "John Smith", "Phone Number": "27821234567", "Session State": "AWAITING_OCCUPANCY" } }
+    ],
+    "WS_Bookings": [
+      { "id": "recB1", "fields": { "Guest": ["recG1"], "Booking Type": "Overnight", "Status": "Enquiry", "Booking Ref": "WS-TEST01", "Notes": "Check-in: 25 June | Check-out: 27 June", "Check In": "$SAST(1,14)", "Check Out": "$SAST(3,10)", "Room": ["recR1"], "Payment Status": "Unpaid" } }
+    ],
+    "WS_Cleaners": []
+  },
+  "message": { "from": "27821234567", "text": "1" },
+  "expect": {
+    "status": 200,
+    "writes": [
+      { "op": "update", "table": "WS_Guests", "id": "recG1", "fields": { "Session State": "AWAITING_ETA" } }
+    ],
+    "sends": [
+      { "to": "27821234567", "includes": ["owner will be in touch", "finalise the price"] }
+    ]
+  }
+}

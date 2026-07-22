@@ -1,0 +1,34 @@
+{
+  "name": "occupancy: '2' (Two of us) selects the Couple rate row (R400) by {Occupancy Type} (F19)",
+  "comment": "Mirror of fixture 44 with the other answer. Replying '2' maps to Couple and must select the Couple WS_Rates row (R400). Same seed and write order; only the chosen rate differs.",
+  "seed": {
+    "WS_Properties": [
+      { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222" } }
+    ],
+    "WS_Rates": [
+      { "id": "recRATE_S", "fields": { "Rate Name": "Standard Night Single", "Rate Type": "Per Night", "Amount": 250, "Active": true, "Occupancy Type": "Single", "Property": ["recP1"] } },
+      { "id": "recRATE_C", "fields": { "Rate Name": "Standard Night couples", "Rate Type": "Per Night", "Amount": 400, "Active": true, "Occupancy Type": "Couple", "Property": ["recP1"] } }
+    ],
+    "WS_Rooms": [
+      { "id": "recR1", "fields": { "Room Name": "Room 1", "Status": "Available", "Property": ["recP1"] } }
+    ],
+    "WS_Guests": [
+      { "id": "recG1", "fields": { "Guest Name": "John Smith", "Phone Number": "27821234567", "Session State": "AWAITING_OCCUPANCY" } }
+    ],
+    "WS_Bookings": [
+      { "id": "recB1", "fields": { "Guest": ["recG1"], "Booking Type": "Overnight", "Status": "Enquiry", "Booking Ref": "WS-TEST01", "Notes": "Check-in: 25 June | Check-out: 27 June", "Check In": "$SAST(1,14)", "Check Out": "$SAST(3,10)", "Room": ["recR1"], "Payment Status": "Unpaid" } }
+    ],
+    "WS_Cleaners": []
+  },
+  "message": { "from": "27821234567", "text": "2" },
+  "expect": {
+    "status": 200,
+    "writes": [
+      { "op": "update", "table": "WS_Bookings", "id": "recB1", "fields": { "Rate Applied": ["recRATE_C"], "Amount Due": 400 } },
+      { "op": "update", "table": "WS_Guests", "id": "recG1", "fields": { "Session State": "AWAITING_ETA" } }
+    ],
+    "sends": [
+      { "to": "27821234567", "includes": ["Thanks John Smith", "R400 per night", "What time do you expect to arrive"] }
+    ]
+  }
+}

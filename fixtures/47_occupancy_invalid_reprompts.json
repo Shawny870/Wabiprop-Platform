@@ -1,0 +1,31 @@
+{
+  "name": "occupancy: an unreadable answer ('5') re-prompts the occupancy menu with zero writes (F19)",
+  "comment": "Numbered menu, Rule 11: only 1 or 2 are valid. '5' maps to no {Occupancy Type}, so selectOccupancy re-sends the menu and writes nothing — resolved before any Airtable read, so a bad answer cannot advance the session or touch the booking. Mirrors the hourly duration re-prompt.",
+  "seed": {
+    "WS_Properties": [
+      { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222" } }
+    ],
+    "WS_Rates": [
+      { "id": "recRATE_S", "fields": { "Rate Name": "Standard Night Single", "Rate Type": "Per Night", "Amount": 250, "Active": true, "Occupancy Type": "Single", "Property": ["recP1"] } },
+      { "id": "recRATE_C", "fields": { "Rate Name": "Standard Night couples", "Rate Type": "Per Night", "Amount": 400, "Active": true, "Occupancy Type": "Couple", "Property": ["recP1"] } }
+    ],
+    "WS_Rooms": [
+      { "id": "recR1", "fields": { "Room Name": "Room 1", "Status": "Available", "Property": ["recP1"] } }
+    ],
+    "WS_Guests": [
+      { "id": "recG1", "fields": { "Guest Name": "John Smith", "Phone Number": "27821234567", "Session State": "AWAITING_OCCUPANCY" } }
+    ],
+    "WS_Bookings": [
+      { "id": "recB1", "fields": { "Guest": ["recG1"], "Booking Type": "Overnight", "Status": "Enquiry", "Booking Ref": "WS-TEST01", "Notes": "Check-in: 25 June | Check-out: 27 June", "Check In": "$SAST(1,14)", "Check Out": "$SAST(3,10)", "Room": ["recR1"], "Payment Status": "Unpaid" } }
+    ],
+    "WS_Cleaners": []
+  },
+  "message": { "from": "27821234567", "text": "5" },
+  "expect": {
+    "status": 200,
+    "writes": [],
+    "sends": [
+      { "to": "27821234567", "includes": ["How many of you are staying", "1 - Just me", "2 - Two of us"] }
+    ]
+  }
+}

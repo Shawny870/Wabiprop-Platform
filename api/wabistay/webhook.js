@@ -309,6 +309,18 @@ function propertyCityLine(property) {
   return city ? `, ${city}` : '';
 }
 
+// F19 (Rate-fix): the occupancy step confirms the booking a turn after
+// collectDetails created it, so it no longer has the guest's raw date strings in
+// hand. They are recovered from the Notes line collectDetails wrote
+// ("Check-in: X | Check-out: Y") so bookingReceived still shows the dates in the
+// guest's own words ("25 June"), unchanged, rather than the reformatted datetime.
+function checkDatesFromNotes(notes) {
+  const s = String(notes || '');
+  const inM = s.match(/Check-in:\s*(.+?)(?:\s*\|\s*Check-out:|$)/);
+  const outM = s.match(/Check-out:\s*(.+?)\s*$/);
+  return { checkIn: inM ? inM[1].trim() : '', checkOut: outM ? outM[1].trim() : '' };
+}
+
 // ─── HOURLY / SHORT STAY (B9) ────────────────────────────────────────────────
 // Hourly bookings write real start/end datetimes into the same Check In/Check Out
 // fields as overnight, so B8's findAvailableRoom blocks hourly-vs-hourly and
@@ -700,15 +712,14 @@ const actions = {
       'Session State': ctx.next
     });
 
-    // F4: was {Active} = 1
-    // 6.4: scoped to ctx.property — not in the original spec's call-site list,
-    // but left unscoped this call would apply another property's rate to the
-    // booking, same bug class as the greeting queries (Rule 1: formula unverified live)
-    // F5-style: see greetAndAskDetails — FIND/ARRAYJOIN confirmed unreliable, JS-filter instead
-    const allActiveRates = await airtableGet('WS_Rates', `{Active} = TRUE()`);
-    const activeRates = allActiveRates.filter(r => (r.fields['Property'] || []).includes(ctx.property.id));
-    const rate = activeRates[0] || null;
-
+    // F19 (Rate-fix): the rate is NOT chosen here any more. It was `activeRates[0]`
+    // — no sort, no filter — so pricing was silently position-dependent: reorder the
+    // WS_Rates view and every couple's price flipped with zero code change and zero
+    // signal. Rate selection now waits for the occupancy answer (AWAITING_OCCUPANCY →
+    // selectOccupancy), which matches on {Occupancy Type} rather than array position.
+    // The booking is created here, unpriced, with the room already held — so the
+    // occupancy question is answered against a real, blocking hold, and Amount Due /
+    // Rate Applied are filled in the next step.
     const bookingData = {
       'Guest': [ctx.guest.id],
       'Booking Type': 'Overnight',
@@ -726,10 +737,6 @@ const actions = {
     // B8: hold the room from this moment. Room Status deliberately stays as it
     // is — the guest is not in the room yet, and a hold is not occupancy.
     bookingData['Room'] = [room.id];
-    if (rate) {
-      bookingData['Rate Applied'] = [rate.id];
-      bookingData['Amount Due'] = rate.fields['Amount'];
-    }
 
     const booking = await airtableCreate('WS_Bookings', bookingData);
     const bookingRef = booking.id ? `WS-${booking.id.slice(-6).toUpperCase()}` : 'WS-000001';
@@ -745,17 +752,87 @@ const actions = {
       error: booking.error ? JSON.stringify(booking.error) : null
     });
 
-    // F7: notify owner on new booking
+    // F7: notify owner on new booking (owner copy carries no rate, so it is
+    // correct to send before occupancy is chosen — the human owner sees the
+    // enquiry immediately and can finalise price if the fail-closed path fires).
     if (OWNER_PHONE) {
       await sendWhatsApp(OWNER_PHONE, msg('ownerNewBooking', {
         guestName, phone: ctx.phone, bookingRef, checkIn, checkOut: checkOut || 'TBC'
       }));
     }
 
+    // F19: ask occupancy (numbered menu, Rule 11) instead of confirming the
+    // booking — the rate depends on the answer, so bookingReceived now fires from
+    // selectOccupancy once a rate has been matched.
+    await sendWhatsApp(ctx.phone, msg('occupancyMenu', { guestName }));
+  },
+
+  // AWAITING_OCCUPANCY: F19 (Rate-fix). Map the numbered occupancy answer to an
+  // {Occupancy Type} and select the matching WS_Rates row by that field — NEVER
+  // by array position. Fail closed: if no rate row matches the chosen occupancy
+  // for this property, do not fall back to activeRates[0]; route to a contact-the-
+  // owner message and never quote a price picked by position.
+  async selectOccupancy(ctx) {
+    const OCCUPANCY_BY_CHOICE = {
+      '1': 'Single', 'just me': 'Single',
+      '2': 'Couple', 'two of us': 'Couple'
+    };
+    const occupancyType = OCCUPANCY_BY_CHOICE[ctx.text] || null;
+
+    // Invalid / unreadable answer — re-prompt with zero writes (mirrors the
+    // hourly duration re-prompt). Resolved before any Airtable read so a bad
+    // answer costs nothing and cannot write.
+    if (!occupancyType) {
+      await sendWhatsApp(ctx.phone, msg('occupancyMenu', { guestName: ctx.guest.fields['Guest Name'] }));
+      return;
+    }
+
+    // The unpriced overnight hold collectDetails created for this guest.
+    const enquiries = await airtableGetBookingsByGuestId(ctx.guest.id, 'Enquiry');
+    const booking = enquiries.find(b => b.fields['Booking Type'] === 'Overnight' && b.fields['Check Out']) || null;
+    if (!booking) {
+      // Flow lost its footing (no pending overnight enquiry) — re-prompt rather
+      // than dead-end. Still zero writes.
+      await sendWhatsApp(ctx.phone, msg('occupancyMenu', { guestName: ctx.guest.fields['Guest Name'] }));
+      return;
+    }
+
+    // F5-style JS filter — see greetAndAskDetails. Match on {Occupancy Type}, the
+    // whole point of F19: the selection is by field value, invariant to the order
+    // Airtable returns the rows in.
+    const allActiveRates = await airtableGet('WS_Rates', `{Active} = TRUE()`);
+    const activeRates = allActiveRates.filter(r => (r.fields['Property'] || []).includes(ctx.property.id));
+    const rate = activeRates.find(r => r.fields['Occupancy Type'] === occupancyType) || null;
+
+    const guestName = ctx.guest.fields['Guest Name'];
+
+    if (!rate) {
+      // Fail closed. No rate write, no positional fallback. Advance to
+      // AWAITING_ETA so the (already owner-notified) booking can still complete;
+      // the owner finalises the price offline.
+      logToAxiom('warn', 'occupancy_no_matching_rate', {
+        phone: ctx.phone, propertyId: ctx.property.id, occupancyType
+      });
+      await airtableUpdate('WS_Guests', ctx.guest.id, { 'Session State': ctx.next });
+      await sendWhatsApp(ctx.phone, msg('occupancyContactOwner', { guestName }));
+      return;
+    }
+
+    await airtableUpdate('WS_Bookings', booking.id, {
+      'Rate Applied': [rate.id],
+      'Amount Due': rate.fields['Amount']
+    });
+    await airtableUpdate('WS_Guests', ctx.guest.id, { 'Session State': ctx.next });
+    logToAxiom('info', 'occupancy_selected', {
+      phone: ctx.phone, guestId: ctx.guest.id, occupancyType, amount: rate.fields['Amount']
+    });
+
+    const { checkIn, checkOut } = checkDatesFromNotes(booking.fields['Notes']);
+    const bookingRef = booking.fields['Booking Ref']
+      || (booking.id ? `WS-${booking.id.slice(-6).toUpperCase()}` : 'WS-000001');
     await sendWhatsApp(ctx.phone, msg('bookingReceived', {
-      guestName, bookingRef, checkIn,
-      checkOut: checkOut || 'TBC',
-      rateLine: rate ? `*Rate:* R${rate.fields['Amount']} per night` : ''
+      guestName, bookingRef, checkIn, checkOut,
+      rateLine: `*Rate:* R${rate.fields['Amount']} per night`
     }));
   },
 

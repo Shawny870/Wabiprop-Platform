@@ -1,0 +1,34 @@
+{
+  "name": "occupancy: rate selection is invariant to WS_Rates order — Couple seeded FIRST, '1' still selects Single R250 (F19 core regression proof)",
+  "comment": "THE regression proof for F19, and the mutation target. WS_Rates is seeded in the opposite order to fixtures 44/45 — the Couple row (R400) is at index 0, the Single row (R250) second. The old code did `activeRates[0]`, so this ordering would have quoted R400 to a solo guest. Replying '1' (Single) must still select R250 by {Occupancy Type}. Breaking the occupancy match (swap the 1/2 mapping, or invert the .find comparison) makes this fixture select R400 and fail — that is the F19 mutation check.",
+  "seed": {
+    "WS_Properties": [
+      { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222" } }
+    ],
+    "WS_Rates": [
+      { "id": "recRATE_C", "fields": { "Rate Name": "Standard Night couples", "Rate Type": "Per Night", "Amount": 400, "Active": true, "Occupancy Type": "Couple", "Property": ["recP1"] } },
+      { "id": "recRATE_S", "fields": { "Rate Name": "Standard Night Single", "Rate Type": "Per Night", "Amount": 250, "Active": true, "Occupancy Type": "Single", "Property": ["recP1"] } }
+    ],
+    "WS_Rooms": [
+      { "id": "recR1", "fields": { "Room Name": "Room 1", "Status": "Available", "Property": ["recP1"] } }
+    ],
+    "WS_Guests": [
+      { "id": "recG1", "fields": { "Guest Name": "John Smith", "Phone Number": "27821234567", "Session State": "AWAITING_OCCUPANCY" } }
+    ],
+    "WS_Bookings": [
+      { "id": "recB1", "fields": { "Guest": ["recG1"], "Booking Type": "Overnight", "Status": "Enquiry", "Booking Ref": "WS-TEST01", "Notes": "Check-in: 25 June | Check-out: 27 June", "Check In": "$SAST(1,14)", "Check Out": "$SAST(3,10)", "Room": ["recR1"], "Payment Status": "Unpaid" } }
+    ],
+    "WS_Cleaners": []
+  },
+  "message": { "from": "27821234567", "text": "1" },
+  "expect": {
+    "status": 200,
+    "writes": [
+      { "op": "update", "table": "WS_Bookings", "id": "recB1", "fields": { "Rate Applied": ["recRATE_S"], "Amount Due": 250 } },
+      { "op": "update", "table": "WS_Guests", "id": "recG1", "fields": { "Session State": "AWAITING_ETA" } }
+    ],
+    "sends": [
+      { "to": "27821234567", "includes": ["Thanks John Smith", "R250 per night"] }
+    ]
+  }
+}

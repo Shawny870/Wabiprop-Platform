@@ -1,0 +1,34 @@
+{
+  "name": "occupancy: '1' (Just me) selects the Single rate row (R250) by {Occupancy Type}, not array position (F19)",
+  "comment": "The guest already has an unpriced overnight hold (recB1, Enquiry, room held, Check Out set, no Rate Applied) created by collectDetails, and is in AWAITING_OCCUPANCY. Replying '1' maps to Single and must select the Single WS_Rates row (R250) and write it onto the booking. Rate Applied / Amount Due are written first, then the session advances to AWAITING_ETA, then bookingReceived quotes R250.",
+  "seed": {
+    "WS_Properties": [
+      { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222" } }
+    ],
+    "WS_Rates": [
+      { "id": "recRATE_S", "fields": { "Rate Name": "Standard Night Single", "Rate Type": "Per Night", "Amount": 250, "Active": true, "Occupancy Type": "Single", "Property": ["recP1"] } },
+      { "id": "recRATE_C", "fields": { "Rate Name": "Standard Night couples", "Rate Type": "Per Night", "Amount": 400, "Active": true, "Occupancy Type": "Couple", "Property": ["recP1"] } }
+    ],
+    "WS_Rooms": [
+      { "id": "recR1", "fields": { "Room Name": "Room 1", "Status": "Available", "Property": ["recP1"] } }
+    ],
+    "WS_Guests": [
+      { "id": "recG1", "fields": { "Guest Name": "John Smith", "Phone Number": "27821234567", "Session State": "AWAITING_OCCUPANCY" } }
+    ],
+    "WS_Bookings": [
+      { "id": "recB1", "fields": { "Guest": ["recG1"], "Booking Type": "Overnight", "Status": "Enquiry", "Booking Ref": "WS-TEST01", "Notes": "Check-in: 25 June | Check-out: 27 June", "Check In": "$SAST(1,14)", "Check Out": "$SAST(3,10)", "Room": ["recR1"], "Payment Status": "Unpaid" } }
+    ],
+    "WS_Cleaners": []
+  },
+  "message": { "from": "27821234567", "text": "1" },
+  "expect": {
+    "status": 200,
+    "writes": [
+      { "op": "update", "table": "WS_Bookings", "id": "recB1", "fields": { "Rate Applied": ["recRATE_S"], "Amount Due": 250 } },
+      { "op": "update", "table": "WS_Guests", "id": "recG1", "fields": { "Session State": "AWAITING_ETA" } }
+    ],
+    "sends": [
+      { "to": "27821234567", "includes": ["Thanks John Smith", "*Ref:* WS-TEST01", "*Check-in:* 25 June", "*Check-out:* 27 June", "R250 per night", "What time do you expect to arrive"] }
+    ]
+  }
+}

@@ -13,7 +13,10 @@
     ],
     "AWAITING_DETAILS": [
       { "inputs": ["hourly"], "action": "startHourly", "next": "AWAITING_HOURLY_DETAILS" },
-      { "inputs": "*", "action": "collectDetails", "next": "AWAITING_ETA" }
+      { "inputs": "*", "action": "collectDetails", "next": "AWAITING_OCCUPANCY" }
+    ],
+    "AWAITING_OCCUPANCY": [
+      { "inputs": "*", "action": "selectOccupancy", "next": "AWAITING_ETA" }
     ],
     "AWAITING_HOURLY_DETAILS": [
       { "inputs": "*", "action": "collectHourlyDetails", "next": "AWAITING_HOURLY_DURATION" }
@@ -53,6 +56,8 @@
     "hourlyTooLong": "No problem — for stays longer than 3 hours we'll book you overnight instead. 🛏️\n\nPlease send:\n1. Your full name\n2. Check-in date (e.g. 25 June)\n3. Check-out date (e.g. 27 June)\n\nSend all three, each on a new line.",
     "hourlyUnavailable": "Sorry, short stays aren't available at {propertyName} at the moment. 😔\n\nWe'd be happy to book you overnight instead. Please send:\n1. Your full name\n2. Check-in date (e.g. 25 June)\n3. Check-out date (e.g. 27 June)\n\nSend all three, each on a new line.",
     "gateTooEarly": "Hi {guestName}! Your booking is for *{bookingDate}*, not today. 📅\n\nWe'll see you then! If you need to change your booking, just let us know.",
+    "occupancyMenu": "Thanks {guestName}! 🛏️ One more thing so we can quote the right rate.\n\nHow many of you are staying? Reply with a number:\n1 - Just me\n2 - Two of us",
+    "occupancyContactOwner": "Thanks {guestName}! 🙏 We've got your dates.\n\nWe couldn't confirm a rate for that just yet — the owner will be in touch shortly to finalise the price. Your room is being held in the meantime.\n\nWhat time do you expect to arrive? (e.g. \"around 2pm\" or \"after 5\")",
     "bookingReceived": "Thanks {guestName}! 🙏\n\nYour booking enquiry has been received.\n\n*Ref:* {bookingRef}\n*Check-in:* {checkIn}\n*Check-out:* {checkOut}\n{rateLine}\n\nWhat time do you expect to arrive? (e.g. \"around 2pm\" or \"after 5\")",
     "etaConfirmed": "Perfect! We'll have your room ready for you. 🛏️\n\nSee you at *{eta}*.\n\nWhen you arrive, reply with a number:\n1 - I'm at the gate\n2 - Cancel my booking\n\nWe look forward to hosting you at {propertyName}! 🌟",
     "gateNotify": "🔔 {guestName} is at the gate. {roomInfo}\nPhone: {phone}",
