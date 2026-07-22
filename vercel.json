@@ -10,6 +10,7 @@
     { "source": "/dashboard", "destination": "/api/dashboard" }
   ],
   "crons": [
-    { "path": "/api/wabistay/cron/auto-checkout", "schedule": "*/5 * * * *" }
+    { "path": "/api/wabistay/cron/auto-checkout", "schedule": "*/5 * * * *" },
+    { "path": "/api/wabistay/cron/owner-summary", "schedule": "0 6 * * 1" }
   ]
 }

@@ -327,6 +327,22 @@ function logToAxiom(level, event, detail = {}) {
   }).catch(err => console.error('[Axiom ERROR]', err.message));
 }
 
+// B17: instrument the three existing owner/notify sends. Business-initiated
+// free-form text silently fails (HTTP 200, nothing logged) outside the 24-hour
+// customer-service window (CLAUDE.md). We cannot see Meta's window directly, but
+// the reliable proxy is: is the recipient the phone that just messaged us? If so
+// it is inside the window by definition; if it is a third party (owner / notify
+// phone), it is almost certainly OUTSIDE it. Logging this at each site makes the
+// scale of the existing exposure measurable without changing any behaviour.
+function logOwnerSendWindow(site, recipient, inboundPhone) {
+  const inside = recipient === inboundPhone;
+  logToAxiom('info', 'owner_send_window_check', {
+    site, recipient, inboundPhone,
+    recipientIsInboundSender: inside,
+    likelyInside24hWindow: inside
+  });
+}
+
 // ─── MESSAGE RENDERING ───────────────────────────────────────────────────────
 // All copy lives in states.json → messages. {placeholder} substitution only.
 
@@ -584,6 +600,7 @@ async function resolveRoomClean(ctx, room) {
   logToAxiom('info', 'state_transition', { phone: ctx.phone, roomId: room.id, roomName: room.fields['Room Name'], from: 'Cleaning', to: 'Available', reason: 'cleaner_done' });
   await sendWhatsApp(ctx.phone, msg('cleanerThanks', { roomName: room.fields['Room Name'] }));
   if (OWNER_PHONE) {
+    logOwnerSendWindow('room_cleaned', OWNER_PHONE, ctx.phone); // B17 instrumentation
     await sendWhatsApp(OWNER_PHONE, msg('ownerRoomCleaned', { roomName: room.fields['Room Name'] }));
   }
 }
@@ -802,6 +819,7 @@ const actions = {
     // correct to send before occupancy is chosen — the human owner sees the
     // enquiry immediately and can finalise price if the fail-closed path fires).
     if (OWNER_PHONE) {
+      logOwnerSendWindow('new_booking', OWNER_PHONE, ctx.phone); // B17 instrumentation
       await sendWhatsApp(OWNER_PHONE, msg('ownerNewBooking', {
         guestName, phone: ctx.phone, bookingRef, checkIn, checkOut: checkOut || 'TBC'
       }));
@@ -1209,6 +1227,7 @@ const actions = {
 
     // Step 6: notify party
     if (notifyPhone) {
+      logOwnerSendWindow('gate_arrival', notifyPhone, ctx.phone); // B17 instrumentation
       await sendWhatsApp(notifyPhone, msg('gateNotify', {
         guestName: ctx.guest.fields['Guest Name'],
         roomInfo: assignedRoomName
@@ -1454,6 +1473,133 @@ async function autoCheckoutHandler(req, res) {
   }
 }
 
+// ─── OWNER SUMMARY (B17) ─────────────────────────────────────────────────────
+// "The weekly P&L IS the product." A per-property aggregation over WS_Bookings,
+// run weekly (a daily variant is available behind OWNER_SUMMARY_DAILY). The SEND
+// is stubbed: a weekly summary is a business-initiated message outside any 24h
+// window, so it needs an approved Meta utility template (Shawn submits; Meta
+// reviews on their own clock). Everything except the send is built and testable
+// now — sendOwnerSummary logs the fully-assembled payload to Axiom so the
+// aggregation is verifiable end-to-end before the template exists.
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+// Meta utility template name for the owner summary. FLAG: pending Meta approval
+// (Shawn submits). When approved, this is the one-line swap point in
+// sendOwnerSummary below.
+const OWNER_SUMMARY_TEMPLATE = 'wabistay_owner_weekly_summary';
+
+// Room-nights sold for one booking. Convention (stated explicitly per the brief):
+//   · Overnight → whole nights, rounded from the 14:00→10:00 clock span
+//     (a 1-night 14:00→10:00 stay is 20h of clock but counts as 1 night).
+//   · Hourly    → a PARTIAL room-night: the raw fraction of a day (2h = 2/24).
+// A booking missing either date contributes 0 (cannot be measured).
+function bookingRoomNights(booking) {
+  const ci = booking.fields['Check In'];
+  const co = booking.fields['Check Out'];
+  if (!ci || !co) return 0;
+  const rawDays = (Date.parse(co) - Date.parse(ci)) / DAY_MS;
+  if (!Number.isFinite(rawDays) || rawDays <= 0) return 0;
+  return booking.fields['Booking Type'] === 'Hourly' ? rawDays : Math.round(rawDays);
+}
+
+// Aggregates one property's bookings over the reporting window. `bookings` is
+// already scoped to this property (via room link) and already excludes Cancelled.
+function aggregateOwnerSummary(property, rooms, bookings, w) {
+  const checkInMs = b => (b.fields['Check In'] ? Date.parse(b.fields['Check In']) : NaN);
+  const inPeriod = b => {
+    const t = checkInMs(b);
+    return Number.isFinite(t) && t >= w.periodStartMs && t < w.periodEndMs;
+  };
+  const periodBookings = bookings.filter(inPeriod);
+
+  const totalRevenue = periodBookings.reduce((s, b) => s + (Number(b.fields['Amount Due']) || 0), 0);
+  const roomNightsSold = periodBookings.reduce((s, b) => s + bookingRoomNights(b), 0);
+  const roomNightsAvailable = rooms.length * w.periodDays;
+  const occupancyRate = roomNightsAvailable > 0 ? roomNightsSold / roomNightsAvailable : 0;
+
+  const upcomingBookings = bookings.filter(b => {
+    const t = checkInMs(b);
+    return Number.isFinite(t) && t >= w.periodEndMs && t < w.upcomingEndMs;
+  }).length;
+
+  return {
+    propertyId: property.id,
+    propertyName: property.fields['Property Name'],
+    periodDays: w.periodDays,
+    totalBookings: periodBookings.length,
+    totalRevenue,
+    roomNightsSold,
+    roomNightsAvailable,
+    // Rounded to 4 dp so partial (hourly) nights are visible without float noise.
+    occupancyRate: Math.round(occupancyRate * 10000) / 10000,
+    upcomingBookings
+  };
+}
+
+// The send surface. STUBBED until OWNER_SUMMARY_TEMPLATE is approved: logs the
+// full payload to Axiom (so aggregation is verifiable now) and marks exactly
+// where the template send goes.
+async function sendOwnerSummary(property, summary) {
+  const notifyPhone = property.fields['Notify Phone']
+    ? property.fields['Notify Phone'].replace(/[\s\-\+]/g, '')
+    : (OWNER_PHONE || null);
+  const payload = { ...summary, template: OWNER_SUMMARY_TEMPLATE, notifyPhone };
+  logToAxiom('info', 'owner_summary_payload', payload);
+
+  // TODO(B17): once OWNER_SUMMARY_TEMPLATE is approved by Meta, send it here as a
+  // utility template (business-initiated, outside the 24h window — free-form text
+  // silently fails). This is the one-line swap:
+  //   await sendWhatsAppTemplate(notifyPhone, OWNER_SUMMARY_TEMPLATE, ownerSummaryTemplateParams(summary));
+  // Deliberately NOT a free-form sendWhatsApp — that would 200-and-vanish.
+
+  return payload;
+}
+
+async function runOwnerSummary(opts = {}) {
+  const {
+    now = new Date(),
+    daily = process.env.OWNER_SUMMARY_DAILY === 'true'
+  } = opts;
+
+  const periodDays = daily ? 1 : 7;
+  const periodEndMs = now.getTime();
+  const w = {
+    periodDays,
+    periodStartMs: periodEndMs - periodDays * DAY_MS,
+    periodEndMs,
+    upcomingEndMs: periodEndMs + 7 * DAY_MS
+  };
+
+  const properties = await airtableGet('WS_Properties', '');
+  const allRooms = await airtableGet('WS_Rooms', orFormula('Status', BOOKABLE_ROOM_STATUSES));
+  // Non-cancelled bookings only — a cancelled booking is neither revenue nor
+  // occupancy. Scoped to each property below via its room link (WS_Bookings has
+  // no Property field of its own).
+  const allBookings = await airtableGet('WS_Bookings', orFormula('Status', BLOCKING_BOOKING_STATUSES.concat(['Checked Out'])));
+
+  const summaries = [];
+  for (const property of properties) {
+    const rooms = allRooms.filter(r => (r.fields['Property'] || []).includes(property.id));
+    const roomIds = new Set(rooms.map(r => r.id));
+    const bookings = allBookings.filter(b => (b.fields['Room'] || []).some(id => roomIds.has(id)));
+    const summary = aggregateOwnerSummary(property, rooms, bookings, w);
+    await sendOwnerSummary(property, summary);
+    summaries.push(summary);
+  }
+  return summaries;
+}
+
+async function ownerSummaryHandler(req, res) {
+  try {
+    const summaries = await runOwnerSummary();
+    res.status(200).json({ ok: true, count: summaries.length, summaries });
+  } catch (err) {
+    console.error('[OWNER-SUMMARY FATAL]', err.message, err.stack);
+    logToAxiom('error', 'owner_summary_fatal', { message: err.message, stack: err.stack });
+    res.status(200).json({ ok: false, error: err.message });
+  }
+}
+
 // ─── DISPATCHER ──────────────────────────────────────────────────────────────
 // Reads states.json: global rows first (guarded), then the current state's rows.
 // A row matches when `inputs` is "*" or contains the lowercased message.
@@ -1637,3 +1783,8 @@ module.exports.findDateTokens = findDateTokens;
 // Vercel HTTP cron; runAutoCheckout takes an injected `now` for timing tests).
 module.exports.runAutoCheckout = runAutoCheckout;
 module.exports.autoCheckoutHandler = autoCheckoutHandler;
+// B17: owner summary aggregation. runOwnerSummary(opts) takes injected now/daily
+// for tests; ownerSummaryHandler is the Vercel HTTP cron entry.
+module.exports.runOwnerSummary = runOwnerSummary;
+module.exports.ownerSummaryHandler = ownerSummaryHandler;
+module.exports.aggregateOwnerSummary = aggregateOwnerSummary;
