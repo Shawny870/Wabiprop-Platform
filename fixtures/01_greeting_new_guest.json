@@ -1,5 +1,5 @@
 {
-  "name": "greeting: unknown number gets rates + overnight instructions, guest record created (F10)",
+  "name": "greeting: unknown number gets POPIA consent (B13/F22) then rates + overnight instructions, guest record created (F10)",
   "seed": {
     "WS_Properties": [
       { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222" } }
@@ -31,6 +31,14 @@
       }
     ],
     "sends": [
+      {
+        "to": "27821234567",
+        "includes": [
+          "Welcome to Test Lodge",
+          "we collect your name, number and stay dates",
+          "Reply STOP anytime to opt out"
+        ]
+      },
       {
         "to": "27821234567",
         "includes": [

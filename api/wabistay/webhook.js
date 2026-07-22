@@ -1482,6 +1482,22 @@ async function handleMessage(from, messageText, phoneNumberId) {
   const sessionState = guest ? guest.fields['Session State'] : null;
   console.log(`[State] guest: ${guest ? guest.id : 'none'} | state: ${sessionState}`);
 
+  // B13: POPIA consent notice. Notice-only, implied consent (CEO 16 July) — no
+  // YES/1 opt-in gate. Sent as message #1 for a genuinely NEW guest conversation:
+  // "new" = first-ever contact from this number, i.e. NO existing WS_Guests
+  // record. A returning guest starting another booking already has a record and
+  // does not see it again. Never sent to a registered cleaner or the owner. The
+  // STOP line references B14 (Step 6 of this sprint) — valid by merge time, since
+  // both branches merge together (ordering dependency noted in the PR).
+  if (!guest) {
+    const isCleaner = (await airtableGet('WS_Cleaners', `{Phone Number} = '${phone}'`)).length > 0;
+    const isOwner = OWNER_PHONE && phone === formatPhone(OWNER_PHONE);
+    if (!isCleaner && !isOwner) {
+      await sendWhatsApp(phone, msg('consentNotice', { propertyName: property.fields['Property Name'] }));
+      logToAxiom('info', 'popia_consent_sent', { phone });
+    }
+  }
+
   const ctx = { phone, text, messageText, guest, next: null, cleaner: null, property };
 
   // Global transitions (cleaner DONE) — guard decides, any state

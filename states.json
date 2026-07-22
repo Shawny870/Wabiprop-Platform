@@ -43,6 +43,7 @@
   },
 
   "messages": {
+    "consentNotice": "Welcome to {propertyName} 👋\n\nQuick note before we start: we collect your name, number and stay dates to manage your booking. We keep it safe and don't share it with anyone. Carrying on with this chat means you're OK with that.\n\nReply STOP anytime to opt out of messages.",
     "greeting": "Hi! 👋 Welcome to {propertyName}{propertyCityLine}.\n\nWe currently have *{roomCountText}* available.\n\n*Our rates:*\n{rateText}\n\nTo make an *overnight booking*, please send:\n1. Your full name\n2. Check-in date (e.g. 25 June)\n3. Check-out date (e.g. 27 June)\n\nSend all three, each on a new line.\n\n_For short stay bookings, reply HOURLY and we'll assist you._",
     "detailsReprompt": "Sorry, I didn't quite get that. Please reply with your:\n1. Full name\n2. Check-in date (e.g. 25 June)\n3. Check-out date (e.g. 27 June)\n\nSend each on a new line.",
     "noAvailability": "Sorry {guestName}, we're fully booked from *{checkIn}* to *{checkOut}*. 😔\n\nWe'd still love to host you — would you like to try different dates? Please reply with your:\n1. Full name\n2. Check-in date (e.g. 25 June)\n3. Check-out date (e.g. 27 June)\n\nSend each on a new line.",

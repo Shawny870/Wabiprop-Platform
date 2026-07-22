@@ -1,0 +1,29 @@
+{
+  "name": "consent: a returning guest (existing WS_Guests record) starting a new booking does NOT see the POPIA notice again (B13/F22)",
+  "comment": "'New' means first-ever contact — no WS_Guests record. This guest already has a record (Session State NEW after a prior stay), so the consent notice is suppressed and only the greeting is sent. Exactly one send proves the notice did not fire.",
+  "seed": {
+    "WS_Properties": [
+      { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222" } }
+    ],
+    "WS_Rooms": [
+      { "id": "recR1", "fields": { "Room Name": "Room 1", "Status": "Available", "Property": ["recP1"] } }
+    ],
+    "WS_Rates": [
+      { "id": "recRATE1", "fields": { "Rate Name": "Standard Overnight", "Rate Type": "Per Night", "Amount": 350, "Active": true, "Property": ["recP1"] } }
+    ],
+    "WS_Guests": [
+      { "id": "recG1", "fields": { "Guest Name": "John Smith", "Phone Number": "27821234567", "Session State": "NEW" } }
+    ],
+    "WS_Cleaners": []
+  },
+  "message": { "from": "27821234567", "text": "Hi" },
+  "expect": {
+    "status": 200,
+    "writes": [
+      { "op": "update", "table": "WS_Guests", "id": "recG1", "fields": { "Session State": "AWAITING_DETAILS" } }
+    ],
+    "sends": [
+      { "to": "27821234567", "includes": ["Welcome to Test Lodge, Testville", "reply HOURLY"] }
+    ]
+  }
+}
