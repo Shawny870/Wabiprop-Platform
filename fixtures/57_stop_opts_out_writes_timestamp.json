@@ -1,0 +1,23 @@
+{
+  "name": "stop: 'STOP' (any case) opts the guest out and writes Opted Out + Opted Out At on the exact event (B14/F24)",
+  "comment": "Behaviours 1 and 5: STOP is case-insensitive (the inbound is lowercased before matching, so STOP/Stop/stop all match), and Opted Out / Opted Out At are written at the moment of the STOP. One acknowledgement is sent explaining how to opt back in.",
+  "seed": {
+    "WS_Properties": [
+      { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222" } }
+    ],
+    "WS_Guests": [
+      { "id": "recG1", "fields": { "Guest Name": "John Smith", "Phone Number": "27821234567", "Session State": "AWAITING_DETAILS" } }
+    ],
+    "WS_Cleaners": []
+  },
+  "message": { "from": "27821234567", "text": "STOP" },
+  "expect": {
+    "status": 200,
+    "writes": [
+      { "op": "update", "table": "WS_Guests", "id": "recG1", "fields": { "Opted Out": true, "Opted Out At": "re:^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}" } }
+    ],
+    "sends": [
+      { "to": "27821234567", "includes": ["opted out of messages", "Reply *START*"] }
+    ]
+  }
+}

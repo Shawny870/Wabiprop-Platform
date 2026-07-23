@@ -164,6 +164,15 @@ const EXTENSION_MS = {
   Overnight: 24 * 60 * 60 * 1000 // +1 day
 };
 
+// B14 (STOP opt-out). Keywords are matched against the already-lowercased inbound
+// text, so STOP / Stop / stop all match — case-insensitive by construction.
+const STOP_KEYWORDS = ['stop'];
+const START_KEYWORDS = ['start'];
+// "Already-active booking" for the two-tier rule: a real commitment, not a
+// browsing enquiry. Transaction-completion messages are allowed to an opted-out
+// guest only while their booking is in one of these states.
+const ACTIVE_BOOKING_STATES = ['CONFIRMED', 'CHECKED_IN'];
+
 const MONTHS = {
   jan: 1, january: 1, feb: 2, february: 2, mar: 3, march: 3, apr: 4, april: 4,
   may: 5, jun: 6, june: 6, jul: 7, july: 7, aug: 8, august: 8, sep: 9, sept: 9,
@@ -1627,6 +1636,53 @@ async function handleMessage(from, messageText, phoneNumberId) {
   const guest = guestRecords[0] || null;
   const sessionState = guest ? guest.fields['Session State'] : null;
   console.log(`[State] guest: ${guest ? guest.id : 'none'} | state: ${sessionState}`);
+
+  // ── B14: STOP opt-out (two-tier) ───────────────────────────────────────────
+  // Evaluated before consent and before dispatch, so an opting-out or already
+  // opted-out guest never receives an optional message. Case-insensitive by
+  // construction (text is already lowercased). Two-tier rule (CEO):
+  //   · STOP instantly kills all OPTIONAL messaging.
+  //   · TRANSACTION-COMPLETION messages for an already-active booking (Confirmed
+  //     / Checked In) still deliver, until that booking closes.
+  const activeBooking = ACTIVE_BOOKING_STATES.includes(sessionState);
+  if (STOP_KEYWORDS.includes(text)) {
+    const at = new Date().toISOString();
+    if (guest) {
+      await airtableUpdate('WS_Guests', guest.id, { 'Opted Out': true, 'Opted Out At': at });
+    } else {
+      // STOP from a number we have never seen — record the opt-out so future
+      // messages stay silent.
+      await airtableCreate('WS_Guests', {
+        'Phone Number': phone, 'Guest Type': 'WhatsApp', 'Session State': 'NEW',
+        'Opted Out': true, 'Opted Out At': at
+      });
+    }
+    logToAxiom('info', 'guest_opted_out', { phone, activeBooking });
+    // The single acknowledgement explaining status + how to opt back in.
+    await sendWhatsApp(phone, msg('optedOut'));
+    return;
+  }
+  if (guest && guest.fields['Opted Out']) {
+    if (START_KEYWORDS.includes(text)) {
+      await airtableUpdate('WS_Guests', guest.id, { 'Opted Out': false, 'Opted Out At': null });
+      logToAxiom('info', 'guest_opted_back_in', { phone });
+      await sendWhatsApp(phone, msg('optedBackIn'));
+      return;
+    }
+    if (!activeBooking) {
+      // No active booking → optional messaging is silenced: the booking flow
+      // never runs. Respond once with the opt-out status + how to opt back in.
+      // (Strictly-once-then-total-silence would need a third tracking field — see
+      // PR; only the two CEO-specified fields exist, so each optional inbound
+      // gets the terse pointer, which is a compliant reply to a user message.)
+      logToAxiom('info', 'opted_out_optional_suppressed', { phone, sessionState });
+      await sendWhatsApp(phone, msg('optedOut'));
+      return;
+    }
+    // Active booking: fall through to dispatch so transaction-completion
+    // messages (gate arrival, checkout, extension) still deliver.
+    logToAxiom('info', 'opted_out_transaction_allowed', { phone, sessionState });
+  }
 
   // B13: POPIA consent notice. Notice-only, implied consent (CEO 16 July) — no
   // YES/1 opt-in gate. Sent as message #1 for a genuinely NEW guest conversation:

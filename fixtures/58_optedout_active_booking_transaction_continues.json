@@ -1,0 +1,35 @@
+{
+  "name": "stop: an opted-out guest with an ACTIVE booking still completes checkout — transaction-completion messages deliver (B14/F24)",
+  "comment": "Behaviour 2, and the mutation target. The guest is already opted out but is Checked In (an active booking). Replying '1' still runs checkout: room to Cleaning, cleaner dispatched, guest thanked — transaction-completion continues until the booking closes. Breaking the two-tier distinction so STOP kills everything makes this fixture produce silence and fail. Checked In At is far in the past so the F14 cooldown does not apply.",
+  "seed": {
+    "WS_Properties": [
+      { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222" } }
+    ],
+    "WS_Guests": [
+      { "id": "recG1", "fields": { "Guest Name": "John Smith", "Phone Number": "27821234567", "Session State": "CHECKED_IN", "Opted Out": true, "Opted Out At": "2026-07-20T09:00:00.000Z" } }
+    ],
+    "WS_Bookings": [
+      { "id": "recB1", "fields": { "Guest": ["recG1"], "Status": "Checked In", "Checked In At": "2026-07-01T10:00:00.000Z", "Room": ["recR1"] } }
+    ],
+    "WS_Rooms": [
+      { "id": "recR1", "fields": { "Room Name": "Room 1", "Status": "Occupied" } }
+    ],
+    "WS_Cleaners": [
+      { "id": "recC1", "fields": { "Cleaner Name": "Thandi", "Phone Number": "27821110000", "Active": true } }
+    ]
+  },
+  "message": { "from": "27821234567", "text": "1" },
+  "expect": {
+    "status": 200,
+    "writes": [
+      { "op": "update", "table": "WS_Bookings", "id": "recB1", "fields": { "Status": "Checked Out", "Checkout Confirmed": true } },
+      { "op": "update", "table": "WS_Rooms", "id": "recR1", "fields": { "Status": "Cleaning" } },
+      { "op": "update", "table": "WS_Rooms", "id": "recR1", "fields": { "Cleaning Started At": "re:^\\d{4}-\\d{2}-\\d{2}T" } },
+      { "op": "update", "table": "WS_Guests", "id": "recG1", "fields": { "Session State": "NEW" } }
+    ],
+    "sends": [
+      { "to": "27821110000", "includes": ["Hi Thandi", "Room 1 has just been vacated"] },
+      { "to": "27821234567", "includes": ["Thank you for staying with us at Test Lodge"] }
+    ]
+  }
+}

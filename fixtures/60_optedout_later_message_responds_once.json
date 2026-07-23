@@ -1,0 +1,27 @@
+{
+  "name": "stop: an opted-out guest messaging later gets the opt-out status once, not the marketing greeting (B14/F24)",
+  "comment": "Behaviour 4: a later 'hi' from an opted-out guest in NEW does NOT trigger the greeting (optional/marketing) — it returns the opt-out status and how to opt back in, and writes nothing (no guest record update to AWAITING_DETAILS). The greeting being suppressed and replaced by the pointer is the proof optional messaging is dead.",
+  "seed": {
+    "WS_Properties": [
+      { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222" } }
+    ],
+    "WS_Rooms": [
+      { "id": "recR1", "fields": { "Room Name": "Room 1", "Status": "Available", "Property": ["recP1"] } }
+    ],
+    "WS_Rates": [
+      { "id": "recRATE1", "fields": { "Rate Name": "Standard Overnight", "Rate Type": "Per Night", "Amount": 350, "Active": true, "Property": ["recP1"] } }
+    ],
+    "WS_Guests": [
+      { "id": "recG1", "fields": { "Guest Name": "John Smith", "Phone Number": "27821234567", "Session State": "NEW", "Opted Out": true, "Opted Out At": "2026-07-20T09:00:00.000Z" } }
+    ],
+    "WS_Cleaners": []
+  },
+  "message": { "from": "27821234567", "text": "hi" },
+  "expect": {
+    "status": 200,
+    "writes": [],
+    "sends": [
+      { "to": "27821234567", "includes": ["opted out of messages", "Reply *START*"] }
+    ]
+  }
+}

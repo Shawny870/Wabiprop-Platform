@@ -1,0 +1,27 @@
+{
+  "name": "stop: an opted-out guest with NO active booking gets no booking flow — only the opt-out pointer (B14/F24)",
+  "comment": "Behaviour 3: with no active booking (mid-enquiry, AWAITING_ETA), the optional/enquiry flow is silenced — recordEta does NOT run, so no booking is confirmed and nothing about the booking is written or sent. The only reply is the terse opt-out status pointer. Zero booking writes is the proof the flow was suppressed.",
+  "seed": {
+    "WS_Properties": [
+      { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222" } }
+    ],
+    "WS_Guests": [
+      { "id": "recG1", "fields": { "Guest Name": "John Smith", "Phone Number": "27821234567", "Session State": "AWAITING_ETA", "Opted Out": true, "Opted Out At": "2026-07-20T09:00:00.000Z" } }
+    ],
+    "WS_Bookings": [
+      { "id": "recB1", "fields": { "Guest": ["recG1"], "Status": "Enquiry", "Room": ["recR1"], "Check In": "2026-07-25T12:00:00.000Z", "Check Out": "2026-07-27T08:00:00.000Z" } }
+    ],
+    "WS_Rooms": [
+      { "id": "recR1", "fields": { "Room Name": "Room 1", "Status": "Available" } }
+    ],
+    "WS_Cleaners": []
+  },
+  "message": { "from": "27821234567", "text": "around 5pm" },
+  "expect": {
+    "status": 200,
+    "writes": [],
+    "sends": [
+      { "to": "27821234567", "includes": ["opted out of messages", "Reply *START*"] }
+    ]
+  }
+}

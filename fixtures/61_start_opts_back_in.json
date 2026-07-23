@@ -1,0 +1,23 @@
+{
+  "name": "stop: an opted-out guest replying START opts back in — Opted Out cleared and Opted Out At nulled (B14/F24)",
+  "comment": "The opt-back-in half of behaviour 4. START (any case) clears Opted Out and nulls Opted Out At, and confirms with a welcome-back that also restates how to opt out again. Case-insensitive by the same lowercasing as STOP.",
+  "seed": {
+    "WS_Properties": [
+      { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222" } }
+    ],
+    "WS_Guests": [
+      { "id": "recG1", "fields": { "Guest Name": "John Smith", "Phone Number": "27821234567", "Session State": "NEW", "Opted Out": true, "Opted Out At": "2026-07-20T09:00:00.000Z" } }
+    ],
+    "WS_Cleaners": []
+  },
+  "message": { "from": "27821234567", "text": "Start" },
+  "expect": {
+    "status": 200,
+    "writes": [
+      { "op": "update", "table": "WS_Guests", "id": "recG1", "fields": { "Opted Out": false, "Opted Out At": null } }
+    ],
+    "sends": [
+      { "to": "27821234567", "includes": ["Welcome back", "Reply *STOP*"] }
+    ]
+  }
+}

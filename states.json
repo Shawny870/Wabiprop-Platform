@@ -82,6 +82,8 @@
     "cleanerNothingToClean": "Thanks! No rooms currently marked for cleaning — nothing to update.",
     "cleanerWhichRoom": "Which room? Reply with the room number or name. Currently cleaning: {roomList}",
     "unknownFallback": "Hi! Reply with your name and dates to make a booking, or *CHECKING OUT* if you are leaving today.",
-    "numberNotConfigured": "Sorry, this number isn't configured yet. Please contact support."
+    "numberNotConfigured": "Sorry, this number isn't configured yet. Please contact support.",
+    "optedOut": "You've opted out of messages. 🔕 We won't send you anything further.\n\nReply *START* at any time to opt back in.",
+    "optedBackIn": "Welcome back! ✅ You're opted back in and will receive messages again.\n\nReply *STOP* any time to opt out."
   }
 }
