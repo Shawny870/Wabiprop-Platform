@@ -3,42 +3,123 @@
   "comment": "The month-substring trap: the old classifier used line.includes('may') and would have read 'May Ndlovu' as a date. Date detection now matches genuine date SHAPES (day+month), so 'May Ndlovu' is not a date and stays the name, while '3 Aug 2026' / '5 Aug 2026' become the dates. This is the mutation target for the over-detection direction: make a bare month word count as a date and 'May' is eaten, the name breaks, and this fixture fails.",
   "seed": {
     "WS_Properties": [
-      { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222" } }
+      {
+        "id": "recP1",
+        "fields": {
+          "Property Name": "Test Lodge",
+          "Phone Number ID": "111000111000",
+          "City": "Testville",
+          "Notify Phone": "27831112222"
+        }
+      }
     ],
     "WS_Rates": [
-      { "id": "recRATE_S", "fields": { "Rate Name": "Standard Night Single", "Rate Type": "Per Night", "Amount": 250, "Active": true, "Occupancy Type": "Single", "Property": ["recP1"] } }
+      {
+        "id": "recRATE_S",
+        "fields": {
+          "Rate Name": "Standard Night Single",
+          "Rate Type": "Per Night",
+          "Amount": 250,
+          "Active": true,
+          "Occupancy Type": "Single",
+          "Property": [
+            "recP1"
+          ]
+        }
+      }
     ],
     "WS_Rooms": [
-      { "id": "recR1", "fields": { "Room Name": "Room 1", "Status": "Available", "Property": ["recP1"] } }
+      {
+        "id": "recR1",
+        "fields": {
+          "Room Name": "Room 1",
+          "Status": "Available",
+          "Property": [
+            "recP1"
+          ]
+        }
+      }
     ],
     "WS_Guests": [
-      { "id": "recG1", "fields": { "Guest Name": "Unknown", "Phone Number": "27821234567", "Session State": "AWAITING_DETAILS" } }
+      {
+        "id": "recG1",
+        "fields": {
+          "Guest Name": "Unknown",
+          "Phone Number": "27821234567",
+          "Session State": "AWAITING_DETAILS"
+        }
+      }
     ],
     "WS_Cleaners": [],
     "WS_Bookings": []
   },
-  "message": { "from": "27821234567", "text": "May Ndlovu 3 Aug 2026 5 Aug 2026" },
+  "message": {
+    "from": "27821234567",
+    "text": "May Ndlovu 3 Aug 2026 5 Aug 2026"
+  },
   "expect": {
     "status": 200,
     "writes": [
-      { "op": "update", "table": "WS_Guests", "id": "recG1", "fields": { "Guest Name": "May Ndlovu", "Session State": "AWAITING_OCCUPANCY" } },
       {
-        "op": "create", "table": "WS_Bookings",
+        "op": "update",
+        "table": "WS_Guests",
+        "id": "recG1",
         "fields": {
-          "Guest": ["recG1"],
+          "Guest Name": "May Ndlovu",
+          "Session State": "AWAITING_OCCUPANCY"
+        }
+      },
+      {
+        "op": "create",
+        "table": "WS_Bookings",
+        "fields": {
+          "Guest": [
+            "recG1"
+          ],
           "Booking Type": "Overnight",
           "Status": "Enquiry",
           "Notes": "Check-in: 3 Aug 2026 | Check-out: 5 Aug 2026",
           "Check In": "re:^2026-08-03T12:00:00\\.000Z$",
           "Check Out": "re:^2026-08-05T08:00:00\\.000Z$",
-          "Room": ["recR1"]
+          "Room": [
+            "recR1"
+          ]
         }
       },
-      { "op": "update", "table": "WS_Bookings", "fields": { "Booking Ref": "re:^WS-[A-Z0-9]{6}$" } }
+      {
+        "op": "update",
+        "table": "WS_Bookings",
+        "fields": {
+          "Booking Ref": "re:^WS-[A-Z0-9]{6}$"
+        }
+      },
+      {
+        "op": "create",
+        "table": "WS_Enquiries",
+        "fields": {
+          "Phone Number": "27821234567",
+          "Property": [
+            "recP1"
+          ],
+          "Outcome": "Booked",
+          "Booking Type": "Overnight"
+        }
+      }
     ],
     "sends": [
-      { "to": "27830000001", "includes": ["New booking enquiry from May Ndlovu"] },
-      { "to": "27821234567", "includes": ["Thanks May Ndlovu", "How many of you are staying"] }
+      {
+        "to": "27830000001",
+        "includes": [
+          "New booking enquiry from May Ndlovu"
+        ]
+      },
+      {
+        "to": "27821234567",
+        "includes": [
+          "Thanks May Ndlovu",
+          "How many of you are staying"
+        ]
+      }
     ]
   }
 }

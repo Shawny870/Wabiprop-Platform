@@ -3,29 +3,78 @@
   "comment": "B7: the year in Check In/Check Out is deliberately a regex wildcard. '25 June' resolves against the real clock, so it means 2026 until 25 June 2026 passes and 2027 thereafter — pinning a year here would make this fixture rot on a calendar date. The month/day/time are exact, and test/dates.test.js pins the year rule against a frozen clock. Notes stays asserted byte-for-byte: B7 must not change it.",
   "seed": {
     "WS_Properties": [
-      { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222" } }
+      {
+        "id": "recP1",
+        "fields": {
+          "Property Name": "Test Lodge",
+          "Phone Number ID": "111000111000",
+          "City": "Testville",
+          "Notify Phone": "27831112222"
+        }
+      }
     ],
     "WS_Rates": [
-      { "id": "recRATE1", "fields": { "Rate Name": "Standard Overnight", "Rate Type": "Per Night", "Amount": 350, "Active": true, "Property": ["recP1"] } }
+      {
+        "id": "recRATE1",
+        "fields": {
+          "Rate Name": "Standard Overnight",
+          "Rate Type": "Per Night",
+          "Amount": 350,
+          "Active": true,
+          "Property": [
+            "recP1"
+          ]
+        }
+      }
     ],
     "WS_Rooms": [
-      { "id": "recR1", "fields": { "Room Name": "Room 1", "Status": "Available", "Property": ["recP1"] } }
+      {
+        "id": "recR1",
+        "fields": {
+          "Room Name": "Room 1",
+          "Status": "Available",
+          "Property": [
+            "recP1"
+          ]
+        }
+      }
     ],
     "WS_Guests": [
-      { "id": "recG1", "fields": { "Guest Name": "Unknown", "Phone Number": "27821234567", "Session State": "AWAITING_DETAILS" } }
+      {
+        "id": "recG1",
+        "fields": {
+          "Guest Name": "Unknown",
+          "Phone Number": "27821234567",
+          "Session State": "AWAITING_DETAILS"
+        }
+      }
     ],
     "WS_Cleaners": [],
     "WS_Bookings": []
   },
-  "message": { "from": "27821234567", "text": "John Smith\n25 June\n27 June" },
+  "message": {
+    "from": "27821234567",
+    "text": "John Smith\n25 June\n27 June"
+  },
   "expect": {
     "status": 200,
     "writes": [
-      { "op": "update", "table": "WS_Guests", "id": "recG1", "fields": { "Guest Name": "John Smith", "Session State": "AWAITING_OCCUPANCY" } },
       {
-        "op": "create", "table": "WS_Bookings",
+        "op": "update",
+        "table": "WS_Guests",
+        "id": "recG1",
         "fields": {
-          "Guest": ["recG1"],
+          "Guest Name": "John Smith",
+          "Session State": "AWAITING_OCCUPANCY"
+        }
+      },
+      {
+        "op": "create",
+        "table": "WS_Bookings",
+        "fields": {
+          "Guest": [
+            "recG1"
+          ],
           "Booking Type": "Overnight",
           "Source": "WhatsApp",
           "Status": "Enquiry",
@@ -33,15 +82,51 @@
           "Notes": "Check-in: 25 June | Check-out: 27 June",
           "Check In": "re:^\\d{4}-06-25T12:00:00\\.000Z$",
           "Check Out": "re:^\\d{4}-06-27T08:00:00\\.000Z$",
-          "Room": ["recR1"],
+          "Room": [
+            "recR1"
+          ],
           "Payment Status": "Unpaid"
         }
       },
-      { "op": "update", "table": "WS_Bookings", "fields": { "Booking Ref": "re:^WS-[A-Z0-9]{6}$" } }
+      {
+        "op": "update",
+        "table": "WS_Bookings",
+        "fields": {
+          "Booking Ref": "re:^WS-[A-Z0-9]{6}$"
+        }
+      },
+      {
+        "op": "create",
+        "table": "WS_Enquiries",
+        "fields": {
+          "Phone Number": "27821234567",
+          "Property": [
+            "recP1"
+          ],
+          "Outcome": "Booked",
+          "Booking Type": "Overnight"
+        }
+      }
     ],
     "sends": [
-      { "to": "27830000001", "includes": ["New booking enquiry from John Smith", "Phone: 27821234567", "Check-in: 25 June", "Check-out: 27 June"] },
-      { "to": "27821234567", "includes": ["Thanks John Smith", "How many of you are staying", "1 - Just me", "2 - Two of us"] }
+      {
+        "to": "27830000001",
+        "includes": [
+          "New booking enquiry from John Smith",
+          "Phone: 27821234567",
+          "Check-in: 25 June",
+          "Check-out: 27 June"
+        ]
+      },
+      {
+        "to": "27821234567",
+        "includes": [
+          "Thanks John Smith",
+          "How many of you are staying",
+          "1 - Just me",
+          "2 - Two of us"
+        ]
+      }
     ]
   }
 }

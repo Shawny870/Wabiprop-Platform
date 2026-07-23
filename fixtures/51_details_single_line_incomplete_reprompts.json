@@ -3,23 +3,69 @@
   "comment": "The incomplete-input guard for the single-line path, and the mutation target for the under-detection direction. Only one real date token is present, so check-out is missing and the booking must NOT be created — re-prompt with zero writes, exactly as the newline name+one-date case (fixture 29) does. If date detection is broken so it stops finding the real date, or so it fabricates a second date from the name/year, this fixture flips (either it books wrongly, or it changes what it re-prompts on).",
   "seed": {
     "WS_Properties": [
-      { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222" } }
+      {
+        "id": "recP1",
+        "fields": {
+          "Property Name": "Test Lodge",
+          "Phone Number ID": "111000111000",
+          "City": "Testville",
+          "Notify Phone": "27831112222"
+        }
+      }
     ],
     "WS_Rooms": [
-      { "id": "recR1", "fields": { "Room Name": "Room 1", "Status": "Available", "Property": ["recP1"] } }
+      {
+        "id": "recR1",
+        "fields": {
+          "Room Name": "Room 1",
+          "Status": "Available",
+          "Property": [
+            "recP1"
+          ]
+        }
+      }
     ],
     "WS_Guests": [
-      { "id": "recG1", "fields": { "Guest Name": "Unknown", "Phone Number": "27821234567", "Session State": "AWAITING_DETAILS" } }
+      {
+        "id": "recG1",
+        "fields": {
+          "Guest Name": "Unknown",
+          "Phone Number": "27821234567",
+          "Session State": "AWAITING_DETAILS"
+        }
+      }
     ],
     "WS_Cleaners": [],
     "WS_Bookings": []
   },
-  "message": { "from": "27821234567", "text": "May Ndlovu 3 Aug 2026" },
+  "message": {
+    "from": "27821234567",
+    "text": "May Ndlovu 3 Aug 2026"
+  },
   "expect": {
     "status": 200,
-    "writes": [],
+    "writes": [
+      {
+        "op": "create",
+        "table": "WS_Enquiries",
+        "fields": {
+          "Phone Number": "27821234567",
+          "Property": [
+            "recP1"
+          ],
+          "Outcome": "Invalid Input",
+          "Booking Type": "Overnight"
+        }
+      }
+    ],
     "sends": [
-      { "to": "27821234567", "includes": ["Sorry, I didn't quite get that", "3. Check-out date"] }
+      {
+        "to": "27821234567",
+        "includes": [
+          "Sorry, I didn't quite get that",
+          "3. Check-out date"
+        ]
+      }
     ]
   }
 }

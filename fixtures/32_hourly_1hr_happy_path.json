@@ -81,6 +81,18 @@
         "fields": {
           "Session State": "CONFIRMED"
         }
+      },
+      {
+        "op": "create",
+        "table": "WS_Enquiries",
+        "fields": {
+          "Phone Number": "27821234567",
+          "Property": [
+            "recP1"
+          ],
+          "Outcome": "Booked",
+          "Booking Type": "Hourly"
+        }
       }
     ],
     "sends": [

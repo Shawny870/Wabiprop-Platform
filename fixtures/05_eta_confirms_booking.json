@@ -2,25 +2,86 @@
   "name": "ETA: free-text ETA confirms the Enquiry booking (F5 lookup) and moves guest to CONFIRMED",
   "seed": {
     "WS_Properties": [
-      { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222" } }
+      {
+        "id": "recP1",
+        "fields": {
+          "Property Name": "Test Lodge",
+          "Phone Number ID": "111000111000",
+          "City": "Testville",
+          "Notify Phone": "27831112222"
+        }
+      }
     ],
     "WS_Guests": [
-      { "id": "recG1", "fields": { "Guest Name": "John Smith", "Phone Number": "27821234567", "Session State": "AWAITING_ETA" } }
+      {
+        "id": "recG1",
+        "fields": {
+          "Guest Name": "John Smith",
+          "Phone Number": "27821234567",
+          "Session State": "AWAITING_ETA"
+        }
+      }
     ],
     "WS_Bookings": [
-      { "id": "recB1", "fields": { "Guest": ["recG1"], "Status": "Enquiry", "Booking Type": "Overnight" } }
+      {
+        "id": "recB1",
+        "fields": {
+          "Guest": [
+            "recG1"
+          ],
+          "Status": "Enquiry",
+          "Booking Type": "Overnight"
+        }
+      }
     ],
     "WS_Cleaners": []
   },
-  "message": { "from": "27821234567", "text": "around 2pm" },
+  "message": {
+    "from": "27821234567",
+    "text": "around 2pm"
+  },
   "expect": {
     "status": 200,
     "writes": [
-      { "op": "update", "table": "WS_Bookings", "id": "recB1", "fields": { "ETA": "around 2pm", "Status": "Confirmed" } },
-      { "op": "update", "table": "WS_Guests", "id": "recG1", "fields": { "Session State": "CONFIRMED" } }
+      {
+        "op": "update",
+        "table": "WS_Bookings",
+        "id": "recB1",
+        "fields": {
+          "ETA": "around 2pm",
+          "Status": "Confirmed"
+        }
+      },
+      {
+        "op": "update",
+        "table": "WS_Guests",
+        "id": "recG1",
+        "fields": {
+          "Session State": "CONFIRMED"
+        }
+      },
+      {
+        "op": "create",
+        "table": "WS_Enquiries",
+        "fields": {
+          "Phone Number": "27821234567",
+          "Property": [
+            "recP1"
+          ],
+          "Outcome": "Booked"
+        }
+      }
     ],
     "sends": [
-      { "to": "27821234567", "includes": ["See you at *around 2pm*", "1 - I'm at the gate", "2 - Cancel my booking", "hosting you at Test Lodge"] }
+      {
+        "to": "27821234567",
+        "includes": [
+          "See you at *around 2pm*",
+          "1 - I'm at the gate",
+          "2 - Cancel my booking",
+          "hosting you at Test Lodge"
+        ]
+      }
     ]
   }
 }

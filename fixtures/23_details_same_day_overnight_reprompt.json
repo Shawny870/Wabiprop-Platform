@@ -3,23 +3,73 @@
   "comment": "The overnight defaults would make this 14:00 to 10:00 on the same SAST day: a negative-length stay. Distinct from the reversed case only in that compareYmd returns 0 rather than negative, which is why the guard is '<= 0' and not '< 0'. Note this is an Overnight-flow rule: B9's hourly bookings are same-day by definition and will need their own duration check rather than reusing this one.",
   "seed": {
     "WS_Properties": [
-      { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222" } }
+      {
+        "id": "recP1",
+        "fields": {
+          "Property Name": "Test Lodge",
+          "Phone Number ID": "111000111000",
+          "City": "Testville",
+          "Notify Phone": "27831112222"
+        }
+      }
     ],
     "WS_Rates": [
-      { "id": "recRATE1", "fields": { "Rate Name": "Standard Overnight", "Rate Type": "Per Night", "Amount": 350, "Active": true, "Property": ["recP1"] } }
+      {
+        "id": "recRATE1",
+        "fields": {
+          "Rate Name": "Standard Overnight",
+          "Rate Type": "Per Night",
+          "Amount": 350,
+          "Active": true,
+          "Property": [
+            "recP1"
+          ]
+        }
+      }
     ],
     "WS_Guests": [
-      { "id": "recG1", "fields": { "Guest Name": "Unknown", "Phone Number": "27821234567", "Session State": "AWAITING_DETAILS" } }
+      {
+        "id": "recG1",
+        "fields": {
+          "Guest Name": "Unknown",
+          "Phone Number": "27821234567",
+          "Session State": "AWAITING_DETAILS"
+        }
+      }
     ],
     "WS_Cleaners": [],
     "WS_Bookings": []
   },
-  "message": { "from": "27821234567", "text": "John Smith\ntoday\ntoday" },
+  "message": {
+    "from": "27821234567",
+    "text": "John Smith\ntoday\ntoday"
+  },
   "expect": {
     "status": 200,
-    "writes": [],
+    "writes": [
+      {
+        "op": "create",
+        "table": "WS_Enquiries",
+        "fields": {
+          "Phone Number": "27821234567",
+          "Property": [
+            "recP1"
+          ],
+          "Outcome": "Invalid Input",
+          "Booking Type": "Overnight"
+        }
+      }
+    ],
     "sends": [
-      { "to": "27821234567", "includes": ["Sorry, I didn't quite get that", "1. Full name", "2. Check-in date", "3. Check-out date"] }
+      {
+        "to": "27821234567",
+        "includes": [
+          "Sorry, I didn't quite get that",
+          "1. Full name",
+          "2. Check-in date",
+          "3. Check-out date"
+        ]
+      }
     ]
   }
 }

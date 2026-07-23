@@ -1,0 +1,31 @@
+{
+  "name": "enquiry: a successful overnight booking logs one WS_Enquiries row, Outcome Booked, with the resulting Booking linked (B19/F26)",
+  "comment": "The Booked terminal. The booking is the first record created (recNEW001, guest is seeded), the enquiry row is second (recNEW002) and links the booking. Enquiry is the last write. Property-scoped to recP1.",
+  "seed": {
+    "WS_Properties": [
+      { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222" } }
+    ],
+    "WS_Rooms": [
+      { "id": "recR1", "fields": { "Room Name": "Room 1", "Status": "Available", "Property": ["recP1"] } }
+    ],
+    "WS_Guests": [
+      { "id": "recG1", "fields": { "Guest Name": "Unknown", "Phone Number": "27821234567", "Session State": "AWAITING_DETAILS" } }
+    ],
+    "WS_Cleaners": [],
+    "WS_Bookings": []
+  },
+  "message": { "from": "27821234567", "text": "John Smith\n1 Dec 2026\n3 Dec 2026" },
+  "expect": {
+    "status": 200,
+    "writes": [
+      { "op": "update", "table": "WS_Guests", "id": "recG1", "fields": { "Guest Name": "John Smith", "Session State": "AWAITING_OCCUPANCY" } },
+      { "op": "create", "table": "WS_Bookings", "fields": { "Status": "Enquiry", "Room": ["recR1"] } },
+      { "op": "update", "table": "WS_Bookings", "fields": { "Booking Ref": "re:^WS-[A-Z0-9]{6}$" } },
+      { "op": "create", "table": "WS_Enquiries", "fields": { "Phone Number": "27821234567", "Property": ["recP1"], "Outcome": "Booked", "Booking Type": "Overnight", "Booking": ["recNEW001"], "Requested Check In": "re:^2026-12-01T12:00:00\\.000Z$", "Requested Check Out": "re:^2026-12-03T08:00:00\\.000Z$" } }
+    ],
+    "sends": [
+      { "to": "27830000001", "includes": ["New booking enquiry from John Smith"] },
+      { "to": "27821234567", "includes": ["How many of you are staying"] }
+    ]
+  }
+}

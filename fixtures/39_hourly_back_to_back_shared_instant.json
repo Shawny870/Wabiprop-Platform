@@ -3,37 +3,125 @@
   "comment": "This is the case B8's rule was written for and could not demonstrate. Exclusive and inclusive bounds disagree on exactly one input — a check-in instant EQUAL to a check-out instant — and the overnight flow can never produce it, because its defaults compare 14:00 against 10:00. B8 proved the rule only in test/availability.test.js, with a unit test explicitly labelled 'B9 preview'. Hourly makes it real: recB0 runs 14:00-17:00 SAST and this guest starts at exactly 17:00 for one hour. Under inclusive bounds the room would be refused and every consecutive hourly slot would be unsellable — the exact revenue leak the strict inequalities exist to prevent, now provable end to end through a real Meta payload.",
   "seed": {
     "WS_Properties": [
-      { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222", "Hourly Rate 1hr": 120, "Hourly Rate 2hr": 250, "Hourly Rate 3hr": 320 } }
+      {
+        "id": "recP1",
+        "fields": {
+          "Property Name": "Test Lodge",
+          "Phone Number ID": "111000111000",
+          "City": "Testville",
+          "Notify Phone": "27831112222",
+          "Hourly Rate 1hr": 120,
+          "Hourly Rate 2hr": 250,
+          "Hourly Rate 3hr": 320
+        }
+      }
     ],
     "WS_Rooms": [
-      { "id": "recR1", "fields": { "Room Name": "Room 1", "Status": "Occupied", "Property": ["recP1"] } }
+      {
+        "id": "recR1",
+        "fields": {
+          "Room Name": "Room 1",
+          "Status": "Occupied",
+          "Property": [
+            "recP1"
+          ]
+        }
+      }
     ],
     "WS_Guests": [
-      { "id": "recG1", "fields": { "Guest Name": "John Smith", "Phone Number": "27821234567", "Session State": "AWAITING_HOURLY_DURATION" } }
+      {
+        "id": "recG1",
+        "fields": {
+          "Guest Name": "John Smith",
+          "Phone Number": "27821234567",
+          "Session State": "AWAITING_HOURLY_DURATION"
+        }
+      }
     ],
     "WS_Bookings": [
-      { "id": "recHourlyExist001", "fields": { "Booking Type": "Hourly", "Status": "Checked In", "Room": ["recR1"], "Check In": "$SAST(1,14)", "Check Out": "$SAST(1,17)" } },
-      { "id": "recHourlyPend0001", "fields": { "Guest": ["recG1"], "Booking Type": "Hourly", "Status": "Enquiry", "Check In": "$SAST(1,17)", "Payment Status": "Unpaid" } }
+      {
+        "id": "recHourlyExist001",
+        "fields": {
+          "Booking Type": "Hourly",
+          "Status": "Checked In",
+          "Room": [
+            "recR1"
+          ],
+          "Check In": "$SAST(1,14)",
+          "Check Out": "$SAST(1,17)"
+        }
+      },
+      {
+        "id": "recHourlyPend0001",
+        "fields": {
+          "Guest": [
+            "recG1"
+          ],
+          "Booking Type": "Hourly",
+          "Status": "Enquiry",
+          "Check In": "$SAST(1,17)",
+          "Payment Status": "Unpaid"
+        }
+      }
     ],
     "WS_Cleaners": []
   },
-  "message": { "from": "27821234567", "text": "1" },
+  "message": {
+    "from": "27821234567",
+    "text": "1"
+  },
   "expect": {
     "status": 200,
     "writes": [
       {
-        "op": "update", "table": "WS_Bookings", "id": "recHourlyPend0001",
+        "op": "update",
+        "table": "WS_Bookings",
+        "id": "recHourlyPend0001",
         "fields": {
           "Check Out": "re:^\\d{4}-\\d{2}-\\d{2}T16:00:00\\.000Z$",
-          "Room": ["recR1"],
+          "Room": [
+            "recR1"
+          ],
           "Amount Due": 120
         }
       },
-      { "op": "update", "table": "WS_Guests", "id": "recG1", "fields": { "Session State": "CONFIRMED" } }
+      {
+        "op": "update",
+        "table": "WS_Guests",
+        "id": "recG1",
+        "fields": {
+          "Session State": "CONFIRMED"
+        }
+      },
+      {
+        "op": "create",
+        "table": "WS_Enquiries",
+        "fields": {
+          "Phone Number": "27821234567",
+          "Property": [
+            "recP1"
+          ],
+          "Outcome": "Booked",
+          "Booking Type": "Hourly"
+        }
+      }
     ],
     "sends": [
-      { "to": "27830000001", "includes": ["New *short stay* booking from John Smith", "Duration: 1 hour"] },
-      { "to": "27821234567", "includes": ["Thanks John Smith", "at 5:00pm", "Duration:* 1 hour"] }
+      {
+        "to": "27830000001",
+        "includes": [
+          "New *short stay* booking from John Smith",
+          "Duration: 1 hour"
+        ]
+      },
+      {
+        "to": "27821234567",
+        "includes": [
+          "Thanks John Smith",
+          "at 5:00pm",
+          "Duration:* 1 hour"
+        ]
+      }
     ]
   }
 }

@@ -732,7 +732,11 @@ const actions = {
     // double-booking B8 exists to prevent — via a rarer door. The greeting has
     // always asked for all three; this is the code enforcing what the copy says.
     if (!guestName || !checkIn || !checkOut) {
-      // Stay in AWAITING_DETAILS — no writes, reprompt only
+      // B19: the parser rejected this input (bot re-prompted) → Invalid Input.
+      // Partial row: dates blank if not given. Deduped so repeated fumbles in one
+      // attempt collapse to a single Invalid Input row.
+      await logEnquiry(ctx.property, ctx.phone, 'Invalid Input', { bookingType: 'Overnight' });
+      // Stay in AWAITING_DETAILS — reprompt only
       await sendWhatsApp(ctx.phone, msg('detailsReprompt'));
       return;
     }
@@ -756,6 +760,7 @@ const actions = {
         checkInText: checkIn,
         checkOutText: checkOut || null
       });
+      await logEnquiry(ctx.property, ctx.phone, 'Invalid Input', { bookingType: 'Overnight' });
       await sendWhatsApp(ctx.phone, msg('detailsReprompt'));
       return;
     }
@@ -775,13 +780,19 @@ const actions = {
         checkIn: checkInIso,
         checkOut: checkOutIso
       });
+      // B19: the revenue-relevant one — a real request refused by B8. Captures the
+      // dates so the weekly summary can say "turned away, no room free".
+      await logEnquiry(ctx.property, ctx.phone, 'No Availability', {
+        checkInIso, checkOutIso, bookingType: 'Overnight'
+      });
       await sendWhatsApp(ctx.phone, msg('noAvailability', { guestName, checkIn, checkOut }));
       return;
     }
 
     await airtableUpdate('WS_Guests', ctx.guest.id, {
       'Guest Name': guestName,
-      'Session State': ctx.next
+      'Session State': ctx.next,
+      'Last Inbound At': now.toISOString() // B19: staleness anchor for the abandonment sweep
     });
 
     // F19 (Rate-fix): the rate is NOT chosen here any more. It was `activeRates[0]`
@@ -815,6 +826,11 @@ const actions = {
     // F13: write Booking Ref back to Airtable after CREATE
     if (booking.id) {
       await airtableUpdate('WS_Bookings', booking.id, { 'Booking Ref': bookingRef });
+      // B19: Booked, logged at creation. recordEta re-affirms on confirmation but
+      // the booking-id dedup keeps it to one row.
+      await logEnquiry(ctx.property, ctx.phone, 'Booked', {
+        checkInIso, checkOutIso, bookingType: 'Overnight', bookingId: booking.id
+      });
     }
     logToAxiom(booking.id ? 'info' : 'error', 'booking_create', {
       phone: ctx.phone,
@@ -886,7 +902,7 @@ const actions = {
       logToAxiom('warn', 'occupancy_no_matching_rate', {
         phone: ctx.phone, propertyId: ctx.property.id, occupancyType
       });
-      await airtableUpdate('WS_Guests', ctx.guest.id, { 'Session State': ctx.next });
+      await airtableUpdate('WS_Guests', ctx.guest.id, { 'Session State': ctx.next, 'Last Inbound At': new Date().toISOString() });
       await sendWhatsApp(ctx.phone, msg('occupancyContactOwner', { guestName }));
       return;
     }
@@ -895,7 +911,7 @@ const actions = {
       'Rate Applied': [rate.id],
       'Amount Due': rate.fields['Amount']
     });
-    await airtableUpdate('WS_Guests', ctx.guest.id, { 'Session State': ctx.next });
+    await airtableUpdate('WS_Guests', ctx.guest.id, { 'Session State': ctx.next, 'Last Inbound At': new Date().toISOString() });
     logToAxiom('info', 'occupancy_selected', {
       phone: ctx.phone, guestId: ctx.guest.id, occupancyType, amount: rate.fields['Amount']
     });
@@ -1004,7 +1020,8 @@ const actions = {
 
     await airtableUpdate('WS_Guests', ctx.guest.id, {
       'Guest Name': guestName,
-      'Session State': ctx.next
+      'Session State': ctx.next,
+      'Last Inbound At': new Date().toISOString() // B19: staleness anchor for the abandonment sweep
     });
 
     // The duration menu arrives as a separate WhatsApp message — a separate
@@ -1086,6 +1103,10 @@ const actions = {
       // Booking stays pending with Check Out blank — inert, and reused when the
       // guest offers a different time.
       await airtableUpdate('WS_Guests', ctx.guest.id, { 'Session State': 'AWAITING_HOURLY_DETAILS' });
+      // B19: B9's hourly availability check refused — turned away, Hourly.
+      await logEnquiry(ctx.property, ctx.phone, 'No Availability', {
+        checkInIso, checkOutIso, bookingType: 'Hourly'
+      });
       await sendWhatsApp(ctx.phone, msg('hourlyNoAvailability', {
         guestName,
         checkInText: formatSastDateTime(checkInIso),
@@ -1114,6 +1135,10 @@ const actions = {
     });
 
     await airtableUpdate('WS_Guests', ctx.guest.id, { 'Session State': ctx.next });
+    // B19: Booked, Hourly. Completed in one handler, so this is the single log site.
+    await logEnquiry(ctx.property, ctx.phone, 'Booked', {
+      checkInIso, checkOutIso, bookingType: 'Hourly', bookingId: pending.id
+    });
 
     const view = {
       guestName, bookingRef, amount,
@@ -1132,13 +1157,23 @@ const actions = {
     const eta = ctx.messageText.trim();
     // F5: was FIND/ARRAYJOIN — now JS filter on fetched records
     const bookings = await airtableGetBookingsByGuestId(ctx.guest.id, 'Enquiry');
-    if (bookings.length > 0) {
-      await airtableUpdate('WS_Bookings', bookings[0].id, {
+    const confirmedBooking = bookings[0] || null;
+    if (confirmedBooking) {
+      await airtableUpdate('WS_Bookings', confirmedBooking.id, {
         'ETA': eta,
         'Status': 'Confirmed'
       });
     }
     await airtableUpdate('WS_Guests', ctx.guest.id, { 'Session State': ctx.next });
+    // B19: Booked, re-affirmed on confirmation — deduped by booking id, so this is
+    // a no-op when collectDetails already logged it at creation, and the single
+    // logging site when the booking reached AWAITING_ETA another way.
+    if (confirmedBooking) {
+      await logEnquiry(ctx.property, ctx.phone, 'Booked', {
+        bookingType: confirmedBooking.fields['Booking Type'] || 'Overnight',
+        bookingId: confirmedBooking.id
+      });
+    }
     logToAxiom('info', 'state_transition', { phone: ctx.phone, guestId: ctx.guest.id, from: 'AWAITING_ETA', to: ctx.next, eta });
     await sendWhatsApp(ctx.phone, msg('etaConfirmed', { eta, propertyName: ctx.property.fields['Property Name'] }));
   },
@@ -1471,10 +1506,103 @@ async function runAutoCheckout(now = new Date()) {
   return summary;
 }
 
+// ─── ENQUIRY LOGGING (B19) ───────────────────────────────────────────────────
+// Every terminal point of a booking attempt writes one WS_Enquiries row, so the
+// attempts that never became bookings — "3 enquiries turned away, no room free"
+// — stop vanishing. Booked / No Availability / Invalid Input are logged at their
+// definitive points; Abandoned is a staleness sweep (guest gave a name, then went
+// silent) that reuses the auto-checkout cron rather than adding a second one.
+
+const ENQUIRY_ABANDON_MS = 24 * 60 * 60 * 1000; // 24h since last inbound with no terminal outcome
+// A guest who produced a valid booking DRAFT (occupancy/eta/duration) but went
+// silent is Abandoned. (A guest still stuck at the details step — the parser kept
+// re-prompting — is logged Invalid Input immediately at that reject, which also
+// keeps ctx.property in hand for scoping; the sweep only handles Abandoned.)
+const ENQUIRY_ABANDON_STATES = ['AWAITING_OCCUPANCY', 'AWAITING_ETA', 'AWAITING_HOURLY_DURATION'];
+
+// Writes exactly one WS_Enquiries row. Property-scoped via property.id (JS-side
+// record-id link, same idiom as B11). Partial rows are allowed — an attempt that
+// dies before dates are given logs with blank date fields.
+//
+// One-write rule, two dedup guards:
+//   · Booked  — never a second row for the same booking id. The overnight flow
+//     reaches "Booked" at BOTH creation (collectDetails) and confirmation
+//     (recordEta); only the first lands. Two SEPARATE attempts each hit their own
+//     terminal and correctly produce two rows.
+//   · Invalid Input — never a second OPEN (booking-less) Invalid-Input row for the
+//     same phone, so repeated fumbles in one attempt collapse to one row.
+async function logEnquiry(property, phone, outcome, opts = {}) {
+  const { checkInIso, checkOutIso, bookingType, bookingId } = opts;
+  const existing = await airtableGet('WS_Enquiries', '');
+  if (bookingId && existing.some(e => (e.fields['Booking'] || []).includes(bookingId))) return false;
+  if (outcome === 'Invalid Input' && existing.some(e =>
+        e.fields['Phone Number'] === phone &&
+        e.fields['Outcome'] === 'Invalid Input' &&
+        (e.fields['Booking'] || []).length === 0)) return false;
+
+  const fields = {
+    'Phone Number': phone,
+    'Property': [property.id],
+    'Outcome': outcome,
+    'Created At': new Date().toISOString()
+  };
+  if (checkInIso) fields['Requested Check In'] = checkInIso;
+  if (checkOutIso) fields['Requested Check Out'] = checkOutIso;
+  if (bookingType) fields['Booking Type'] = bookingType;
+  if (bookingId) fields['Booking'] = [bookingId];
+  await airtableCreate('WS_Enquiries', fields);
+  logToAxiom('info', 'enquiry_logged', { phone, propertyId: property.id, outcome, bookingType: bookingType || null });
+  return true;
+}
+
+// Staleness sweep for Abandoned. Runs on the auto-checkout cron. A guest sitting
+// in a draft-bearing enquiry state, who provided a name and whose last inbound is
+// older than the window, with no enquiry row already covering this attempt, is
+// logged Abandoned. Property is recovered from the guest's pending booking's room.
+async function runEnquiryAbandonment(now = new Date()) {
+  const nowMs = now.getTime();
+  const summary = { abandoned: 0 };
+  const guests = await airtableGet('WS_Guests', orFormula('Session State', ENQUIRY_ABANDON_STATES));
+  const enquiries = await airtableGet('WS_Enquiries', '');
+
+  for (const guest of guests) {
+    const name = guest.fields['Guest Name'];
+    if (!name || name === 'Unknown') continue;                 // "provided at least a name"
+    const lastInbound = guest.fields['Last Inbound At'];
+    if (!lastInbound || (nowMs - Date.parse(lastInbound)) < ENQUIRY_ABANDON_MS) continue;
+
+    const phone = formatPhone(String(guest.fields['Phone Number'] || ''));
+    // One-write guard: skip if an enquiry row for this phone already exists for
+    // this attempt (created at/after the guest's last activity — i.e. a terminal
+    // was already reached on that last message).
+    if (enquiries.some(e => e.fields['Phone Number'] === phone &&
+        Date.parse(e.fields['Created At']) >= Date.parse(lastInbound) - 60000)) continue;
+
+    // Recover the property from the guest's pending Enquiry booking → room.
+    const pending = (await airtableGetBookingsByGuestId(guest.id, 'Enquiry'))[0] || null;
+    const roomId = pending && (pending.fields['Room'] || [])[0];
+    const room = roomId ? (await airtableGet('WS_Rooms', `RECORD_ID() = '${roomId}'`))[0] : null;
+    const propId = room && (room.fields['Property'] || [])[0];
+    const property = propId ? (await airtableGet('WS_Properties', `RECORD_ID() = '${propId}'`))[0] : null;
+    if (!property) continue; // cannot scope without a property — leave for a later run
+
+    await logEnquiry(property, phone, 'Abandoned', {
+      checkInIso: pending && pending.fields['Check In'],
+      checkOutIso: pending && pending.fields['Check Out'],
+      bookingType: pending && pending.fields['Booking Type']
+    });
+    logToAxiom('info', 'enquiry_abandoned', { phone, guestId: guest.id, sessionState: guest.fields['Session State'] });
+    summary.abandoned++;
+  }
+  return summary;
+}
+
 async function autoCheckoutHandler(req, res) {
   try {
     const summary = await runAutoCheckout();
-    res.status(200).json({ ok: true, ...summary });
+    // B19: reuse this cron for the enquiry-abandonment staleness sweep.
+    const enquiry = await runEnquiryAbandonment();
+    res.status(200).json({ ok: true, ...summary, ...enquiry });
   } catch (err) {
     console.error('[AUTO-CHECKOUT FATAL]', err.message, err.stack);
     logToAxiom('error', 'auto_checkout_fatal', { message: err.message, stack: err.stack });
@@ -1844,3 +1972,5 @@ module.exports.autoCheckoutHandler = autoCheckoutHandler;
 module.exports.runOwnerSummary = runOwnerSummary;
 module.exports.ownerSummaryHandler = ownerSummaryHandler;
 module.exports.aggregateOwnerSummary = aggregateOwnerSummary;
+// B19: enquiry-abandonment staleness sweep (injected `now` for timing tests).
+module.exports.runEnquiryAbandonment = runEnquiryAbandonment;
