@@ -1,0 +1,33 @@
+{
+  "name": "precedence: Eric (cleaner AND active guest) replying '2' in a numbered guest menu drives his booking, not a room clean (B11.5)",
+  "comment": "Eric's number (27825999279) is both a registered cleaner and an active guest with a pending numbered menu (CONFIRMED expects 1=gate / 2=cancel). '2' is also Room 02's number. Before B11.5 the cleaner-naming global '*' transition preempted routing and marked Room 02 clean. Now the guest-side expectation wins: the booking is cancelled and Room 02 is untouched (exactly two writes, neither on WS_Rooms). This is the ambiguous case — both a pending guest menu AND a matching cleaning room — decided in favour of the guest state machine. (b11 has no hourly flow; CONFIRMED's numbered menu is the numbered guest state that exists here — the fix is read from states.json and generalises to the hourly duration / occupancy menus once B9/F19 merge.) Mutation target #1.",
+  "seed": {
+    "WS_Properties": [
+      { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222" } }
+    ],
+    "WS_Guests": [
+      { "id": "recGE", "fields": { "Guest Name": "Eric", "Phone Number": "27825999279", "Session State": "CONFIRMED" } }
+    ],
+    "WS_Bookings": [
+      { "id": "recBE", "fields": { "Guest": ["recGE"], "Status": "Confirmed", "Room": ["recR1"] } }
+    ],
+    "WS_Rooms": [
+      { "id": "recR1", "fields": { "Room Name": "Room 01", "Room Number": 1, "Status": "Occupied", "Property": ["recP1"] } },
+      { "id": "recR2", "fields": { "Room Name": "Room 02", "Room Number": 2, "Status": "Cleaning", "Property": ["recP1"] } }
+    ],
+    "WS_Cleaners": [
+      { "id": "recCE", "fields": { "Cleaner Name": "Eric", "Phone Number": "27825999279", "Active": true, "Assigned Property": ["recP1"] } }
+    ]
+  },
+  "message": { "from": "27825999279", "text": "2" },
+  "expect": {
+    "status": 200,
+    "writes": [
+      { "op": "update", "table": "WS_Bookings", "id": "recBE", "fields": { "Status": "Cancelled" } },
+      { "op": "update", "table": "WS_Guests", "id": "recGE", "fields": { "Session State": "NEW" } }
+    ],
+    "sends": [
+      { "to": "27825999279", "includes": ["booking has been cancelled"] }
+    ]
+  }
+}

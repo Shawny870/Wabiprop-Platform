@@ -392,6 +392,24 @@ function roomMatchesText(room, text) {
   return false;
 }
 
+// B11.5: does the sender's current guest-side state have a PENDING numbered
+// expectation matching this exact reply? True when their Session State is a real
+// (non-NEW) state with an explicit, non-"*" transition whose inputs include the
+// text. A bare number ("2") is both a duration/menu choice AND a room number, so
+// a phone that is both a registered cleaner and an active guest (Eric,
+// 27825999279) would otherwise have "2" preempted by the cleaner-naming global
+// and mark a room clean instead of driving their own booking. Read purely from
+// states.json, so it stays correct as new numbered menus are added (occupancy,
+// hourly duration) without touching this function.
+function guestStateExpectsInput(guest, text) {
+  if (!guest) return false;
+  const state = guest.fields['Session State'];
+  if (!state || state === 'NEW') return false;
+  const rows = STATES.states[state];
+  if (!rows) return false;
+  return rows.some(t => t.inputs !== '*' && t.inputs.includes(text));
+}
+
 const guards = {
   async senderIsCleaner(ctx) {
     const cleanerRecords = await airtableGet('WS_Cleaners', `{Phone Number} = '${ctx.phone}'`);
@@ -405,6 +423,11 @@ const guards = {
   // before the extra WS_Rooms lookup, so non-cleaner traffic only pays for one
   // Airtable call, same as it would if this guard didn't exist.
   async senderIsCleanerNamingRoom(ctx) {
+    // B11.5 precedence: if the sender has a pending guest-side numbered
+    // expectation for this exact reply, the guest state machine wins — this
+    // global must not preempt it. Targeted addition only; the rest of the guard
+    // (which behaves correctly for genuine cleaner room-naming) is unchanged.
+    if (guestStateExpectsInput(ctx.guest, ctx.text)) return false;
     const cleanerRecords = await airtableGet('WS_Cleaners', `{Phone Number} = '${ctx.phone}'`);
     if (cleanerRecords.length === 0) return false;
     const cleaningRooms = await airtableGet('WS_Rooms', `{Status} = 'Cleaning'`);
