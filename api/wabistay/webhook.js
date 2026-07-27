@@ -24,19 +24,34 @@ const AXIOM_TOKEN = process.env.AXIOM_TOKEN;
 // ─── AIRTABLE HELPERS ───────────────────────────────────────────────────────
 
 async function airtableGet(table, filterFormula) {
-  const url = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(table)}?filterByFormula=${encodeURIComponent(filterFormula)}`;
+  // B10.5 BUG 1: Airtable's list API returns at most 100 records per response and
+  // signals "there is more" with an `offset` token in the body. A single fetch
+  // therefore SILENTLY truncates past 100 rows — no error, just a short list — and
+  // any caller that treats the result as the complete set (e.g. logEnquiry's
+  // dedup guard) breaks once the table grows. Loop on `offset`, accumulating every
+  // page, until the response has no `offset`, so callers genuinely get everything.
+  const base = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(table)}?filterByFormula=${encodeURIComponent(filterFormula)}`;
   console.log(`[Airtable GET] ${table} | ${filterFormula}`);
-  const res = await fetch(url, {
-    headers: { Authorization: `Bearer ${AIRTABLE_API_KEY}` }
-  });
-  // F6: log HTTP status so we can see 401/403/404 in logs
-  console.log(`[Airtable GET STATUS] ${table} | HTTP ${res.status}`);
-  const data = await res.json();
-  if (data.error) {
-    console.error(`[Airtable ERROR] ${table}:`, JSON.stringify(data.error));
-    logToAxiom('error', 'airtable_get_error', { table, filterFormula, status: res.status, error: JSON.stringify(data.error) });
-  }
-  return data.records || [];
+  const records = [];
+  let offset;
+  let page = 0;
+  do {
+    const url = offset ? `${base}&offset=${encodeURIComponent(offset)}` : base;
+    const res = await fetch(url, {
+      headers: { Authorization: `Bearer ${AIRTABLE_API_KEY}` }
+    });
+    // F6: log HTTP status so we can see 401/403/404 in logs
+    console.log(`[Airtable GET STATUS] ${table} | HTTP ${res.status} | page ${++page}`);
+    const data = await res.json();
+    if (data.error) {
+      console.error(`[Airtable ERROR] ${table}:`, JSON.stringify(data.error));
+      logToAxiom('error', 'airtable_get_error', { table, filterFormula, status: res.status, error: JSON.stringify(data.error) });
+      break;
+    }
+    if (data.records) records.push(...data.records);
+    offset = data.offset; // Airtable omits this once the last page is returned
+  } while (offset);
+  return records;
 }
 
 async function airtableCreate(table, fields) {

@@ -111,6 +111,38 @@ test('B19: the sweep does NOT double-log a guest who already reached a terminal 
   assert.strictEqual(enquiries(ctx).length, 1);   // still just the seeded row
 });
 
+test('B10.5 BUG 1: with 120+ existing enquiry rows, completing a booking still writes exactly ONE Booked row (pagination)', async () => {
+  // Realistic filler rows so the test guest's just-created Booked row lands past
+  // Airtable's 100-record first page. Distinct phones so they never collide with
+  // the test guest. Without offset pagination in airtableGet, recordEta's dedup
+  // guard reads only the first 100, misses the booking's own Booked row (created
+  // at ~position 120), and double-logs. With pagination it sees all of them.
+  const fillers = Array.from({ length: 120 }, (_, i) => ({
+    id: `recFILL${String(i).padStart(3, '0')}`,
+    fields: {
+      'Phone Number': `2782${String(1000000 + i)}`,
+      'Property': ['recP1'],
+      'Outcome': ['Booked', 'No Availability', 'Invalid Input', 'Abandoned'][i % 4],
+      'Booking Type': i % 3 === 0 ? 'Hourly' : 'Overnight',
+      'Created At': new Date(Date.now() - i * 3600000).toISOString(),
+      ...(i % 4 === 0 ? { 'Booking': [`recBK${i}`] } : {})
+    }
+  }));
+  const ctx = makeCtx({
+    WS_Properties: [property], WS_Rooms: [room], WS_Rates: rates,
+    WS_Guests: [{ id: 'recG1', fields: { 'Guest Name': 'Unknown', 'Phone Number': FROM, 'Session State': 'AWAITING_DETAILS' } }],
+    WS_Bookings: [], WS_Cleaners: [], WS_Enquiries: fillers
+  });
+
+  await send(FROM, 'John Smith\n1 Dec 2026\n3 Dec 2026'); // collectDetails → Booked
+  await send(FROM, '1');                                   // occupancy
+  await send(FROM, 'around 5pm');                          // recordEta → Booked re-affirm (must dedup)
+
+  const mine = enquiries(ctx).filter(e => e.fields['Phone Number'] === FROM);
+  assert.strictEqual(mine.length, 1);                      // exactly one, not two
+  assert.strictEqual(mine[0].fields['Outcome'], 'Booked');
+});
+
 test('B19: the sweep leaves a still-active (recent) draft guest alone', async () => {
   const now = new Date('2026-07-22T12:00:00.000Z');
   const recent = new Date(now.getTime() - 60 * 60 * 1000).toISOString(); // 1h ago

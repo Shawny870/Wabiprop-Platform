@@ -1,6 +1,8 @@
 # FIXLOG.md — Wabistay
 One entry per fix, F-numbering continuous. Every fix gets a replay fixture in `fixtures/` so it can never regress silently.
 
+- F27 — B10.5 BUG 1: `airtableGet` pagination. The helper did a single `fetch` and returned `data.records`, but Airtable's list API caps a response at 100 records and signals more via an `offset` token — so past 100 rows it silently truncated (no error). `logEnquiry`'s dedup guard then read a short list, missed the booking's own row, and every completed overnight booking double-logged (Booked reached at both `collectDetails` and `recordEta`), inflating revenue and turned-away counts. Fix: loop on `offset`, accumulating every page until the response has none. Verified past the boundary — the mock harness now mirrors Airtable's 100-record paging, and `test/enquiry.test.js` seeds 120+ realistic `WS_Enquiries` rows then completes a booking and asserts exactly one Booked row; that test passes with the loop and fails without it, while every sub-100 test stays green (the bug is invisible under 100). The fix corrects **every** `airtableGet` call site at once; the PR's audit lists each as bounded or unbounded-in-size, flagging `WS_Enquiries` `''` (logEnquiry/sweep) and the B17 all-non-cancelled-bookings query as the ones that fetch large/growing sets and should gain server-side filters (follow-up, not this commit). **Note: live-base verification against 100+ real rows is a CEO device-test — `WS_Enquiries` does not exist in `appgtVqX1dK88lpRT` yet (Shawn creates it), so it currently holds zero rows.**
+
 Backfilled from the `api/wabistay/webhook.js` header (WS1 build):
 
 - F1 — Body parse guard added (req.body undefined protection)

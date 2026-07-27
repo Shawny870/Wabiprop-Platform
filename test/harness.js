@@ -124,7 +124,20 @@ function installFetch(ctx) {
       const table = decodeURIComponent(parts[2]);
       const recId = parts[3];
       if (method === 'GET') {
-        return jsonRes({ records: ctx.airtable.list(table, u.searchParams.get('filterByFormula')) });
+        // B10.5 BUG 1: mirror Airtable's real paging so the offset loop in
+        // airtableGet is actually exercised. The live API returns at most 100
+        // records per response and includes an opaque `offset` token when more
+        // remain; here the token is a numeric cursor. Below 100 rows this returns
+        // everything in one page with no offset — identical to the old behaviour,
+        // so existing fixtures are unaffected.
+        const PAGE_SIZE = 100;
+        const all = ctx.airtable.list(table, u.searchParams.get('filterByFormula'));
+        const cursor = Number(u.searchParams.get('offset')) || 0;
+        const pageRecords = all.slice(cursor, cursor + PAGE_SIZE);
+        const nextCursor = cursor + PAGE_SIZE < all.length ? String(cursor + PAGE_SIZE) : undefined;
+        const body = { records: pageRecords };
+        if (nextCursor) body.offset = nextCursor;
+        return jsonRes(body);
       }
       if (method === 'POST') {
         const rec = ctx.airtable.create(table, JSON.parse(opts.body).fields);
