@@ -15,7 +15,7 @@
       { "id": "recR1", "fields": { "Room Name": "Room 1", "Status": "Occupied" } }
     ],
     "WS_Cleaners": [
-      { "id": "recC1", "fields": { "Cleaner Name": "Thandi", "Phone Number": "27821110000", "Active": true } }
+      { "id": "recC1", "fields": { "Cleaner Name": "Thandi", "Phone Number": "27821110000", "Active": true, "Assigned Property": ["recP1"] } }
     ]
   },
   "message": { "from": "27821234567", "text": "1" },

@@ -111,6 +111,32 @@ async function airtableGetBookingsByGuestId(guestId, status) {
   });
 }
 
+// B10.5 Bug 2 — property scoping for cleaner dispatch.
+//
+// Scope is resolved from the booking's own `WS_Property` link (persisted at
+// check-in), NOT from a Booking→Room→Property walk and not from request-scoped
+// state, so the manual and auto checkout paths share one source of truth.
+//
+// Scoping is by property RECORD ID, never by name — names collide and change.
+// Airtable's filterByFormula matches a linked-record field on its primary
+// display value rather than the record id, so there is no id-safe formula here;
+// the correct route is to fetch the active cleaners and filter on the link array
+// in code. Same reasoning as airtableGetBookingsByGuestId above.
+//
+// Fails CLOSED: an unresolvable property dispatches nobody. The bug being fixed
+// is dispatching to everybody, so a silent no-op is the safe direction of error.
+function bookingPropertyId(booking, fallbackPropertyId) {
+  const linked = booking && (booking.fields['WS_Property'] || [])[0];
+  return linked || fallbackPropertyId || null;
+}
+
+async function activeCleanersForProperty(propertyId) {
+  // F4: was {Active} = 1 — Airtable checkbox requires TRUE()
+  const activeCleaners = await airtableGet('WS_Cleaners', `{Active} = TRUE()`);
+  if (!propertyId) return [];
+  return activeCleaners.filter(c => (c.fields['Assigned Property'] || []).includes(propertyId));
+}
+
 // ─── WHATSAPP HELPER ────────────────────────────────────────────────────────
 
 async function sendWhatsApp(to, message) {
@@ -1277,6 +1303,11 @@ const actions = {
         'Checked In At': new Date().toISOString()
       };
       if (assignedRoomId) bookingUpdate['Room'] = [assignedRoomId];
+      // B10.5 Bug 2: persist the property on the booking. Check-in is where the
+      // property is first known for certain (ctx.property is already resolved
+      // from the inbound phone_number_id), so both checkout paths can scope off
+      // the record instead of re-deriving it. Single-record link → one-element array.
+      bookingUpdate['WS_Property'] = [ctx.property.id];
       await airtableUpdate('WS_Bookings', booking.id, bookingUpdate);
     }
 
@@ -1335,8 +1366,12 @@ const actions = {
     // F5: was FIND/ARRAYJOIN
     const bookings = await airtableGetBookingsByGuestId(ctx.guest.id, 'Checked In');
     let roomName = 'your room';
+    // B10.5 Bug 2: ctx.property is the fallback only — the booking's own
+    // WS_Property wins when present (bookings checked in before this fix have none).
+    let scopePropertyId = ctx.property.id;
     if (bookings.length > 0) {
       const booking = bookings[0];
+      scopePropertyId = bookingPropertyId(booking, ctx.property.id);
       await airtableUpdate('WS_Bookings', booking.id, {
         'Status': 'Checked Out',
         'Checkout Confirmed': true
@@ -1357,8 +1392,9 @@ const actions = {
         }
       }
     }
-    // F4: was {Active} = 1
-    const cleaners = await airtableGet('WS_Cleaners', `{Active} = TRUE()`);
+    // B10.5 Bug 2: was `{Active} = TRUE()` — unscoped, so every active cleaner in
+    // the base was dispatched regardless of property. Now scoped to this booking's property.
+    const cleaners = await activeCleanersForProperty(scopePropertyId);
     // DIAG (temporary — cleaner-notify send path instrumentation, remove once resolved):
     console.log(`[Cleaner Dispatch DIAG] cleaner count: ${cleaners.length} | raw phone fields:`, JSON.stringify(cleaners.map(c => c.fields['Phone Number'])));
     for (const cleaner of cleaners) {
@@ -1450,7 +1486,9 @@ const actions = {
 // so both routes leave identical state. Kept as its own function rather than
 // refactoring `checkout` (frozen by fixtures 10/43) — a unifying refactor is its
 // own session per CLAUDE.md.
-async function settleAutoCheckout(booking, room, guest, propertyName) {
+// B10.5 Bug 2: `propertyId` is the caller's room-walk result, used only as a
+// fallback for bookings checked in before WS_Property was persisted.
+async function settleAutoCheckout(booking, room, guest, propertyName, propertyId) {
   await airtableUpdate('WS_Bookings', booking.id, {
     'Status': 'Checked Out',
     'Checkout Confirmed': true
@@ -1461,7 +1499,9 @@ async function settleAutoCheckout(booking, room, guest, propertyName) {
     await airtableUpdate('WS_Rooms', room.id, { 'Status': 'Cleaning' });
     await airtableUpdate('WS_Rooms', room.id, { 'Cleaning Started At': new Date().toISOString() });
   }
-  const cleaners = await airtableGet('WS_Cleaners', `{Active} = TRUE()`);
+  // B10.5 Bug 2: was `{Active} = TRUE()` — identical unscoped query to the manual
+  // path. Both now scope off the booking's WS_Property via the same helper.
+  const cleaners = await activeCleanersForProperty(bookingPropertyId(booking, propertyId));
   for (const cleaner of cleaners) {
     const cleanerPhone = cleaner.fields['Phone Number'];
     if (cleanerPhone) {
@@ -1512,7 +1552,9 @@ async function runAutoCheckout(now = new Date()) {
     }
     if (nowMs >= Date.parse(warnedAt) + AUTO_CHECKOUT_GRACE_MS) {
       // Grace elapsed, no extension, no manual checkout → auto-checkout.
-      await settleAutoCheckout(booking, room, guest, propertyName);
+      // B10.5 Bug 2: the room walk above stays — it feeds `propertyName` into the
+      // guest copy. `propId` is passed only as the legacy-booking scoping fallback.
+      await settleAutoCheckout(booking, room, guest, propertyName, propId);
       logToAxiom('info', 'auto_checkout_fired', { bookingId: booking.id, phone: guestPhone || null });
       summary.autoCheckouts++;
     }

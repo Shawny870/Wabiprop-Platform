@@ -166,6 +166,13 @@
         "Checked In At": {
           "id": "fldjFVJkr3n9lMbkj",
           "type": "dateTime"
+        },
+        "WS_Property": {
+          "id": "fld33emj2xY6kbBrJ",
+          "type": "multipleRecordLinks",
+          "linkedTable": "WS_Properties",
+          "prefersSingleRecordLink": true,
+          "comment": "B10.5 Bug 2: property persisted on the booking at check-in; both checkout paths scope cleaner dispatch off this."
         }
       }
     },
@@ -232,6 +239,13 @@
         "Notes": {
           "id": "fldlOPboO0Fg2QWAV",
           "type": "multilineText"
+        },
+        "Assigned Property": {
+          "id": "fldWzTeMsoG1og0z0",
+          "type": "multipleRecordLinks",
+          "linkedTable": "WS_Properties",
+          "prefersSingleRecordLink": false,
+          "comment": "B10.5 Bug 2: confirmed live via meta API. Cleaner dispatch filters on membership of this link array, by property record id."
         }
       }
     },

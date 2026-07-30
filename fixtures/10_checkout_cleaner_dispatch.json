@@ -14,8 +14,8 @@
       { "id": "recR1", "fields": { "Room Name": "Room 1", "Status": "Occupied" } }
     ],
     "WS_Cleaners": [
-      { "id": "recC1", "fields": { "Cleaner Name": "Thandi", "Phone Number": "0821110000", "Active": true } },
-      { "id": "recC2", "fields": { "Cleaner Name": "Retired Cleaner", "Phone Number": "0829999999", "Active": false } }
+      { "id": "recC1", "fields": { "Cleaner Name": "Thandi", "Phone Number": "0821110000", "Active": true, "Assigned Property": ["recP1"] } },
+      { "id": "recC2", "fields": { "Cleaner Name": "Retired Cleaner", "Phone Number": "0829999999", "Active": false, "Assigned Property": ["recP1"] } }
     ]
   },
   "message": { "from": "27821234567", "text": "1" },
