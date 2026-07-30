@@ -71,6 +71,7 @@
             "recR1"
           ],
           "Booking Ref": "re:^WS-[A-Z0-9]{6}$",
+          "Status": "Confirmed",
           "Amount Due": 120
         }
       },
