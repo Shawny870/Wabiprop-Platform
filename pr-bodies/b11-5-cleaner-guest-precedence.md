@@ -49,3 +49,17 @@ Inverting the precedence check (`if (!guestStateExpectsInput(...))`) fails **bot
 ## FIXLOG numbering
 This branch's FIXLOG jumps F18 → F25 because F19–F24 are Chain A, which merges
 first per the sprint merge order; the numbering is continuous once Chain A is in.
+
+---
+
+## Rebase note — B10.5 Bug 2 supersession
+
+This branch originally stacked on `feature/b11-cleaner-property-link`. It is now rebased onto `fix/b10-5-bug2-property-scoping`, and B11's scoping commit (`11dbbc4`) is **dropped as superseded in full**.
+
+B11's entire diff was manual-path cleaner scoping via `WS_Cleaners.Assigned Property`, filtered on request-scoped `ctx.property.id`. The Bug 2 fix replaces that with scoping off the booking's own `WS_Property` — a better source, and applied to the auto-checkout path as well, which B11 never covered. Leaving both in would have produced two scoping sources for one query, the split-source inconsistency decision (c) exists to prevent.
+
+Nothing in B11.5 depended on the dropped hunk: `guestStateExpectsInput` reads `states.json` and touches routing precedence, not cleaner dispatch. Verified by a full suite run on the rebased branch rather than by inspection — the failure mode being checked for is a dangling reference, which only a green run rules out.
+
+**Suite on the rebased branch: 130 passing.** The one failure (`router: message on 1157302750805659 …`) is pre-existing on trunk, unrelated, and fails identically on unmodified `main`.
+
+`fixtures/43` from B11 is superseded by `fixtures/61`, which additionally leaves its room without a Property link and so also catches a room-walk regression.
