@@ -1,0 +1,29 @@
+{
+  "name": "precedence: Eric replying '2' with NO pending guest expectation still resolves as cleaner room-naming (B11.5, unchanged path)",
+  "comment": "The other direction, and mutation target #2. Eric is a registered cleaner with a guest Session State of NEW — no pending numbered menu. Replying '2' with Room 02 in Cleaning correctly resolves as cleaner input (marks Room 02 clean), exactly as before B11.5. This proves the precedence fix is targeted: it declines to preempt only when there IS a competing guest expectation, and leaves genuine cleaner room-naming untouched.",
+  "seed": {
+    "WS_Properties": [
+      { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222" } }
+    ],
+    "WS_Guests": [
+      { "id": "recGE", "fields": { "Guest Name": "Eric", "Phone Number": "27825999279", "Session State": "NEW" } }
+    ],
+    "WS_Rooms": [
+      { "id": "recR2", "fields": { "Room Name": "Room 02", "Room Number": 2, "Status": "Cleaning", "Property": ["recP1"] } }
+    ],
+    "WS_Cleaners": [
+      { "id": "recCE", "fields": { "Cleaner Name": "Eric", "Phone Number": "27825999279", "Active": true, "Assigned Property": ["recP1"] } }
+    ]
+  },
+  "message": { "from": "27825999279", "text": "2" },
+  "expect": {
+    "status": 200,
+    "writes": [
+      { "op": "update", "table": "WS_Rooms", "id": "recR2", "fields": { "Status": "Available" } }
+    ],
+    "sends": [
+      { "to": "27825999279", "includes": ["Room 02 is marked as clean"] },
+      { "to": "27830000001", "includes": ["Room 02 has been cleaned"] }
+    ]
+  }
+}

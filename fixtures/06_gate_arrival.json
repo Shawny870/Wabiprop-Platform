@@ -21,7 +21,7 @@
     "status": 200,
     "writes": [
       { "op": "update", "table": "WS_Rooms", "id": "recR1", "fields": { "Status": "Occupied" } },
-      { "op": "update", "table": "WS_Bookings", "id": "recB1", "fields": { "Status": "Checked In", "Checked In At": "re:^\\d{4}-\\d{2}-\\d{2}T", "Room": ["recR1"] } },
+      { "op": "update", "table": "WS_Bookings", "id": "recB1", "fields": { "Status": "Checked In", "Checked In At": "re:^\\d{4}-\\d{2}-\\d{2}T", "Room": ["recR1"], "WS_Property": ["recP1"] } },
       { "op": "update", "table": "WS_Guests", "id": "recG1", "fields": { "Session State": "CHECKED_IN" } }
     ],
     "sends": [

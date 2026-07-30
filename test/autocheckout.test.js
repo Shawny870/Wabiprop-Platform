@@ -71,7 +71,8 @@ test('B12: warned ≥15 min ago, no guest response → auto-checkout fires (same
   const ctx = setup({
     WS_Bookings: [booking({ 'Check Out': minsBefore(20), 'Checkout Warning Sent At': minsBefore(16) })],
     WS_Guests: [guest], WS_Rooms: [room], WS_Properties: [property],
-    WS_Cleaners: [{ id: 'recC1', fields: { 'Cleaner Name': 'Thandi', 'Phone Number': '0821110000', 'Active': true } }]
+    // B10.5 Bug 2: cleaners are property-scoped now, so the seed must assign one.
+    WS_Cleaners: [{ id: 'recC1', fields: { 'Cleaner Name': 'Thandi', 'Phone Number': '0821110000', 'Active': true, 'Assigned Property': ['recP1'] } }]
   });
   const summary = await wh.runAutoCheckout(NOW);
   assert.deepStrictEqual(summary, { warnings: 0, autoCheckouts: 1 });
@@ -109,6 +110,66 @@ test('B12: hourly bookings are handled the same as overnight', async () => {
   const summary = await wh.runAutoCheckout(NOW);
   assert.deepStrictEqual(summary, { warnings: 0, autoCheckouts: 1 });
   assert.strictEqual(ctx.airtable.log[0].fields['Status'], 'Checked Out');
+});
+
+// ─── B10.5 Bug 2 — auto-checkout property scoping ────────────────────────────
+// Mirrors fixtures/61 (the manual path) for the cron. Two properties, each with
+// an Active cleaner, plus an Active-but-unassigned cleaner: all three are Active,
+// so the {Active} filter cannot be what excludes anyone — only property scoping
+// can. The assertions prove EXCLUSION (exact send count, and property B's number
+// never appears), not merely that property A's cleaner was included.
+test('B10.5 Bug 2: auto-checkout dispatches ONLY the cleaner at the booking WS_Property — property B is untouched', async () => {
+  const ctx = setup({
+    // Scope must come from the booking's own WS_Property. recR1 carries a
+    // Property link only because runAutoCheckout's room walk needs it for the
+    // guest copy — the cleaner query does not read it.
+    WS_Bookings: [booking({ 'Check Out': minsBefore(20), 'Checkout Warning Sent At': minsBefore(16), 'WS_Property': ['recP1'] })],
+    WS_Guests: [guest], WS_Rooms: [room],
+    WS_Properties: [property, { id: 'recP2', fields: { 'Property Name': 'Second Lodge' } }],
+    WS_Cleaners: [
+      { id: 'recC1', fields: { 'Cleaner Name': 'Thandi', 'Phone Number': '0821110000', 'Active': true, 'Assigned Property': ['recP1'] } },
+      { id: 'recC2', fields: { 'Cleaner Name': 'Bongani', 'Phone Number': '0822220000', 'Active': true, 'Assigned Property': ['recP2'] } },
+      { id: 'recC3', fields: { 'Cleaner Name': 'Sipho', 'Phone Number': '0823330000', 'Active': true } }
+    ]
+  });
+  const summary = await wh.runAutoCheckout(NOW);
+  assert.deepStrictEqual(summary, { warnings: 0, autoCheckouts: 1 });
+
+  // Exactly two sends: property A's cleaner, then the guest. Unscoped dispatch
+  // would make this four.
+  assert.strictEqual(ctx.sends.length, 2,
+    `send count — actual: ${JSON.stringify(ctx.sends.map(s => s.to))}`);
+  assert.strictEqual(ctx.sends[0].to, '27821110000');
+  assert.match(ctx.sends[0].body, /Hi Thandi/);
+  assert.strictEqual(ctx.sends[1].to, '27821234567');
+
+  // Explicit exclusion: property B's cleaner and the unassigned cleaner are
+  // never messaged, by number and by name.
+  const recipients = ctx.sends.map(s => s.to);
+  assert.ok(!recipients.includes('27822220000'), 'property B cleaner must NOT be notified');
+  assert.ok(!recipients.includes('27823330000'), 'unassigned cleaner must NOT be notified');
+  const bodies = ctx.sends.map(s => s.body).join('\n');
+  assert.ok(!bodies.includes('Bongani'), 'property B cleaner name must not appear in any send');
+  assert.ok(!bodies.includes('Sipho'), 'unassigned cleaner name must not appear in any send');
+});
+
+test('B10.5 Bug 2: auto-checkout fails CLOSED — a booking with no resolvable property dispatches nobody', async () => {
+  const ctx = setup({
+    // No WS_Property on the booking and no Property link on the room: nothing to
+    // scope by. The pre-fix behaviour messaged every active cleaner in the base.
+    WS_Bookings: [booking({ 'Check Out': minsBefore(20), 'Checkout Warning Sent At': minsBefore(16) })],
+    WS_Guests: [guest],
+    WS_Rooms: [{ id: 'recR1', fields: { 'Room Name': 'Room 1', 'Status': 'Occupied' } }],
+    WS_Properties: [property],
+    WS_Cleaners: [
+      { id: 'recC1', fields: { 'Cleaner Name': 'Thandi', 'Phone Number': '0821110000', 'Active': true, 'Assigned Property': ['recP1'] } }
+    ]
+  });
+  const summary = await wh.runAutoCheckout(NOW);
+  assert.deepStrictEqual(summary, { warnings: 0, autoCheckouts: 1 });
+  // The guest is still checked out and thanked; no cleaner is dispatched.
+  assert.strictEqual(ctx.sends.length, 1);
+  assert.strictEqual(ctx.sends[0].to, '27821234567');
 });
 
 test('B12: a date-less legacy Checked In row is ignored by the cron', async () => {
