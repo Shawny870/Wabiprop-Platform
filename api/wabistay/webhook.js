@@ -1186,6 +1186,16 @@ const actions = {
       'Check Out': checkOutIso,
       'Room': [room.id],
       'Booking Ref': bookingRef,
+      // The row was created as 'Enquiry' (a half-built hold) and this is the
+      // point it becomes a real booking — so it must reach 'Confirmed' here, the
+      // same status recordEta gives an overnight booking when its session moves
+      // to CONFIRMED. Leaving it 'Enquiry' broke the invariant that a CONFIRMED
+      // session has a Confirmed booking, and both `cancelBooking` and
+      // `gateArrival` query strictly on 'Confirmed': the guest was told their
+      // booking was cancelled while the row survived, still holding its room via
+      // BLOCKING_BOOKING_STATUSES, and an arriving guest matched no booking and
+      // fell through to the legacy first-available-room branch.
+      'Status': 'Confirmed',
       'Notes': `Short stay: ${durationText(choice)} from ${formatSastDateTime(checkInIso)}`,
       // Amount Due carries the price. Rate Applied is deliberately left empty:
       // it links to WS_Rates, and hourly prices live as WS_Properties fields,
