@@ -20,6 +20,18 @@ const WA_ACCESS_TOKEN = process.env.WA_ACCESS_TOKEN;
 const WA_VERIFY_TOKEN = process.env.WA_VERIFY_TOKEN;
 const OWNER_PHONE = process.env.OWNER_PHONE;
 const AXIOM_TOKEN = process.env.AXIOM_TOKEN;
+// Language code every Wabistay utility template is submitted under. Meta matches
+// a template on name + language, so this must equal the locale of the approved
+// template or the send is rejected as non-existent.
+const TEMPLATE_LANGUAGE_CODE = process.env.WA_TEMPLATE_LANGUAGE || 'en';
+
+// Meta utility template for the cleaner gate-arrival notification. FLAG: pending
+// Meta approval (Shawn submits). Read at CALL time, not here, so the notify path
+// is inert until the name is configured — see cleanerGateTemplate() below. An
+// unset value is the stub state, exactly like B17's owner summary.
+function cleanerGateTemplate() {
+  return process.env.WABISTAY_CLEANER_GATE_TEMPLATE || null;
+}
 
 // ─── AIRTABLE HELPERS ───────────────────────────────────────────────────────
 
@@ -137,6 +149,67 @@ async function activeCleanersForProperty(propertyId) {
   return activeCleaners.filter(c => (c.fields['Assigned Property'] || []).includes(propertyId));
 }
 
+// Gate arrival → tell the property's cleaner someone has arrived. Before this,
+// `gateArrival` told the guest "someone is on their way to open the gate" and
+// notified only `Notify Phone` (the owner) — no member of staff on the ground was
+// ever messaged, so the guest's promise was unbacked copy.
+//
+// Reuses the B10.5 Bug 2 scoping model unchanged: cleaners are filtered by the
+// booking's own property, so a second property's cleaner is never notified.
+// Deliberately notifies EVERY active cleaner assigned to this property, matching
+// the checkout dispatch — picking one would require on-duty/shift resolution,
+// which is explicitly deferred and NOT built here.
+//
+// Every exit path logs with `bookingId`, so "the cleaner was not notified for
+// booking X" is answerable from Axiom rather than inferred from silence.
+async function notifyCleanerOfArrival({ propertyId, bookingId, propertyName, guestName, roomName, guestPhone }) {
+  const correlation = { site: 'gate_arrival', bookingId, propertyId, guestPhone };
+  const cleaners = await activeCleanersForProperty(propertyId);
+
+  if (cleaners.length === 0) {
+    // Fails LOUD, not closed: unlike dispatch-to-everybody (Bug 2), notifying
+    // nobody at the gate is itself the bug being fixed, so it must be visible.
+    logToAxiom('warn', 'cleaner_gate_notify_no_cleaner', { ...correlation, reason: 'no active cleaner assigned to property' });
+    return;
+  }
+
+  const templateName = cleanerGateTemplate();
+
+  for (const cleaner of cleaners) {
+    const rawPhone = cleaner.fields['Phone Number'];
+    const cleanerName = cleaner.fields['Cleaner Name'] || 'there';
+    const perCleaner = { ...correlation, cleanerId: cleaner.id, cleanerName };
+
+    if (!rawPhone) {
+      logToAxiom('warn', 'cleaner_gate_notify_no_phone', { ...perCleaner, reason: 'cleaner record has no Phone Number' });
+      continue;
+    }
+    const to = formatPhone(rawPhone);
+    // Order is fixed by the approved template's {{1}}..{{4}} — see PR body.
+    const params = [cleanerName, guestName, roomName || 'an unassigned room', propertyName];
+
+    if (!templateName) {
+      // STUBBED until WABISTAY_CLEANER_GATE_TEMPLATE is approved and configured.
+      // Deliberately NOT a free-form sendWhatsApp fallback: outside the 24h window
+      // that 200s and vanishes, which is the invisible failure this fix exists to
+      // end. Logging the exact payload keeps resolution verifiable before approval.
+      logToAxiom('warn', 'cleaner_gate_notify_stubbed', {
+        ...perCleaner, to, params,
+        reason: 'WABISTAY_CLEANER_GATE_TEMPLATE not configured — template pending Meta approval'
+      });
+      continue;
+    }
+
+    const result = await sendWhatsAppTemplate(to, templateName, params, perCleaner);
+    if (!result.ok) {
+      logToAxiom('error', 'cleaner_gate_notify_failed', {
+        ...perCleaner, to, template: templateName,
+        error: JSON.stringify(result.error || null)
+      });
+    }
+  }
+}
+
 // ─── WHATSAPP HELPER ────────────────────────────────────────────────────────
 
 async function sendWhatsApp(to, message) {
@@ -162,6 +235,69 @@ async function sendWhatsApp(to, message) {
     logToAxiom('error', 'whatsapp_send_error', { to, status: res.status, error: JSON.stringify(data.error) });
   }
   return data;
+}
+
+// ─── WHATSAPP TEMPLATE HELPER ───────────────────────────────────────────────
+// Business-initiated sends (cleaner dispatch, gate arrival, owner summary) go to
+// a third party who has not messaged us, so they are outside Meta's 24-hour
+// customer-service window. Free-form text there is rejected (131047) — CLAUDE.md
+// line 30 — so those sends must be approved utility templates. This is the
+// shared surface for all three; it is deliberately NOT gate-specific.
+//
+// Returns { ok, wamid, error } rather than the raw body so callers can correlate
+// a failure back to the booking it belongs to. `meta` is merged into every Axiom
+// event, which is how "the cleaner was NOT notified for booking X" becomes a
+// queryable fact instead of a generic send error.
+//
+// The success log carries the wamid, which is the join key to B3's
+// `whatsapp_status_callback` events (they log `wamid` too) — so a template that
+// Meta accepts but never delivers is still traceable to its booking.
+async function sendWhatsAppTemplate(to, templateName, params = [], meta = {}) {
+  const { languageCode = TEMPLATE_LANGUAGE_CODE, ...correlation } = meta;
+  console.log(`[WhatsApp TEMPLATE SEND] to: ${to} | template: ${templateName} | params: ${JSON.stringify(params)}`);
+
+  const components = params.length > 0
+    ? [{ type: 'body', parameters: params.map(p => ({ type: 'text', text: String(p) })) }]
+    : [];
+
+  const res = await fetch(`https://graph.facebook.com/v25.0/${WA_PHONE_NUMBER_ID}/messages`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${WA_ACCESS_TOKEN}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      messaging_product: 'whatsapp',
+      to,
+      type: 'template',
+      template: {
+        name: templateName,
+        language: { code: languageCode },
+        components
+      }
+    })
+  });
+  console.log(`[WhatsApp TEMPLATE SEND STATUS] HTTP ${res.status}`);
+  const data = await res.json();
+
+  const wamid = (data && data.messages && data.messages[0] && data.messages[0].id) || null;
+  const ok = !data.error && res.status < 300;
+
+  if (!ok) {
+    console.error(`[WhatsApp TEMPLATE SEND ERROR]:`, JSON.stringify(data.error));
+    logToAxiom('error', 'whatsapp_template_send_error', {
+      to, template: templateName, status: res.status,
+      error: JSON.stringify(data.error || null),
+      // 131047 is the re-engagement rejection — the specific failure this helper
+      // exists to make visible. Surfaced as its own flag so it can be alerted on.
+      reEngagementRejected: !!(data.error && data.error.code === 131047),
+      ...correlation
+    });
+  } else {
+    logToAxiom('info', 'whatsapp_template_sent', { to, template: templateName, wamid, ...correlation });
+  }
+
+  return { ok, wamid, error: (data && data.error) || null };
 }
 
 // ─── FORMAT PHONE ────────────────────────────────────────────────────────────
@@ -1360,6 +1496,26 @@ const actions = {
       }));
     }
 
+    // Step 6b: notify the property's cleaner. IN ADDITION to the owner send
+    // above, never instead of it — the owner still gets `gateNotify` unchanged.
+    // Scoped by ctx.property.id, which IS this booking's WS_Property: Step 4 above
+    // writes `WS_Property: [ctx.property.id]` unconditionally, so the two agree by
+    // construction. Deliberately NOT bookingPropertyId(booking, ...) here — that
+    // reads the copy fetched at Step 2, BEFORE the Step 4 write, so a booking
+    // carrying a stale link from a previous check-in at another property would
+    // scope the cleaner to the old property while the record was updated to the
+    // new one. The checkout paths have no such authority (no inbound property is
+    // being written there) and correctly keep using bookingPropertyId.
+    const propertyNameForCleaner = ctx.property.fields['Property Name'];
+    await notifyCleanerOfArrival({
+      propertyId: ctx.property.id,
+      bookingId: booking ? booking.id : null,
+      propertyName: propertyNameForCleaner,
+      guestName: ctx.guest.fields['Guest Name'],
+      roomName: assignedRoomName,
+      guestPhone: ctx.phone
+    });
+
     // Step 7: tell guest
     const propertyName = ctx.property.fields['Property Name'];
     await sendWhatsApp(ctx.phone, assignedRoomName
@@ -1428,16 +1584,12 @@ const actions = {
     // B10.5 Bug 2: was `{Active} = TRUE()` — unscoped, so every active cleaner in
     // the base was dispatched regardless of property. Now scoped to this booking's property.
     const cleaners = await activeCleanersForProperty(scopePropertyId);
-    // DIAG (temporary — cleaner-notify send path instrumentation, remove once resolved):
-    console.log(`[Cleaner Dispatch DIAG] cleaner count: ${cleaners.length} | raw phone fields:`, JSON.stringify(cleaners.map(c => c.fields['Phone Number'])));
     for (const cleaner of cleaners) {
       const cleanerPhone = cleaner.fields['Phone Number'];
       const cleanerName = cleaner.fields['Cleaner Name'];
       if (cleanerPhone) {
         const formattedCleanerPhone = formatPhone(cleanerPhone);
-        console.log(`[Cleaner Dispatch DIAG] formatted phone about to be used: ${formattedCleanerPhone}`);
-        const sendResult = await sendWhatsApp(formattedCleanerPhone, msg('cleanerDispatch', { cleanerName, roomName }));
-        console.log(`[Cleaner Dispatch DIAG] raw sendWhatsApp return value:`, JSON.stringify(sendResult));
+        await sendWhatsApp(formattedCleanerPhone, msg('cleanerDispatch', { cleanerName, roomName }));
       }
     }
     await airtableUpdate('WS_Guests', ctx.guest.id, { 'Session State': ctx.next });
@@ -1773,10 +1925,12 @@ async function sendOwnerSummary(property, summary) {
   const payload = { ...summary, template: OWNER_SUMMARY_TEMPLATE, notifyPhone };
   logToAxiom('info', 'owner_summary_payload', payload);
 
-  // TODO(B17): once OWNER_SUMMARY_TEMPLATE is approved by Meta, send it here as a
-  // utility template (business-initiated, outside the 24h window — free-form text
-  // silently fails). This is the one-line swap:
-  //   await sendWhatsAppTemplate(notifyPhone, OWNER_SUMMARY_TEMPLATE, ownerSummaryTemplateParams(summary));
+  // TODO(B17): `sendWhatsAppTemplate` now EXISTS (see the WhatsApp template helper
+  // above) — the only thing still missing is Meta's approval of
+  // OWNER_SUMMARY_TEMPLATE. Once approved, this is the one-line swap:
+  //   await sendWhatsAppTemplate(notifyPhone, OWNER_SUMMARY_TEMPLATE, ownerSummaryTemplateParams(summary), { site: 'owner_summary', propertyId: property.id });
+  // Left stubbed here deliberately: enabling it is a separate, CEO-gated change,
+  // not a side effect of building the helper.
   // Deliberately NOT a free-form sendWhatsApp — that would 200-and-vanish.
 
   return payload;
