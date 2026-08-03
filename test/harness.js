@@ -151,7 +151,24 @@ function installFetch(ctx) {
 
     if (u.hostname === 'graph.facebook.com') {
       const body = JSON.parse(opts.body);
-      ctx.sends.push({ to: body.to, body: body.text.body });
+      if (body.type === 'template') {
+        // Template sends carry no free-form text. `body` is left as the rendered
+        // param list purely so the existing `includes` assertion still works on
+        // them; `template` and `params` are the precise assertions.
+        const params = ((body.template.components || [])
+          .find(c => c.type === 'body') || {}).parameters || [];
+        const paramTexts = params.map(p => p.text);
+        ctx.sends.push({
+          to: body.to,
+          type: 'template',
+          template: body.template.name,
+          language: body.template.language.code,
+          params: paramTexts,
+          body: paramTexts.join(' | ')
+        });
+      } else {
+        ctx.sends.push({ to: body.to, type: 'text', body: body.text.body });
+      }
       return jsonRes({ messages: [{ id: 'wamid.test' }] });
     }
 
@@ -231,7 +248,25 @@ async function runFixture(handler, fixture) {
   installFetch(ctx);
   const payload = fixture.payload || metaTextPayload(fixture.message.from, fixture.message.text);
   const res = makeRes();
-  await handler({ method: 'POST', body: payload }, res);
+
+  // `fixture.env` sets env vars for this fixture only, restored afterwards. Used
+  // by the cleaner gate-arrival template, which is read at call time precisely so
+  // its configured and stubbed states are both reachable from fixtures. Only
+  // works for env read lazily — a module-level `const` is already frozen by then.
+  const envOverrides = fixture.env || {};
+  const previous = {};
+  for (const [k, v] of Object.entries(envOverrides)) {
+    previous[k] = process.env[k];
+    process.env[k] = v;
+  }
+  try {
+    await handler({ method: 'POST', body: payload }, res);
+  } finally {
+    for (const [k, v] of Object.entries(previous)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
   return { ctx, res };
 }
 
@@ -253,6 +288,14 @@ function assertFixture(assert, expect, ctx, res) {
   expSends.forEach((exp, i) => {
     const got = ctx.sends[i];
     if (exp.to) assert.strictEqual(got.to, exp.to, `send[${i}].to`);
+    // Template assertions. `template` also pins the send TYPE: a fixture that
+    // expects a template must not be satisfied by a free-form text send to the
+    // same number — that distinction is the whole point of the 24h-window fix.
+    if (exp.template) {
+      assert.strictEqual(got.type, 'template', `send[${i}] expected a template send, got ${got.type}`);
+      assert.strictEqual(got.template, exp.template, `send[${i}].template`);
+    }
+    if (exp.params) assert.deepStrictEqual(got.params, exp.params, `send[${i}].params`);
     for (const sub of exp.includes || []) {
       assert.ok(got.body.includes(sub), `send[${i}] missing "${sub}" in: ${got.body}`);
     }
