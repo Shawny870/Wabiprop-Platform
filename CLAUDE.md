@@ -30,6 +30,7 @@ This file is read at the start of EVERY Claude Code session. If code and this co
 - Business-initiated sends (cleaner, owner, summaries) must use approved utility templates — free-form text silently fails outside the 24h window.
 - Changes touching message templates, pricing values, state machine, or POPIA/consent code: label PR `needs-decision` — Shawn reviews before merging.
 - Airtable is not transactional. After any room or record assignment, re-query to verify. On conflict, roll back and re-offer.
+- Rule 28: Builder never edits CLAUDE.md directly. Status updates go to FIXLOG.md. Contract changes require CEO/Design Engineer sign-off.
 
 ## Diagnostic protocol (3-lens rule — mandatory for every bug fix)
 When a flow is broken:
@@ -81,7 +82,4 @@ NO frameworks, NO TypeScript, NO ORMs, NO npm bloat. Deterministic state machine
 - BUG-08: "Questions? Reply" prompt has no inbound handler
 - BUG-09: WhatsApp profile displays "MyNumber" not "Wabiprop"
 - Dispatch layer defect: Wabistay messages routing through Wabiprop handler (current session priority)
-- ~~BUG-10~~ **RESOLVED 4 Aug 2026 (F31).** Was two layers of staleness, not one: the missing `WS_Properties` seed (6.4 `resolveProperty()` refusal path) *and* an "exactly one send" assertion predating B13's consent notice. Suite is 156/156.
-
-## Rule 25 (HMAC) — implementation status, read before relying on it
-Signature verification EXISTS as of F31 (`lib/hmac.js`, wired into `api/webhook.js`) but ships in **report-only mode by default**. Rule 25 is not enforced in production until `HMAC_MODE=enforce` is set in Vercel, and that must not be set until Axiom's `hmac_signature_check` event shows `reason: 'verified'` on live traffic. See `docs/env.md` for the two-step rollout and the failure mode that makes the order matter. Until then, treat the webhook as unauthenticated.
+- BUG-10: `test/router.dispatch.test.js`'s "dispatches to Wabistay handler cleanly" test has no `WS_Properties` seed row, so it now hits the 6.4 `resolveProperty()` refusal path instead of the real greeting — same fix pattern as the fixture `WS_Properties` seed sync done for all 14 fixtures after the 6.4 merge, just never applied to this one test.

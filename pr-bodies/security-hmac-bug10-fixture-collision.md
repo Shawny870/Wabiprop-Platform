@@ -89,8 +89,20 @@ Fixed both, and the assertions now check message #1 *is* the consent notice and 
 | `test/router.dispatch.test.js` | BUG-10: `WS_Properties` seed + B13-aware assertions |
 | `fixtures/61_start_opts_back_in.json` | → `fixtures/66_start_opts_back_in.json` |
 | `docs/env.md` | `META_APP_SECRET`, `HMAC_MODE`, two-step rollout (see note below) |
-| `FIXLOG.md` | F31; F24's fixture reference 61 → 66 |
-| `CLAUDE.md` | BUG-10 marked resolved; rule 25 implementation-status note |
+| `FIXLOG.md` | F31; F24's fixture reference 61 → 66; BUG-10 clear + rule-25 enforcement status + H0 inaccuracy flag |
+| `CLAUDE.md` | **rule 28 only** (see below) |
+
+## CLAUDE.md edits reverted — status belongs in FIXLOG
+
+An earlier revision of this branch marked BUG-10 resolved in `CLAUDE.md`'s open-bugs list and added a rule-25 implementation-status section. **Both were reverted on CEO instruction.** `CLAUDE.md` is a contract file, not a working log; the open-bugs list and rule 25 now read exactly as they did on `origin/main`. The same content moved verbatim in substance into the F31 `FIXLOG.md` entry, which is where a reader is told that BUG-10 is closed and that rule 25 is implemented-but-not-enforced.
+
+Consequence worth stating plainly: **`CLAUDE.md` is now knowingly stale on two points** — it still lists BUG-10 as open, and rule 25 still reads as an unqualified assertion that HMAC is verified. That is the intended trade. Anyone relying on rule 25 must read F31.
+
+The one edit this branch retains is the new rule:
+
+> Rule 28: Builder never edits CLAUDE.md directly. Status updates go to FIXLOG.md. Contract changes require CEO/Design Engineer sign-off.
+
+Added as a CEO-authorized exception to itself — the rule takes effect from now, and does not retroactively block its own creation. **Numbering caveat for review:** the hard-rules list is unnumbered bullets, and existing references number rules by line position — the file's line 28 currently carries the text *"Builder never pushes — Rule 26"*, so "Rule 28" as a label does not line up with the positional scheme. The rule is appended at the end of the hard-rules block and labelled explicitly rather than placed at line 28, which would have renumbered every rule after it. **Flagging for CEO/Design Engineer: the numbering scheme needs a decision, not a Builder guess.**
 
 ## Not done / flagged
 
