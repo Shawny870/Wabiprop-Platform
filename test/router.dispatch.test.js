@@ -36,8 +36,22 @@ function routerPayload(phoneNumberId, from, text) {
 test('router: message on 1157302750805659 (Wabistay cutover number) dispatches to Wabistay handler cleanly', async () => {
   const ctx = {
     airtable: new MockAirtable({
-      WS_Rooms: [{ id: 'recR1', fields: { 'Room Name': 'Room 1', Status: 'Available' } }],
-      WS_Rates: [{ id: 'recRATE1', fields: { 'Rate Name': 'Standard Overnight', 'Rate Type': 'Per Night', Amount: 350, Active: true } }],
+      // BUG-10 fix: this seed predates the 6.4 resolveProperty() gate. Without a
+      // WS_Properties row matching the inbound phone_number_id, resolveProperty
+      // returns null and the handler takes the "not configured yet" refusal path
+      // (fixture 15) instead of greeting — so the test asserted the greeting
+      // against a refusal and failed. Property Name must be the one the assertion
+      // below expects, and Phone Number ID must match the dispatched number.
+      WS_Properties: [{
+        id: 'recP1',
+        fields: {
+          'Property Name': 'Villa Liza Guest Lodge',
+          'Phone Number ID': '1157302750805659',
+          'Notify Phone': '27831112222'
+        }
+      }],
+      WS_Rooms: [{ id: 'recR1', fields: { 'Room Name': 'Room 1', Status: 'Available', Property: ['recP1'] } }],
+      WS_Rates: [{ id: 'recRATE1', fields: { 'Rate Name': 'Standard Overnight', 'Rate Type': 'Per Night', Amount: 350, Active: true, Property: ['recP1'] } }],
       WS_Guests: [],
       WS_Cleaners: []
     }),
@@ -50,9 +64,18 @@ test('router: message on 1157302750805659 (Wabistay cutover number) dispatches t
   await router({ method: 'POST', body: routerPayload('1157302750805659', '27821234567', 'Hi') }, res);
 
   assert.strictEqual(res.statusCode, 200, 'router returns 200');
-  assert.strictEqual(ctx.sends.length, 1, 'exactly one WhatsApp send — dispatched to Wabistay, not dropped or double-handled');
+  // BUG-10 fix, second layer: this assertion also predates B13 (POPIA consent).
+  // A genuinely new guest — no WS_Guests record — now receives the consent notice
+  // as message #1 and the greeting as #2, exactly as fixture 01 asserts. Two sends
+  // is the correct post-B13 behaviour; one would mean consent regressed.
+  assert.strictEqual(ctx.sends.length, 2, 'two sends — B13 consent notice then greeting; dispatched to Wabistay, not dropped or double-handled');
   assert.strictEqual(ctx.sends[0].to, '27821234567');
-  assert.ok(ctx.sends[0].body.includes('Welcome to Villa Liza Guest Lodge'), 'reply is the Wabistay greeting, confirming wabistayHandler ran');
+  assert.strictEqual(ctx.sends[1].to, '27821234567');
+  assert.ok(
+    ctx.sends[0].body.includes('we collect your name, number and stay dates'),
+    'message #1 is the B13 POPIA consent notice'
+  );
+  assert.ok(ctx.sends[1].body.includes('Welcome to Villa Liza Guest Lodge'), 'reply is the Wabistay greeting, confirming wabistayHandler ran');
   assert.strictEqual(
     ctx.airtable.log.filter(w => w.table === 'WS_Guests').length, 1,
     'WS_Guests record created — confirms Wabistay side effects actually ran, not just the reply text'

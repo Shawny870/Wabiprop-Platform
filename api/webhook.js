@@ -37,6 +37,9 @@ const WS_PHONE_NUMBER_ID_CONST = '1157302750805659';
 const wabipropHandler = require('./wabiprop/webhook');
 const wabistayHandler = require('./wabistay/webhook');
 
+// ─── B1: WEBHOOK SIGNATURE VERIFICATION ──────────────────────────────────────
+const { readRawBody, verifySignature } = require('../lib/hmac');
+
 // ─── AXIOM LOGGER ────────────────────────────────────────────────────────────
 
 function logToAxiom(level, event, detail = {}) {
@@ -119,8 +122,30 @@ module.exports = async function handler(req, res) {
   // ── POST — Inbound Message ──────────────────────────────────────────────────
   if (req.method === 'POST') {
 
+    // B1: signature verification runs BEFORE any handler logic, per CLAUDE.md
+    // rule 25. Reads the RAW bytes — Meta signs what it sent, and re-serialising
+    // req.body produces a different digest, so a "verified" re-serialised payload
+    // would be a lie. See lib/hmac.js for why this defaults to observe-and-report
+    // rather than a bare 403.
+    const { raw, body: rawParsedBody } = await readRawBody(req);
+    const verdict = verifySignature(req, raw);
+
+    logToAxiom(verdict.level || 'info', 'hmac_signature_check', {
+      mode: verdict.mode, ok: verdict.ok, reason: verdict.reason,
+      rejected: verdict.reject, hasRawBody: raw !== null && raw !== undefined
+    });
+
+    if (verdict.reject) {
+      // Only reachable in HMAC_MODE=enforce. 403 before anything reads the body.
+      console.error(`[Router HMAC] rejected: ${verdict.reason}`);
+      return res.status(403).send('Forbidden');
+    }
+
     // Body parse guard
-    let body = req.body;
+    // F1 unchanged, but the body may now come from readRawBody: when the Vercel
+    // body parser is disabled (which is what makes raw-byte verification possible)
+    // req.body is undefined and the parsed payload comes back from the stream read.
+    let body = req.body !== undefined ? req.body : rawParsedBody;
     if (!body) {
       console.error('[Router BODY] req.body undefined');
       return res.status(200).send('OK');
@@ -131,6 +156,12 @@ module.exports = async function handler(req, res) {
         return res.status(200).send('OK');
       }
     }
+
+    // B1: the router consumed the request stream to get the raw bytes, so a
+    // product handler downstream cannot read it again. Hand them the parsed body
+    // on req, which is exactly the shape they already expect — all six dispatch
+    // sites below forward `req` untouched, and none of them need to change.
+    req.body = body;
 
     // Receiving phone_number_id — determines which WABA/product this message belongs to
     const phoneNumberId = body?.entry?.[0]?.changes?.[0]?.value?.metadata?.phone_number_id;
@@ -249,3 +280,20 @@ module.exports = async function handler(req, res) {
 
   return res.status(405).send('Method Not Allowed');
 };
+
+// ─── B1: DISABLE VERCEL'S BODY PARSER ────────────────────────────────────────
+// Required for raw-byte signature verification: Meta signs the exact bytes it
+// sent, and once the parser has turned them into an object the original bytes
+// are gone for good. The handler reads the stream itself (lib/hmac.js
+// readRawBody) and re-attaches the parsed payload as req.body, so every
+// downstream product handler is unaffected.
+//
+// ⚠ UNVERIFIED FROM LOCAL: whether Vercel honours this in CommonJS (assigning a
+// property to the exported function) cannot be proven without a deploy. If it is
+// NOT honoured, req.body arrives already parsed, readRawBody returns raw: null,
+// and lib/hmac.js reports reason 'no_raw_body' — visible in Axiom as
+// hmac_signature_check. THIS IS THE THING TO CHECK IN AXIOM BEFORE SETTING
+// HMAC_MODE=enforce. In the default 'log' mode it changes nothing and traffic
+// flows normally either way. Do not flip to enforce until Axiom shows
+// reason: 'verified' on real inbound traffic.
+module.exports.config = { api: { bodyParser: false } };
