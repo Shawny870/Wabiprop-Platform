@@ -51,6 +51,33 @@ logged to Axiom with the booking it was for, never downgraded to free-form text.
 The B17 owner summary (`OWNER_SUMMARY_TEMPLATE`) is still a code constant rather
 than an env var, because its send remains stubbed pending Meta approval.
 
+## Webhook security (B1 / F31)
+
+`CLAUDE.md` rule 25 requires HMAC verification of `X-Hub-Signature-256` on the
+**raw** request body. It was never implemented until F31, and it is **still not
+enforced in production** — it ships in report-only mode by default.
+
+| Variable | Scope | Notes |
+|---|---|---|
+| `META_APP_SECRET` | [PER-ENV] | Meta app secret (App Dashboard → Settings → Basic → App Secret). Production and Preview apps have **different** secrets. Absent is never treated as a pass: it fails closed under `enforce` and logs `error` under `log` |
+| `HMAC_MODE` | optional | Unset or `log` = verify and report, **always pass through** (safe default). `enforce` = 403 before any handler logic. `off` = no check. An unrecognised value falls back to `log`, never `off`, so a typo cannot silently disable the gate |
+
+**Rollout is two steps and the order matters.**
+
+1. Set `META_APP_SECRET`. Leave `HMAC_MODE` unset. Deploy — traffic behaviour is
+   unchanged.
+2. Watch Axiom for the `hmac_signature_check` event on real inbound traffic:
+   - `reason: 'verified'` → safe to set `HMAC_MODE=enforce`. **This is the step
+     that actually closes the gate.**
+   - `reason: 'no_raw_body'` → Vercel is still parsing the body before the
+     handler sees it, so the signed bytes are gone. **Do not enforce**: it would
+     403 every webhook, Meta would retry and then disable the subscription, and
+     Wabistay would go dark. Needs a code fix, not an env change.
+   - `reason: 'signature_mismatch'` on genuine traffic → wrong secret, or the
+     secret from the wrong Meta app.
+
+Until step 2 is done, treat the webhook as unauthenticated.
+
 ## Notifications and reporting
 
 | Variable | Scope | Notes |
