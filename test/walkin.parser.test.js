@@ -63,6 +63,57 @@ test('the command keyword tolerates the spellings staff actually type', () => {
   }
 });
 
+// Regression guard requested after the 6 Aug device test, where `Walkin room 2
+// 2hrs john smith` from an authorised seat did not reach the walk-in flow. The
+// parser was NOT the cause — it has been case-insensitive since it was written,
+// and these assertions prove it rather than assuming it. The device test ran
+// against origin/main, which contains no walk-in code at all: this branch has
+// never been pushed. Kept anyway, because "staff will not type in caps" is a
+// permanent property worth pinning, and a future `.toLowerCase()` slip or a
+// dropped `i` flag would now fail here instead of on somebody's handset.
+test('case is irrelevant to every command token — the exact device-test input parses', () => {
+  const canonical = parseWalkinCommand('WALKIN ROOM 2 2HRS John Smith');
+  assert.deepStrictEqual(canonical, { ok: true, roomToken: '2', hours: 2, guestName: 'John Smith', guestPhone: null });
+
+  // The literal string from the failed device test, capital W and all.
+  assert.deepStrictEqual(
+    parseWalkinCommand('Walkin room 2 2hrs john smith'),
+    { ok: true, roomToken: '2', hours: 2, guestName: 'john smith', guestPhone: null }
+  );
+
+  // All-lowercase, all-uppercase and mixed-case differ ONLY in the guest name,
+  // which is carried through verbatim by design — a booking record must show the
+  // name as the staff member typed it, so it is deliberately not case-folded.
+  const shapes = [
+    'walkin room 2 2hrs John Smith',
+    'WALKIN room 2 2HRS John Smith',
+    'WaLkIn RoOm 2 2HrS John Smith',
+    'walkin ROOM 2 2Hrs John Smith'
+  ];
+  for (const s of shapes) {
+    assert.deepStrictEqual(parseWalkinCommand(s), canonical, `casing: ${s}`);
+  }
+});
+
+test('ROOM and the hour unit are matched case-insensitively in isolation', () => {
+  // Pinned separately from the keyword so a regression in one token cannot hide
+  // behind the others.
+  for (const roomWord of ['room', 'Room', 'ROOM', 'RoOm']) {
+    assert.deepStrictEqual(
+      parseWalkinCommand(`walkin ${roomWord} 5 1hr Test`),
+      { ok: true, roomToken: '5', hours: 1, guestName: 'Test', guestPhone: null },
+      `ROOM as: ${roomWord}`
+    );
+  }
+  for (const unit of ['hrs', 'HRS', 'Hrs', 'hR', 'HOURS', 'Hour']) {
+    assert.deepStrictEqual(
+      parseWalkinCommand(`walkin room 5 2${unit} Test`),
+      { ok: true, roomToken: '5', hours: 2, guestName: 'Test', guestPhone: null },
+      `unit as: ${unit}`
+    );
+  }
+});
+
 test('hour units: h / hr / hrs / hour / hours, spaced or not', () => {
   for (const unit of ['h', 'hr', 'hrs', 'hour', 'hours']) {
     assert.deepStrictEqual(
