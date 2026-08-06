@@ -178,7 +178,10 @@ test('DONE writes completion and attribution onto the booking, and frees the roo
 
   const b = bookingRow(ctx);
   assert.ok(b['Cleaning Completed At'], 'completion stamped');
-  assert.deepStrictEqual(b['Cleaned By'], ['recC1'], 'attributed to whoever declared DONE');
+  // Text, not a linked record id: `Cleaned By` was created as singleLineText,
+  // not a link to WS_Cleaners (confirmed live 6 Aug) — writing the record-id
+  // array shape would be rejected or coerced into garbage.
+  assert.strictEqual(b['Cleaned By'], 'Rose', 'attributed by name, to whoever declared DONE');
   assert.strictEqual(roomRow(ctx)['Status'], 'Available');
 });
 

@@ -1425,7 +1425,16 @@ async function resolveRoomClean(ctx, room) {
     // Attribution is to whoever declared DONE — the only identity the system
     // actually observes. If a different cleaner sent START, that divergence is
     // logged below rather than silently resolved in either direction.
-    if (ctx.cleaner) jobUpdate[CLEANED_BY_FIELD] = [ctx.cleaner.id];
+    //
+    // `Cleaned By` is a plain text field, not a link to WS_Cleaners (confirmed
+    // live 6 Aug — a link was the original intent, but the field was created as
+    // singleLineText). Writing the record-id array shape here would either be
+    // rejected by Airtable or coerce into something unusable, so the cleaner's
+    // NAME is written instead. This trades away click-through to the cleaner's
+    // record and relational integrity if a cleaner is renamed — acceptable for
+    // now since B18 is already going to migrate attribution wholesale to
+    // WS_People, and a link built today would just be torn out then.
+    if (ctx.cleaner) jobUpdate[CLEANED_BY_FIELD] = ctx.cleaner.fields['Cleaner Name'] || null;
     await airtableUpdate('WS_Bookings', booking.id, jobUpdate);
   } else {
     logToAxiom('warn', 'cleaning_complete_no_booking', {
