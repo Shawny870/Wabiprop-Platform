@@ -670,6 +670,138 @@ function durationText(hours) {
   return hours === 1 ? '1 hour' : `${hours} hours`;
 }
 
+// ─── WALK-IN COMMAND PARSER (B7) ─────────────────────────────────────────────
+// `WALKIN ROOM <n> <h>HRS` — staff-initiated, no guest thread. This function is
+// PURE: it reads the message and nothing else. Room resolution, authorisation
+// and every Airtable write live in the handler, so the grammar can be tested
+// exhaustively without a base.
+//
+// Deliberately strict, for three reasons that are all live-data hazards:
+//
+//  1. The ROOM keyword is REQUIRED. Villa Liza's rooms are numbered 1–12, so
+//     `WALKIN 12 2` is two bare numbers with no way to tell which is the room.
+//     The keyword is the only thing that disambiguates them.
+//  2. The hour UNIT is REQUIRED (`2hrs`, not `2`). Same reason from the other
+//     side: with the unit, `WALKIN ROOM 12 2HRS` is unambiguous even though both
+//     tokens are numbers and both are valid room numbers.
+//  3. Matching is anchored and exact — NOT `roomMatchesText`. That helper tests
+//     `\b<number>\b` anywhere in the message, so it would match Room 02 on the
+//     DURATION digit of `WALKIN ROOM 12 2HRS` and send staff to the wrong room.
+//     It is correct where it is used (a cleaner naming a room in free text) and
+//     wrong here; this parser is the reason it stays untouched.
+//
+// Three return shapes, and the distinction between the first two is what makes
+// the no-leak rule work:
+//   · null                          — not a WALKIN attempt at all. The guard
+//                                     declines and the message falls through to
+//                                     the ordinary guest flow, so an outsider
+//                                     who types this sees exactly what any
+//                                     stranger sees. Nothing confirms the
+//                                     command exists.
+//   · { ok: false, reason }         — a WALKIN attempt that is malformed. Only
+//                                     an AUTHORISED sender ever sees the usage
+//                                     help; for anyone else the handler is never
+//                                     reached, so this shape still leaks nothing.
+//   · { ok: true, roomToken, hours }— parsed. `roomToken` is the raw token
+//                                     ('2', '02', 'a') for the resolver to match
+//                                     against Room Number / Room Name; the
+//                                     parser does not know what rooms exist.
+const WALKIN_KEYWORD = /^walk\s*-?\s*in\b/i;
+// `room2` (no space) and `room 02` (zero-padded, as every live Room Name is)
+// both parse; the token is handed on verbatim rather than coerced to a number,
+// because `Room A` exists in the fixtures and a number would lose it. Everything
+// after the duration is guest identity — see splitWalkinIdentity.
+const WALKIN_BODY = /^room\s*([a-z0-9]{1,4})\s+(\d{1,2})\s*(?:hrs|hr|hours|hour|h)\b\.?\s*(.*)$/i;
+// A trailing SA phone number, in any of the shapes staff actually type. Anchored
+// to the END so it can never eat a digit out of the middle of a name.
+const WALKIN_PHONE = /(?:^|\s)(\+?\d[\d\s-]{7,15})\s*$/;
+
+// The message is matched case-INSENSITIVELY but never lowercased, because the
+// guest's name is carried through verbatim: "John Smith" must reach Airtable as
+// the guest typed it, not as "john smith".
+function splitWalkinIdentity(rest) {
+  const trimmed = String(rest || '').trim();
+  if (!trimmed) return { guestName: null, guestPhone: null };
+
+  const pm = trimmed.match(WALKIN_PHONE);
+  if (pm) {
+    const digits = pm[1].replace(/[\s\-+]/g, '');
+    // Validated as a real SA number before it is treated as one. A name ending
+    // in a stray digit ("Room 5 guest 2") fails this and stays part of the name,
+    // rather than becoming a phone number nobody can call.
+    if (/^(?:27\d{9}|0\d{9})$/.test(digits)) {
+      const name = trimmed.slice(0, pm.index).trim();
+      return { guestName: name || null, guestPhone: formatPhone(pm[1]) };
+    }
+  }
+  return { guestName: trimmed, guestPhone: null };
+}
+
+function parseWalkinCommand(text) {
+  const t = String(text || '').trim().replace(/\s+/g, ' ');
+  if (!WALKIN_KEYWORD.test(t)) return null;
+
+  const body = t.replace(WALKIN_KEYWORD, '').trim();
+  const m = body.match(WALKIN_BODY);
+  if (!m) return { ok: false, reason: 'bad_syntax' };
+
+  const hours = Number(m[2]);
+  // Duration is locked to the hourly rate card (CEO, 6 Aug): 1/2/3 only. A
+  // fourth duration has no price — the overnight rate is occupancy-keyed and a
+  // walk-in has no guest to ask — so it is refused rather than guessed. Reusing
+  // HOURLY_DURATIONS means the command and the rate card can never drift apart.
+  if (!HOURLY_DURATIONS.includes(hours)) return { ok: false, reason: 'bad_duration', hours };
+
+  // Name absent is NOT a parse error: the grammar's job is to report what the
+  // message contained. The handler owns the policy that a name is required, and
+  // answers a nameless command with the usage line — which is the closest a
+  // stateless serverless handler can get to "prompt for the guest name" without
+  // a place to park the half-finished command. See the PR.
+  const { guestName, guestPhone } = splitWalkinIdentity(m[3]);
+  return { ok: true, roomToken: m[1], hours, guestName, guestPhone };
+}
+
+// ─── WALK-IN AUTHORISATION (B7) ──────────────────────────────────────────────
+// Authority is a SEAT, not a hardcoded number: `WS_Roles.Current Phone` where
+// the seat is Active. Multiple numbers per property is the normal case (two
+// reception handsets, owner plus manager), which is exactly what a global
+// OWNER_PHONE-style variable cannot express. This is B18's schema, built as a
+// strict subset — B18 adds WS_People and the Notify toggles on top without
+// changing what this reads.
+//
+// Cleaners are deliberately NOT authorised: a cleaner seat exists to receive
+// dispatch, not to sell rooms.
+const WALKIN_ROLE_TYPES = ['Owner', 'Manager', 'Reception'];
+
+// Matched in JS rather than filterByFormula, for two reasons confirmed against
+// the live table: `Current Phone` is free text, so the same number can be stored
+// as 0821234567 or 27821234567 and only formatPhone can tell they are the same;
+// and the table currently contains blank rows, which a formula match would have
+// to special-case anyway.
+async function activeWalkinRoleForPhone(phone) {
+  const roles = await airtableGet('WS_Roles', `{Active} = TRUE()`);
+  return roles.find(r => {
+    if (!WALKIN_ROLE_TYPES.includes(r.fields['Role Type'])) return false;
+    const raw = r.fields['Current Phone'];
+    if (!raw) return false;
+    return formatPhone(String(raw)) === phone;
+  }) || null;
+}
+
+// Exact match only — never `roomMatchesText`, whose \b<number>\b test would
+// match a room on the DURATION digit of the same command. `Room 01` is the live
+// name shape and `Room Number` is 1, so both routes have to be tried; a token
+// that is not a number can still name a room (`Room A`).
+function roomMatchesWalkinToken(room, token) {
+  const t = String(token || '').trim().toLowerCase();
+  if (!t) return false;
+  const name = String(room.fields['Room Name'] || '').trim().toLowerCase();
+  if (name && (name === t || name === `room ${t}`)) return true;
+  const number = room.fields['Room Number'];
+  if (number === undefined || number === null) return false;
+  return /^\d+$/.test(t) && Number(t) === Number(number);
+}
+
 // ─── AVAILABILITY (B8) ───────────────────────────────────────────────────────
 // Rooms are held at enquiry, not at arrival: without a Room link on the booking
 // there is nothing for an overlap check to compare against, and two guests
@@ -782,6 +914,40 @@ function guestStateExpectsInput(guest, text) {
 }
 
 const guards = {
+  // B7 (WALKIN). Registered FIRST in states.json's global list, ahead of the
+  // cleaner-naming-room global: that guard matches \b<number>\b anywhere in the
+  // message, so `WALKIN ROOM 2 2HRS` from a phone that is also a cleaner would
+  // otherwise mark Room 02 clean instead of booking it. Same class of bug as
+  // B11.5, and live data now guarantees the collision rather than merely
+  // allowing it — the seeded Reception number (27825999279) is Eric's, already
+  // both a registered cleaner and an active guest.
+  //
+  // Order of checks is load-bearing:
+  //   1. Parse first. It is pure and free, and it returns null for everything
+  //      that is not a WALKIN attempt — so ordinary guest traffic pays for no
+  //      extra Airtable call, the same principle senderIsCleanerNamingRoom uses.
+  //   2. Only then authorise. An unauthorised sender returns FALSE, not a
+  //      refusal message: the message falls through to the ordinary guest flow
+  //      and they see exactly what any stranger sees. Nothing anywhere confirms
+  //      the command exists. This is the locked no-leak rule, and it is why
+  //      there is no "unauthorised" reply to build.
+  async senderIsAuthorizedWalkin(ctx) {
+    const parsed = parseWalkinCommand(ctx.messageText);
+    if (!parsed) return false;
+
+    const role = await activeWalkinRoleForPhone(ctx.phone);
+    if (!role) {
+      // Logged (an unauthorised number attempting a staff command is worth
+      // seeing in Axiom) but never answered.
+      logToAxiom('warn', 'walkin_unauthorised_sender', { phone: ctx.phone });
+      return false;
+    }
+
+    ctx.walkin = parsed;
+    ctx.walkinRole = role;
+    return true;
+  },
+
   async senderIsCleaner(ctx) {
     const cleanerRecords = await airtableGet('WS_Cleaners', `{Phone Number} = '${ctx.phone}'`);
     ctx.cleaner = cleanerRecords[0] || null;
@@ -828,6 +994,225 @@ async function resolveRoomClean(ctx, room) {
 // The Session State it writes comes from the transition's `next` in states.json.
 
 const actions = {
+  // B7 (WALKIN): staff-initiated booking, no guest thread. Reached only through
+  // senderIsAuthorizedWalkin, so by the time this runs the sender IS authorised
+  // and every reply below is safe to send — an outsider never gets here.
+  //
+  // Every reply goes to the SENDING STAFF NUMBER, which just messaged us and is
+  // therefore inside Meta's 24-hour service window: free-form is correct here
+  // and needs no template (CLAUDE.md line 30). Nothing is sent to the walk-in
+  // guest, even when their number is supplied — that WOULD be business-initiated
+  // to a third party, so it needs an approved template and is deliberately not
+  // built here. Same reason there is no owner notification (F23's finding).
+  async walkinBooking(ctx) {
+    const parsed = ctx.walkin;
+    const role = ctx.walkinRole;
+
+    if (!parsed.ok) {
+      if (parsed.reason === 'bad_duration') {
+        logToAxiom('info', 'walkin_rejected', { phone: ctx.phone, reason: 'bad_duration', requestedHours: parsed.hours });
+        await sendWhatsApp(ctx.phone, msg('walkinBadDuration', { hours: parsed.hours }));
+        return;
+      }
+      logToAxiom('info', 'walkin_rejected', { phone: ctx.phone, reason: parsed.reason });
+      await sendWhatsApp(ctx.phone, msg('walkinUsage'));
+      return;
+    }
+
+    // The guest's name is required, and this is where "prompt for the name"
+    // lands: a serverless handler has no memory between messages, and parking a
+    // half-finished command would need a session store that does not exist for
+    // staff numbers (WS_Guests.Session State has no walk-in states, and adding
+    // them is a schema change — out of scope by instruction). So the command is
+    // re-asked in full rather than continued. See the PR for the stateful
+    // alternative.
+    if (!parsed.guestName) {
+      logToAxiom('info', 'walkin_rejected', { phone: ctx.phone, reason: 'missing_guest_name' });
+      await sendWhatsApp(ctx.phone, msg('walkinNeedName'));
+      return;
+    }
+
+    // Property comes from the SEAT, not from the inbound number: the role's
+    // single Property link is the booking's property (locked). The link is
+    // single at schema level, so [0] is the whole answer and there is no
+    // disambiguation to build.
+    const rolePropertyId = (role.fields['Property'] || [])[0] || null;
+    if (!rolePropertyId) {
+      logToAxiom('error', 'walkin_role_without_property', { phone: ctx.phone, roleId: role.id });
+      await sendWhatsApp(ctx.phone, msg('walkinNotConfigured'));
+      return;
+    }
+
+    // Fail closed on a cross-property mismatch. ctx.property is the property
+    // that owns the WhatsApp number this message arrived on; the seat says a
+    // different one. Both readings are defensible and the wrong one books a
+    // stranger into another property's room, so it is refused rather than
+    // guessed — the same posture as the room-assignment rule. Flagged in the PR:
+    // the alternative (seat always wins) is a CEO decision, not a Builder one.
+    if (rolePropertyId !== ctx.property.id) {
+      logToAxiom('warn', 'walkin_property_mismatch', {
+        phone: ctx.phone, roleId: role.id, rolePropertyId, inboundPropertyId: ctx.property.id
+      });
+      await sendWhatsApp(ctx.phone, msg('walkinWrongProperty'));
+      return;
+    }
+    const property = ctx.property;
+
+    // Rates: reuse hourlyRates, which fails closed on any blank or zero. A
+    // walk-in is never quoted R0 and the price is never hardcoded here.
+    const rates = hourlyRates(property);
+    if (!rates) {
+      logToAxiom('warn', 'walkin_rates_unavailable', { phone: ctx.phone, propertyId: property.id });
+      await sendWhatsApp(ctx.phone, msg('walkinRatesUnavailable', { propertyName: property.fields['Property Name'] }));
+      return;
+    }
+
+    // The guest is standing at the desk: the stay starts now.
+    const checkInIso = new Date().toISOString();
+    const checkOutIso = addHoursToIso(checkInIso, parsed.hours);
+
+    const allRooms = await airtableGet('WS_Rooms', orFormula('Status', BOOKABLE_ROOM_STATUSES));
+    const propertyRooms = allRooms.filter(r => (r.fields['Property'] || []).includes(property.id));
+    const requested = propertyRooms.find(r => roomMatchesWalkinToken(r, parsed.roomToken)) || null;
+    if (!requested) {
+      logToAxiom('info', 'walkin_rejected', { phone: ctx.phone, reason: 'no_such_room', roomToken: parsed.roomToken });
+      await sendWhatsApp(ctx.phone, msg('walkinNoSuchRoom', { roomToken: parsed.roomToken }));
+      return;
+    }
+
+    // ONE availability path, the same one both guest flows use. preferRoomId
+    // re-offers a different room when the preferred one is taken — correct for a
+    // guest chatting on WhatsApp, wrong for a staff member standing in front of
+    // a specific door — so the substitution is rejected rather than accepted:
+    // the room staff named must be the room that comes back.
+    const free = await findAvailableRoom(property.id, checkInIso, checkOutIso, { preferRoomId: requested.id });
+    if (!free || free.id !== requested.id) {
+      logToAxiom('info', 'walkin_room_taken', {
+        phone: ctx.phone, roomId: requested.id, roomName: requested.fields['Room Name'],
+        checkIn: checkInIso, checkOut: checkOutIso
+      });
+      await logEnquiry(property, parsed.guestPhone || ctx.phone, 'No Availability', {
+        checkInIso, checkOutIso, bookingType: 'Hourly'
+      });
+      await sendWhatsApp(ctx.phone, msg('walkinRoomTaken', { roomName: requested.fields['Room Name'] }));
+      return;
+    }
+
+    // Guest identity. With a phone we can recognise a returning walk-in and
+    // reuse their record; without one there is nothing to match on, so a
+    // name-only record is created and repeat-guest tracking simply does not
+    // apply to this booking (locked). Creation is never blocked on the phone.
+    let guest = null;
+    if (parsed.guestPhone) {
+      guest = (await airtableGet('WS_Guests', `{Phone Number} = '${parsed.guestPhone}'`))[0] || null;
+    }
+    if (guest) {
+      // An existing name is NOT overwritten — the record may be a returning
+      // guest with their own history, and staff typing a shortened name at the
+      // desk must not rewrite it.
+      await airtableUpdate('WS_Guests', guest.id, { 'Session State': 'CHECKED_IN' });
+    } else {
+      const fields = {
+        'Guest Name': parsed.guestName,
+        'Guest Type': 'Walk-in',
+        // Truthful from the moment the booking exists: they are checked in. It
+        // also means a walk-in who DID give a number can drive EXTEND / checkout
+        // from their own phone through the existing CHECKED_IN menu, with no new
+        // flow to build.
+        'Session State': 'CHECKED_IN',
+        'First Visit': new Date().toISOString().split('T')[0]
+      };
+      if (parsed.guestPhone) fields['Phone Number'] = parsed.guestPhone;
+      guest = await airtableCreate('WS_Guests', fields);
+    }
+    // airtableCreate resolves to Airtable's error body on a failed write rather
+    // than throwing, so an unchecked `.id` here would surface as a crash three
+    // lines later with the real cause already swallowed.
+    if (!guest || !guest.id) {
+      logToAxiom('error', 'walkin_guest_create_failed', { phone: ctx.phone, propertyId: property.id });
+      await sendWhatsApp(ctx.phone, msg('walkinFailed'));
+      return;
+    }
+
+    const booking = await airtableCreate('WS_Bookings', {
+      'Guest': [guest.id],
+      'Room': [requested.id],
+      // Hourly, NOT the 'Walk-in' Booking Type option: Booking Type is read by
+      // EXTENSION_MS, B17's room-night maths and findPendingHourlyBooking, and a
+      // third value would fall silently through all three. Walk-in provenance
+      // lives in Source, which is what that field is for (locked, CEO 6 Aug).
+      'Booking Type': 'Hourly',
+      'Source': 'Walk-in',
+      'Logged By': 'Manual',
+      // Checked In on creation (locked): the guest is physically in the room, so
+      // the auto-checkout cron owns the rest of the stay from this instant — the
+      // 15-minute warning, the auto-checkout, and the cleaner dispatch that
+      // follows it all come for free from B12 rather than being rebuilt here.
+      'Status': 'Checked In',
+      'Check In': checkInIso,
+      'Check Out': checkOutIso,
+      'Checked In At': checkInIso,
+      'Payment Status': 'Unpaid',
+      'Amount Due': rates[parsed.hours],
+      // B10.5 Bug 2: both checkout paths scope cleaner dispatch off this link.
+      'WS_Property': [property.id],
+      'Notes': `Walk-in: ${durationText(parsed.hours)} from ${formatSastDateTime(checkInIso)}`
+    });
+
+    if (!booking || !booking.id) {
+      // Same reason as the guest guard above. Nothing has been written to the
+      // room yet at this point, so there is nothing to roll back.
+      logToAxiom('error', 'walkin_booking_create_failed', { phone: ctx.phone, propertyId: property.id, roomId: requested.id });
+      await sendWhatsApp(ctx.phone, msg('walkinFailed'));
+      return;
+    }
+
+    const bookingRef = `WS-${booking.id.slice(-6).toUpperCase()}`;
+    await airtableUpdate('WS_Bookings', booking.id, { 'Booking Ref': bookingRef });
+
+    // CLAUDE.md rule 32 — Airtable is not transactional. Re-query after the
+    // assignment and confirm this booking still holds the room alone. A second
+    // walk-in typed on the other reception handset in the same second would
+    // otherwise double-book a room with a person already standing in it.
+    // On conflict: roll back and re-offer, never leave two live bookings.
+    const stillFree = await findAvailableRoom(property.id, checkInIso, checkOutIso, {
+      excludeBookingId: booking.id, preferRoomId: requested.id
+    });
+    if (!stillFree || stillFree.id !== requested.id) {
+      await airtableUpdate('WS_Bookings', booking.id, { 'Status': 'Cancelled' });
+      logToAxiom('warn', 'walkin_rolled_back', {
+        phone: ctx.phone, bookingId: booking.id, roomId: requested.id, reason: 'room taken between check and create'
+      });
+      await sendWhatsApp(ctx.phone, msg('walkinRoomTaken', { roomName: requested.fields['Room Name'] }));
+      return;
+    }
+
+    // Only now is the room really occupied — after the conflict check, so a
+    // rolled-back booking never leaves a room marked Occupied behind it.
+    await airtableUpdate('WS_Rooms', requested.id, { 'Status': 'Occupied' });
+
+    logToAxiom('info', 'booking_create', {
+      phone: ctx.phone, guestName: parsed.guestName, bookingRef, bookingType: 'Hourly',
+      source: 'Walk-in', hours: parsed.hours, roomId: requested.id, airtableId: booking.id,
+      roleId: role.id, propertyId: property.id, guestPhone: parsed.guestPhone || null
+    });
+    // B19: a walk-in is a booking that happened — logged as Booked so the owner
+    // summary's demand picture includes it. Keyed on the guest's number when
+    // there is one, otherwise the staff number that logged it.
+    await logEnquiry(property, parsed.guestPhone || ctx.phone, 'Booked', {
+      checkInIso, checkOutIso, bookingType: 'Hourly', bookingId: booking.id
+    });
+
+    await sendWhatsApp(ctx.phone, msg('walkinConfirmed', {
+      guestName: parsed.guestName,
+      roomName: requested.fields['Room Name'],
+      durationText: durationText(parsed.hours),
+      checkOutText: formatSastDateTime(checkOutIso),
+      amount: rates[parsed.hours],
+      bookingRef
+    }));
+  },
+
   // Cleaner replies DONE (global, any state)
   async cleanerDone(ctx) {
     // F4: was {Active} = 1 — Airtable checkbox requires TRUE()
@@ -2075,7 +2460,13 @@ async function handleMessage(from, messageText, phoneNumberId) {
   if (!guest) {
     const isCleaner = (await airtableGet('WS_Cleaners', `{Phone Number} = '${phone}'`)).length > 0;
     const isOwner = OWNER_PHONE && phone === formatPhone(OWNER_PHONE);
-    if (!isCleaner && !isOwner) {
+    // B7: a staff seat is not a guest. Without this, the first WALKIN ever sent
+    // from a reception handset answers with a POPIA notice about that person's
+    // own data — same category error the cleaner and owner exclusions above
+    // already fix. Costs one extra read, and only for a number we have never
+    // seen before.
+    const isStaff = (await activeWalkinRoleForPhone(phone)) !== null;
+    if (!isCleaner && !isOwner && !isStaff) {
       await sendWhatsApp(phone, msg('consentNotice', { propertyName: property.fields['Property Name'] }));
       logToAxiom('info', 'popia_consent_sent', { phone });
     }
@@ -2216,6 +2607,11 @@ module.exports.formatSastDateTime = formatSastDateTime;
 // F20: exported for parser unit coverage — findDateTokens locates the spans,
 // parseBookingDate (already exported) validates them.
 module.exports.findDateTokens = findDateTokens;
+// B7 (WALKIN): the command grammar is pure and has no Airtable dependency, so it
+// is tested exhaustively here — see test/walkin.parser.test.js. The handler that
+// consumes it (authorisation, room resolution, booking write) is a separate,
+// schema-dependent commit.
+module.exports.parseWalkinCommand = parseWalkinCommand;
 // B12: the auto-checkout cron entry point (autoCheckoutHandler wraps it for the
 // Vercel HTTP cron; runAutoCheckout takes an injected `now` for timing tests).
 module.exports.runAutoCheckout = runAutoCheckout;

@@ -2,6 +2,7 @@
   "comment": "Wabistay state machine (H0). state → input → action → next state, plus all outbound message copy. Handlers in api/wabistay/webhook.js read this table — no nested if-state logic. Inputs are matched against the trimmed, lowercased message; \"*\" is the fallback row. \"next\" is the Session State the action writes (handlers control write ordering; a handler may stay in-state, e.g. invalid details or the F14 cooldown guard).",
 
   "global": [
+    { "inputs": "*", "guard": "senderIsAuthorizedWalkin", "action": "walkinBooking" },
     { "inputs": ["done"], "guard": "senderIsCleaner", "action": "cleanerDone" },
     { "inputs": "*", "guard": "senderIsCleanerNamingRoom", "action": "cleanerRoomReply" }
   ],
@@ -84,6 +85,16 @@
     "unknownFallback": "Hi! Reply with your name and dates to make a booking, or *CHECKING OUT* if you are leaving today.",
     "numberNotConfigured": "Sorry, this number isn't configured yet. Please contact support.",
     "optedOut": "You've opted out of messages. 🔕 We won't send you anything further.\n\nReply *START* at any time to opt back in.",
-    "optedBackIn": "Welcome back! ✅ You're opted back in and will receive messages again.\n\nReply *STOP* any time to opt out."
+    "optedBackIn": "Welcome back! ✅ You're opted back in and will receive messages again.\n\nReply *STOP* any time to opt out.",
+    "walkinUsage": "Walk-in format:\n\n*WALKIN ROOM 2 2HRS John Smith*\n\nRoom, then 1, 2 or 3 hours, then the guest's name. Add their number at the end if you have it.",
+    "walkinNeedName": "Almost — that walk-in needs the guest's name.\n\nSend it again like this:\n*WALKIN ROOM 2 2HRS John Smith*\n\nAdd their number at the end if you have it.",
+    "walkinBadDuration": "Walk-ins are 1, 2 or 3 hours only — {hours} isn't available.\n\nExample: *WALKIN ROOM 2 2HRS John Smith*",
+    "walkinNoSuchRoom": "No room matching \"{roomToken}\" at this property.\n\nUse the room number or its name, like *WALKIN ROOM 2 2HRS John Smith*",
+    "walkinRoomTaken": "{roomName} isn't free for that time — it's already booked.\n\nTry another room.",
+    "walkinRatesUnavailable": "Short-stay rates aren't set up for {propertyName} yet, so a walk-in can't be priced. Please set the hourly rates first.",
+    "walkinWrongProperty": "That walk-in is for a different property to the one this number handles. Please send it from that property's number.",
+    "walkinNotConfigured": "Your staff profile isn't linked to a property yet, so a walk-in can't be created. Please contact the owner.",
+    "walkinFailed": "Something went wrong saving that walk-in — nothing was booked. Please try again.",
+    "walkinConfirmed": "✅ Walk-in recorded\n\n*Ref:* {bookingRef}\n*Guest:* {guestName}\n*Room:* {roomName}\n*Duration:* {durationText}\n*Checkout:* {checkOutText}\n*Amount due:* R{amount}\n\n{roomName} is now marked occupied."
   }
 }
