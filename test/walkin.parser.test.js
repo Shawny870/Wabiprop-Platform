@@ -28,16 +28,16 @@ const { parseWalkinCommand } = require('../api/wabistay/webhook.js');
 // unit are both mandatory.
 
 test('room 12 for 2 hours: the room is 12 and the duration is 2 — never the reverse', () => {
-  assert.deepStrictEqual(parseWalkinCommand('WALKIN ROOM 12 2HRS'), { ok: true, roomToken: '12', hours: 2 });
+  assert.deepStrictEqual(parseWalkinCommand('WALKIN ROOM 12 2HRS'), { ok: true, roomToken: '12', hours: 2, guestName: null, guestPhone: null });
 });
 
 test('room 2 for 2 hours: identical digits do not confuse the positions', () => {
-  assert.deepStrictEqual(parseWalkinCommand('WALKIN ROOM 2 2HRS'), { ok: true, roomToken: '2', hours: 2 });
+  assert.deepStrictEqual(parseWalkinCommand('WALKIN ROOM 2 2HRS'), { ok: true, roomToken: '2', hours: 2, guestName: null, guestPhone: null });
 });
 
 test('room 1 for 2 hours and room 2 for 1 hour are not the same command', () => {
-  assert.deepStrictEqual(parseWalkinCommand('WALKIN ROOM 1 2HRS'), { ok: true, roomToken: '1', hours: 2 });
-  assert.deepStrictEqual(parseWalkinCommand('WALKIN ROOM 2 1HR'), { ok: true, roomToken: '2', hours: 1 });
+  assert.deepStrictEqual(parseWalkinCommand('WALKIN ROOM 1 2HRS'), { ok: true, roomToken: '1', hours: 2, guestName: null, guestPhone: null });
+  assert.deepStrictEqual(parseWalkinCommand('WALKIN ROOM 2 1HR'), { ok: true, roomToken: '2', hours: 1, guestName: null, guestPhone: null });
 });
 
 test('two bare numbers are refused, not guessed — the ROOM keyword is the only disambiguator', () => {
@@ -57,7 +57,7 @@ test('the command keyword tolerates the spellings staff actually type', () => {
   for (const kw of ['WALKIN', 'walkin', 'Walk-in', 'walk in', 'WALK-IN']) {
     assert.deepStrictEqual(
       parseWalkinCommand(`${kw} room 7 3hrs`),
-      { ok: true, roomToken: '7', hours: 3 },
+      { ok: true, roomToken: '7', hours: 3, guestName: null, guestPhone: null },
       `keyword: ${kw}`
     );
   }
@@ -67,12 +67,12 @@ test('hour units: h / hr / hrs / hour / hours, spaced or not', () => {
   for (const unit of ['h', 'hr', 'hrs', 'hour', 'hours']) {
     assert.deepStrictEqual(
       parseWalkinCommand(`walkin room 3 2${unit}`),
-      { ok: true, roomToken: '3', hours: 2 },
+      { ok: true, roomToken: '3', hours: 2, guestName: null, guestPhone: null },
       `unit: ${unit}`
     );
     assert.deepStrictEqual(
       parseWalkinCommand(`walkin room 3 2 ${unit}`),
-      { ok: true, roomToken: '3', hours: 2 },
+      { ok: true, roomToken: '3', hours: 2, guestName: null, guestPhone: null },
       `spaced unit: ${unit}`
     );
   }
@@ -82,21 +82,21 @@ test('zero-padded room token survives verbatim — every live Room Name is padde
   // `Room 01` is the live name; `Room Number` is 1. The parser hands the raw
   // token to the resolver rather than coercing it, so both matching routes stay
   // open. Coercing to Number here would also destroy `Room A`.
-  assert.deepStrictEqual(parseWalkinCommand('walkin room 01 1hr'), { ok: true, roomToken: '01', hours: 1 });
-  assert.deepStrictEqual(parseWalkinCommand('walkin room a 1hr'), { ok: true, roomToken: 'a', hours: 1 });
+  assert.deepStrictEqual(parseWalkinCommand('walkin room 01 1hr'), { ok: true, roomToken: '01', hours: 1, guestName: null, guestPhone: null });
+  assert.deepStrictEqual(parseWalkinCommand('walkin room a 1hr'), { ok: true, roomToken: 'a', hours: 1, guestName: null, guestPhone: null });
 });
 
 test('missing space after ROOM, extra spaces, and a trailing full stop all parse', () => {
-  assert.deepStrictEqual(parseWalkinCommand('walkin room2 2hrs'), { ok: true, roomToken: '2', hours: 2 });
-  assert.deepStrictEqual(parseWalkinCommand('  WALKIN   ROOM   9    3 HRS  '), { ok: true, roomToken: '9', hours: 3 });
-  assert.deepStrictEqual(parseWalkinCommand('walkin room 9 3hrs.'), { ok: true, roomToken: '9', hours: 3 });
+  assert.deepStrictEqual(parseWalkinCommand('walkin room2 2hrs'), { ok: true, roomToken: '2', hours: 2, guestName: null, guestPhone: null });
+  assert.deepStrictEqual(parseWalkinCommand('  WALKIN   ROOM   9    3 HRS  '), { ok: true, roomToken: '9', hours: 3, guestName: null, guestPhone: null });
+  assert.deepStrictEqual(parseWalkinCommand('walkin room 9 3hrs.'), { ok: true, roomToken: '9', hours: 3, guestName: null, guestPhone: null });
 });
 
 // ── Duration is locked to the rate card ─────────────────────────────────────
 
 test('1, 2 and 3 hours are the only durations, and all three are accepted', () => {
   for (const h of [1, 2, 3]) {
-    assert.deepStrictEqual(parseWalkinCommand(`walkin room 5 ${h}hrs`), { ok: true, roomToken: '5', hours: h });
+    assert.deepStrictEqual(parseWalkinCommand(`walkin room 5 ${h}hrs`), { ok: true, roomToken: '5', hours: h, guestName: null, guestPhone: null });
   }
 });
 
@@ -156,11 +156,65 @@ test('a room token the base has never heard of still PARSES — the resolver ref
   // the resolver answers "no room called two" against the live rooms. Rejecting
   // it here would mean encoding room names in a regex, which goes stale the day
   // a room is renamed.
-  assert.deepStrictEqual(parseWalkinCommand('walkin room two 2hrs'), { ok: true, roomToken: 'two', hours: 2 });
+  assert.deepStrictEqual(parseWalkinCommand('walkin room two 2hrs'), { ok: true, roomToken: 'two', hours: 2, guestName: null, guestPhone: null });
 });
 
-test('trailing junk is refused rather than partially honoured', () => {
-  assert.deepStrictEqual(parseWalkinCommand('walkin room 2 2hrs and put him in 3'), { ok: false, reason: 'bad_syntax' });
+// ── Guest identity: name required by the handler, phone optional ────────────
+//
+// Everything after the duration is the guest. The parser reports what was there
+// and does not enforce the name — that is the handler's policy, so a nameless
+// command can be answered with a usage line instead of being indistinguishable
+// from a syntax error.
+
+test('the guest name is carried through VERBATIM, not lowercased', () => {
+  // The message is matched case-insensitively, but the name reaches Airtable as
+  // the staff member typed it. "john smith" on a booking record is a defect.
+  assert.deepStrictEqual(
+    parseWalkinCommand('WALKIN ROOM 2 2HRS John Smith'),
+    { ok: true, roomToken: '2', hours: 2, guestName: 'John Smith', guestPhone: null }
+  );
+});
+
+test('a trailing phone number is split off the name and normalised', () => {
+  for (const [written, expected] of [
+    ['0821234567', '27821234567'],
+    ['27821234567', '27821234567'],
+    ['+27 82 123 4567', '27821234567'],
+    ['082-123-4567', '27821234567']
+  ]) {
+    assert.deepStrictEqual(
+      parseWalkinCommand(`walkin room 3 1hr Thabo Mokoena ${written}`),
+      { ok: true, roomToken: '3', hours: 1, guestName: 'Thabo Mokoena', guestPhone: expected },
+      `phone written as: ${written}`
+    );
+  }
+});
+
+test('a name ending in a stray digit keeps the digit — it is not mistaken for a phone', () => {
+  // Anything that is not a valid SA number stays part of the name, so nobody
+  // ends up with an uncallable number on their booking.
+  assert.deepStrictEqual(
+    parseWalkinCommand('walkin room 4 2hrs Guest 2'),
+    { ok: true, roomToken: '4', hours: 2, guestName: 'Guest 2', guestPhone: null }
+  );
+  assert.deepStrictEqual(
+    parseWalkinCommand('walkin room 4 2hrs John 12345'),
+    { ok: true, roomToken: '4', hours: 2, guestName: 'John 12345', guestPhone: null }
+  );
+});
+
+test('a phone with no name is reported as a phone with no name — the handler refuses it', () => {
+  assert.deepStrictEqual(
+    parseWalkinCommand('walkin room 4 2hrs 0821234567'),
+    { ok: true, roomToken: '4', hours: 2, guestName: null, guestPhone: '27821234567' }
+  );
+});
+
+test('a multi-word name survives intact, spacing and all', () => {
+  assert.deepStrictEqual(
+    parseWalkinCommand('  WALKIN  ROOM 12   3HRS   Mary-Jane  van der Merwe  '),
+    { ok: true, roomToken: '12', hours: 3, guestName: 'Mary-Jane van der Merwe', guestPhone: null }
+  );
 });
 
 // ── Input hygiene ───────────────────────────────────────────────────────────
