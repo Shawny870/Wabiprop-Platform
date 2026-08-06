@@ -145,34 +145,82 @@ test('the payment method can be overridden on the command', async () => {
   assert.strictEqual(bookingRow(ctx)['Payment Method'], 'EFT');
 });
 
-test('a short payment is Partial, not Paid', async () => {
-  // Deviation from the locked wording, flagged in the PR: R100 against R400 owed
-  // recorded as 'Paid' would put a false figure into the record B17 builds the
-  // owner's revenue report from.
+// ── The mismatch rule ───────────────────────────────────────────────────────
+//
+// Partial payments do not exist in this business (CEO, 6 Aug), which is what
+// makes the rule decidable: if every payment settles the bill in full, an amount
+// that is not the amount owed is a TYPO, not a short payment. It is refused with
+// zero writes. Recording it instead would be unrecoverable in one step — the
+// write marks the booking Paid and the idempotency guard then refuses every
+// correction, freezing a wrong figure into the record B17 reports revenue from.
+
+test('an amount that is not the amount owed is refused, and NOTHING is written', async () => {
   const ctx = start();
+  const writesBefore = ctx.airtable.log.length;
   await send(RECEPTION_PHONE, 'PAID ROOM 2 100');
 
   const b = bookingRow(ctx);
-  assert.strictEqual(b['Amount Paid'], 100);
-  assert.strictEqual(b['Payment Status'], 'Partial');
-  assert.match(texts(ctx), /Still owing:\* R300\.00/);
+  assert.strictEqual(b['Payment Status'], 'Unpaid', 'still unpaid');
+  assert.strictEqual(b['Amount Paid'], undefined, 'no figure recorded');
+  assert.strictEqual(ctx.airtable.log.length, writesBefore, 'zero writes');
+  assert.match(texts(ctx), /doesn't match what's owed/);
+  assert.match(texts(ctx), /R400\.00/, 'the reply states the correct figure to re-send');
+  assert.ok(axiomEvents(ctx).includes('payment_amount_mismatch'));
 });
 
-test('an overpayment still settles the booking', async () => {
+test('an OVERpayment is refused too — the recorded figure is the bill, not the cash tendered', async () => {
   const ctx = start();
   await send(RECEPTION_PHONE, 'PAID ROOM 2 500');
+
+  assert.strictEqual(bookingRow(ctx)['Payment Status'], 'Unpaid');
+  assert.match(texts(ctx), /doesn't match what's owed/);
+});
+
+test('a refused mismatch can be corrected immediately — nothing is frozen', async () => {
+  // The property the reject-don't-record rule exists to preserve: a typo is one
+  // re-send away from being right, because the first attempt wrote nothing.
+  const ctx = start();
+  await send(RECEPTION_PHONE, 'PAID ROOM 2 40');   // fat finger
+  await send(RECEPTION_PHONE, 'PAID ROOM 2 400');  // corrected
+
+  const b = bookingRow(ctx);
+  assert.strictEqual(b['Payment Status'], 'Paid');
+  assert.strictEqual(b['Amount Paid'], 400);
+});
+
+test('decimal input matching to the cent is accepted, not rejected on float noise', async () => {
+  const ctx = start();
+  await send(RECEPTION_PHONE, 'PAID ROOM 2 400,00');
   assert.strictEqual(bookingRow(ctx)['Payment Status'], 'Paid');
+});
+
+test('an unpriced booking accepts whatever reception sends, and says so in the log', async () => {
+  // F19 and F34 both have fail-closed paths that leave a booking with no
+  // Amount Due. Refusing there would leave reception unable to record real cash.
+  const s = seed();
+  delete s.WS_Bookings[0].fields['Amount Due'];
+  const ctx = start({ WS_Bookings: s.WS_Bookings });
+  await send(RECEPTION_PHONE, 'PAID ROOM 2 350');
+
+  const b = bookingRow(ctx);
+  assert.strictEqual(b['Payment Status'], 'Paid');
+  assert.strictEqual(b['Amount Paid'], 350);
+  assert.ok(axiomEvents(ctx).includes('payment_recorded_unpriced'));
 });
 
 test('the amount owed already includes extensions (F34), with no extra work here', async () => {
   // The dependency PAID was blocked on: Amount Due is read off the booking, and
-  // F34 adds each extension's charge onto it in place.
+  // F34 adds each extension's charge onto it in place. R400 no longer settles an
+  // extended stay — the extension is genuinely part of what reception collects.
   const s = seed();
   s.WS_Bookings[0].fields['Amount Due'] = 800; // base 400 + one extension
   const ctx = start({ WS_Bookings: s.WS_Bookings });
-  await send(RECEPTION_PHONE, 'PAID ROOM 2 400');
 
-  assert.strictEqual(bookingRow(ctx)['Payment Status'], 'Partial', 'R400 against an extended R800');
+  await send(RECEPTION_PHONE, 'PAID ROOM 2 400');
+  assert.strictEqual(bookingRow(ctx)['Payment Status'], 'Unpaid', 'the pre-extension figure is refused');
+
+  await send(RECEPTION_PHONE, 'PAID ROOM 2 800');
+  assert.strictEqual(bookingRow(ctx)['Payment Status'], 'Paid', 'the extended total settles it');
 });
 
 // ── Idempotency ─────────────────────────────────────────────────────────────
@@ -199,18 +247,15 @@ test('a different amount re-sent after settlement still does not overwrite', asy
   assert.strictEqual(bookingRow(ctx)['Amount Paid'], 400, 'the original figure stands');
 });
 
-test('a Partial booking can still be topped up — idempotency guards Paid only', async () => {
-  const ctx = start();
-  await send(RECEPTION_PHONE, 'PAID ROOM 2 100');
-  assert.strictEqual(bookingRow(ctx)['Payment Status'], 'Partial');
-
-  await send(RECEPTION_PHONE, 'PAID ROOM 2 400');
-  const b = bookingRow(ctx);
-  assert.strictEqual(b['Payment Status'], 'Paid');
-  // FLAGGED in the PR: the second amount REPLACES rather than accumulates, so
-  // reception must send the full settled figure, not the balance. The reply copy
-  // says so explicitly.
-  assert.strictEqual(b['Amount Paid'], 400);
+test('Partial is never written — the status enum value is unreachable from this flow', async () => {
+  // Partial payments do not exist in this business, so no input may produce one.
+  // Swept rather than asserted case-by-case: an under-payment, an over-payment
+  // and an exact payment are the only three shapes there are.
+  for (const amount of [100, 400, 500]) {
+    const ctx = start();
+    await send(RECEPTION_PHONE, `PAID ROOM 2 ${amount}`);
+    assert.notStrictEqual(bookingRow(ctx)['Payment Status'], 'Partial', `amount: ${amount}`);
+  }
 });
 
 // ── Authorisation ───────────────────────────────────────────────────────────

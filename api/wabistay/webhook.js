@@ -1494,12 +1494,49 @@ const actions = {
     }
 
     const amountDue = Number(booking.fields['Amount Due']) || 0;
-    // FLAGGED DEVIATION (see PR): the locked spec says Payment Status → Paid.
-    // `Partial` exists in the live enum, and recording R100 against R400 owed as
-    // 'Paid' would put a false figure into the record the owner report is built
-    // from. Short payments are therefore marked Partial; anything covering the
-    // full amount is Paid. One constant to flip if the CEO wants always-Paid.
-    const status = parsed.amount >= amountDue ? 'Paid' : 'Partial';
+
+    // Partial payments do not exist in this business (CEO, 6 Aug), and that is
+    // what decides the mismatch rule rather than a preference: if every payment
+    // settles the bill in full, then an amount that is not the amount owed is
+    // not a short payment — it is a TYPO. So it is refused with zero writes and
+    // reception re-sends the right figure.
+    //
+    // The alternative (record it, flag the mismatch, mark Paid) was rejected
+    // because it is unrecoverable in one step: the write marks the booking Paid,
+    // and the idempotency guard immediately above then refuses every correction,
+    // so a fat-fingered R40 against R400 would be frozen into the record that
+    // B17 builds the owner's revenue report from. Refusing costs one re-send;
+    // accepting costs a wrong number nobody can fix from WhatsApp.
+    //
+    // Compared with a half-cent tolerance so decimal input ("400,00") cannot
+    // fail on float representation alone.
+    const AMOUNT_EPSILON = 0.005;
+    // An unpriced booking has nothing to check against — F19's and F34's
+    // fail-closed paths both produce exactly that (booked or extended, never
+    // priced). Refusing there would leave reception unable to record real cash,
+    // so whatever they send is accepted and the gap is logged instead.
+    const priced = amountDue > 0;
+    if (priced && Math.abs(parsed.amount - amountDue) > AMOUNT_EPSILON) {
+      logToAxiom('warn', 'payment_amount_mismatch', {
+        phone: ctx.phone, bookingId: booking.id, bookingRef: booking.fields['Booking Ref'] || null,
+        roomName: room.fields['Room Name'], amountSent: parsed.amount, amountDue,
+        delta: Number((parsed.amount - amountDue).toFixed(2)), written: false
+      });
+      await sendWhatsApp(ctx.phone, msg('paidAmountMismatch', {
+        roomName: room.fields['Room Name'],
+        amountSent: formatAmount(parsed.amount),
+        amountDue: formatAmount(amountDue)
+      }));
+      return;
+    }
+    if (!priced) {
+      logToAxiom('warn', 'payment_recorded_unpriced', {
+        phone: ctx.phone, bookingId: booking.id, bookingRef: booking.fields['Booking Ref'] || null,
+        amountSent: parsed.amount, reason: 'booking has no Amount Due to check against'
+      });
+    }
+
+    const status = 'Paid';
     const method = parsed.method || 'Cash';
 
     const update = {
@@ -1522,12 +1559,10 @@ const actions = {
       recordedAt: new Date().toISOString()
     });
 
-    await sendWhatsApp(ctx.phone, msg(status === 'Paid' ? 'paidRecorded' : 'paidPartial', {
+    await sendWhatsApp(ctx.phone, msg('paidRecorded', {
       roomName: room.fields['Room Name'],
       bookingRef: booking.fields['Booking Ref'] || '',
       amountPaid: formatAmount(parsed.amount),
-      amountDue: formatAmount(amountDue),
-      outstanding: formatAmount(Math.max(amountDue - parsed.amount, 0)),
       method
     }));
   },

@@ -103,7 +103,7 @@
     "paidNotConfigured": "Your staff profile isn't linked to a property yet, so a payment can't be recorded. Please contact the owner.",
     "paidWrongProperty": "That room is at a different property to the one this number handles. Please send it from that property's number.",
     "paidRecorded": "✅ Payment recorded\n\n*Ref:* {bookingRef}\n*Room:* {roomName}\n*Received:* R{amountPaid}\n*Method:* {method}\n\nSettled in full.",
-    "paidPartial": "✅ Part-payment recorded\n\n*Ref:* {bookingRef}\n*Room:* {roomName}\n*Received:* R{amountPaid}\n*Method:* {method}\n*Still owing:* R{outstanding}\n\nSend *PAID ROOM* again with the balance when it's settled.",
+    "paidAmountMismatch": "That doesn't match what's owed on {roomName}.\n\n*You sent:* R{amountSent}\n*Amount owed:* R{amountDue}\n\nNothing was recorded. Send *PAID ROOM* again with R{amountDue}.",
     "paidAlreadyRecorded": "Already recorded — {roomName} ({bookingRef}) was settled at R{amountPaid}. Nothing changed."
   }
 }
