@@ -47,6 +47,7 @@ logged to Axiom with the booking it was for, never downgraded to free-form text.
 | Variable | Scope | Notes |
 |---|---|---|
 | `WABISTAY_CLEANER_GATE_TEMPLATE` | optional | Cleaner gate-arrival notification (F30). Set to the **approved** template name — `wabistay_cleaner_gate_arrival` — only after Meta approves it. While unset, each skip logs `cleaner_gate_notify_stubbed` with `bookingId`. Parameter order is positional and load-bearing: `{{1}}` cleaner, `{{2}}` guest, `{{3}}` room, `{{4}}` property |
+| `WABISTAY_RECEPTION_PAYMENT_TEMPLATE` | optional | Checkout → Reception "amount owed" push (B8/PAID). Set to the **approved** template name only after Meta approves it. While unset, each skip logs `reception_payment_notify_stubbed` with the full payload, `bookingId` and `source` (`manual` / `auto`) — the send is never downgraded to free-form, because Reception has not messaged us at checkout time. Parameter order is positional and load-bearing: `{{1}}` room, `{{2}}` guest, `{{3}}` amount owed (formatted `400.00`, **no** R — the symbol belongs in the template copy or it renders doubled), `{{4}}` booking ref |
 
 The B17 owner summary (`OWNER_SUMMARY_TEMPLATE`) is still a code constant rather
 than an env var, because its send remains stubbed pending Meta approval.

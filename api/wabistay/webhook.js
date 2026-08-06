@@ -33,6 +33,16 @@ function cleanerGateTemplate() {
   return process.env.WABISTAY_CLEANER_GATE_TEMPLATE || null;
 }
 
+// B8 (PAID): the checkout push to the Reception seat. Same contract as the
+// cleaner gate template above and B17's owner summary — read at CALL time, unset
+// IS the stub state, and the stub logs the full payload rather than downgrading
+// to free-form text. Reception has not messaged us at checkout time, so this is
+// business-initiated to a third party: outside Meta's 24h window free-form is
+// rejected 131047 and vanishes at HTTP 200 (CLAUDE.md line 30).
+function receptionPaymentTemplate() {
+  return process.env.WABISTAY_RECEPTION_PAYMENT_TEMPLATE || null;
+}
+
 // ─── AIRTABLE HELPERS ───────────────────────────────────────────────────────
 
 async function airtableGet(table, filterFormula) {
@@ -208,6 +218,66 @@ async function notifyCleanerOfArrival({ propertyId, bookingId, propertyName, gue
       });
     }
   }
+}
+
+// B8 (PAID): tell Reception what is owed, at the moment the guest checks out.
+// Called from BOTH checkout paths — the manual one and the B12 cron — because
+// walk-ins and hourly stays are normally closed by the cron, and a push wired
+// only to the manual path would miss most of the money it exists to collect.
+//
+// `amountDue` is read off the booking at call time, so it already includes any
+// extensions (F34 adds each extension's charge onto Amount Due in place).
+async function notifyReceptionOfPayment({ propertyId, bookingId, bookingRef, roomName, guestName, amountDue, source }) {
+  const correlation = { site: 'checkout_payment', source, bookingId, bookingRef, propertyId, amountDue };
+  const seats = await activeReceptionRolesForProperty(propertyId);
+
+  if (seats.length === 0) {
+    // Fails LOUD, like the cleaner gate: nobody being told what to collect is
+    // itself the failure this push exists to prevent, so it must be visible
+    // rather than quietly skipped.
+    logToAxiom('warn', 'reception_payment_notify_no_seat', {
+      ...correlation, reason: 'no active Reception seat for property'
+    });
+    return;
+  }
+
+  const templateName = receptionPaymentTemplate();
+
+  for (const seat of seats) {
+    const to = formatPhone(String(seat.fields['Current Phone']));
+    const perSeat = { ...correlation, roleId: seat.id, roleLabel: seat.fields['Role Label'] || null };
+    // Positional and load-bearing once the template is approved — the order is
+    // documented in docs/env.md alongside the variable.
+    const params = [roomName || 'a room', guestName || 'the guest', formatAmount(amountDue), bookingRef || ''];
+
+    if (!templateName) {
+      // STUBBED until WABISTAY_RECEPTION_PAYMENT_TEMPLATE is approved and set.
+      // Never downgraded to free-form: Reception has not messaged us, so a
+      // free-form send outside the 24h window 200s and vanishes.
+      logToAxiom('warn', 'reception_payment_notify_stubbed', {
+        ...perSeat, to, params,
+        reason: 'WABISTAY_RECEPTION_PAYMENT_TEMPLATE not configured — template pending Meta approval'
+      });
+      continue;
+    }
+
+    const result = await sendWhatsAppTemplate(to, templateName, params, perSeat);
+    if (!result.ok) {
+      logToAxiom('error', 'reception_payment_notify_failed', {
+        ...perSeat, to, template: templateName, error: JSON.stringify(result.error || null)
+      });
+    }
+    // Success is already logged by sendWhatsAppTemplate as `whatsapp_template_sent`
+    // carrying the wamid — the join key to B3's status callbacks. Not duplicated
+    // here, matching notifyCleanerOfArrival.
+  }
+}
+
+// Rands, two decimals, no currency symbol — the symbol belongs to the template
+// copy, not the parameter, so it cannot end up doubled ("RR400.00").
+function formatAmount(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n.toFixed(2) : '0.00';
 }
 
 // ─── WHATSAPP HELPER ────────────────────────────────────────────────────────
@@ -803,6 +873,38 @@ function parseWalkinCommand(text) {
   return { ok: true, roomToken: m[1], hours, guestName, guestPhone };
 }
 
+// ─── PAID COMMAND PARSER (B8) ────────────────────────────────────────────────
+// `PAID ROOM <n> <amount> [method]` — reception recording cash taken at the
+// desk. Pure, like parseWalkinCommand, and strict for the same live-data reason:
+// rooms are numbered 1–12, so the ROOM keyword is what separates the room from
+// the amount. `PAID 2 500` has two readings and is refused rather than guessed.
+//
+// Return shapes match the walk-in parser exactly, and the null / {ok:false}
+// split carries the same meaning: `null` is "not a PAID attempt" and falls
+// through to the ordinary guest flow, so an unauthorised sender learns nothing.
+const PAID_KEYWORD = /^paid\b/i;
+// `R500`, `500`, `500.00` and `500,00` all parse. The optional trailing method
+// is NOT in the locked grammar — see the PR — but a reception that types CASH
+// should not be refused for being more specific than required.
+const PAID_BODY = /^room\s*([a-z0-9]{1,4})\s+r?\s*(\d+(?:[.,]\d{1,2})?)\s*(cash|eft|card)?\.?$/i;
+const PAID_METHODS = { cash: 'Cash', eft: 'EFT', card: 'Card' };
+
+function parsePaidCommand(text) {
+  const t = String(text || '').trim().replace(/\s+/g, ' ');
+  if (!PAID_KEYWORD.test(t)) return null;
+
+  const body = t.replace(PAID_KEYWORD, '').trim();
+  const m = body.match(PAID_BODY);
+  if (!m) return { ok: false, reason: 'bad_syntax' };
+
+  // Comma as decimal separator is normal SA usage ("R500,00").
+  const amount = Number(String(m[2]).replace(',', '.'));
+  if (!Number.isFinite(amount) || amount <= 0) return { ok: false, reason: 'bad_amount' };
+
+  const method = m[3] ? PAID_METHODS[m[3].toLowerCase()] : null;
+  return { ok: true, roomToken: m[1], amount, method };
+}
+
 // ─── WALK-IN AUTHORISATION (B7) ──────────────────────────────────────────────
 // Authority is a SEAT, not a hardcoded number: `WS_Roles.Current Phone` where
 // the seat is Active. Multiple numbers per property is the normal case (two
@@ -828,6 +930,39 @@ async function activeWalkinRoleForPhone(phone) {
     if (!raw) return false;
     return formatPhone(String(raw)) === phone;
   }) || null;
+}
+
+// ─── PAYMENT SEAT LOOKUPS (B8) ───────────────────────────────────────────────
+// PAID is Reception-only, per the locked spec's refusal rule ("non-Reception
+// seat ... falls through silently") — narrower than WALKIN, which also accepts
+// Owner and Manager. Flagged in the PR: if the owner should be able to record a
+// payment, this constant is the single place that changes.
+const PAID_ROLE_TYPES = ['Reception'];
+
+// Deliberately a sibling of activeWalkinRoleForPhone rather than a
+// generalisation of it: rule 26 — no refactor while adding a feature. The two
+// converge when B18 lands and owns seat resolution properly.
+async function activePaidRoleForPhone(phone) {
+  const roles = await airtableGet('WS_Roles', `{Active} = TRUE()`);
+  return roles.find(r => {
+    if (!PAID_ROLE_TYPES.includes(r.fields['Role Type'])) return false;
+    const raw = r.fields['Current Phone'];
+    if (!raw) return false;
+    return formatPhone(String(raw)) === phone;
+  }) || null;
+}
+
+// The recipients of the checkout push. Scoped by property record id and filtered
+// in JS, for the same reason activeCleanersForProperty is: filterByFormula
+// matches linked-record fields on their display value, which is not id-safe.
+async function activeReceptionRolesForProperty(propertyId) {
+  if (!propertyId) return [];
+  const roles = await airtableGet('WS_Roles', `{Active} = TRUE()`);
+  return roles.filter(r =>
+    PAID_ROLE_TYPES.includes(r.fields['Role Type']) &&
+    (r.fields['Property'] || []).includes(propertyId) &&
+    r.fields['Current Phone']
+  );
 }
 
 // Exact match only — never `roomMatchesText`, whose \b<number>\b test would
@@ -987,6 +1122,27 @@ const guards = {
 
     ctx.walkin = parsed;
     ctx.walkinRole = role;
+    return true;
+  },
+
+  // B8 (PAID). Registered alongside the walk-in global and ahead of the
+  // cleaner-naming-room guard for the same reason: `PAID ROOM 2 500` contains a
+  // bare `2`, so if Room 02 is mid-clean that guard would match it and mark the
+  // room Available instead of recording the money. Cheap pure parse first,
+  // Airtable only for something that is actually a PAID command; an
+  // unauthorised sender returns false and falls through to the guest flow.
+  async senderIsAuthorizedPaid(ctx) {
+    const parsed = parsePaidCommand(ctx.messageText);
+    if (!parsed) return false;
+
+    const role = await activePaidRoleForPhone(ctx.phone);
+    if (!role) {
+      logToAxiom('warn', 'paid_unauthorised_sender', { phone: ctx.phone });
+      return false;
+    }
+
+    ctx.paid = parsed;
+    ctx.paidRole = role;
     return true;
   },
 
@@ -1252,6 +1408,162 @@ const actions = {
       checkOutText: formatSastDateTime(checkOutIso),
       amount: rates[parsed.hours],
       bookingRef
+    }));
+  },
+
+  // B8 (PAID): reception records cash taken at the desk. Reached only through
+  // senderIsAuthorizedPaid, so every reply here is safe to send and goes to the
+  // seat that just messaged us — inside the 24h window, so free-form is correct.
+  async paidBooking(ctx) {
+    const parsed = ctx.paid;
+    const role = ctx.paidRole;
+
+    if (!parsed.ok) {
+      logToAxiom('info', 'paid_rejected', { phone: ctx.phone, reason: parsed.reason });
+      await sendWhatsApp(ctx.phone, msg('paidUsage'));
+      return;
+    }
+
+    const rolePropertyId = (role.fields['Property'] || [])[0] || null;
+    if (!rolePropertyId) {
+      logToAxiom('error', 'paid_role_without_property', { phone: ctx.phone, roleId: role.id });
+      await sendWhatsApp(ctx.phone, msg('paidNotConfigured'));
+      return;
+    }
+    // Fails closed on a cross-property mismatch, same posture as WALKIN: the
+    // seat says one property and the inbound number says another, and recording
+    // a payment against the wrong property's booking is not recoverable by a
+    // guess. Same CEO decision pending as WALKIN's.
+    if (rolePropertyId !== ctx.property.id) {
+      logToAxiom('warn', 'paid_property_mismatch', {
+        phone: ctx.phone, roleId: role.id, rolePropertyId, inboundPropertyId: ctx.property.id
+      });
+      await sendWhatsApp(ctx.phone, msg('paidWrongProperty'));
+      return;
+    }
+    const property = ctx.property;
+
+    // Resolve the room within this property, exact match only — the same
+    // matcher WALKIN uses, never roomMatchesText.
+    const allRooms = await airtableGet('WS_Rooms', '');
+    const propertyRooms = allRooms.filter(r => (r.fields['Property'] || []).includes(property.id));
+    const room = propertyRooms.find(r => roomMatchesWalkinToken(r, parsed.roomToken)) || null;
+    if (!room) {
+      logToAxiom('info', 'paid_rejected', { phone: ctx.phone, reason: 'no_such_room', roomToken: parsed.roomToken });
+      await sendWhatsApp(ctx.phone, msg('paidNoSuchRoom', { roomToken: parsed.roomToken }));
+      return;
+    }
+
+    // Which stay is being paid for. Reception is standing at the desk just after
+    // a checkout, so the target is that room's most recent CLOSED booking:
+    // Checked Out ranks over Checked In (a guest still in the room has not been
+    // billed at the desk yet), and within each, latest Check Out wins. Cancelled
+    // and Enquiry rows can never be paid for.
+    const PAYABLE_STATUSES = ['Checked Out', 'Checked In'];
+    const all = await airtableGet('WS_Bookings', orFormula('Status', PAYABLE_STATUSES));
+    const candidates = all
+      .filter(b => (b.fields['Room'] || []).includes(room.id))
+      .sort((a, b) => {
+        const rank = s => (s === 'Checked Out' ? 0 : 1);
+        const byStatus = rank(a.fields['Status']) - rank(b.fields['Status']);
+        if (byStatus !== 0) return byStatus;
+        return Date.parse(b.fields['Check Out'] || 0) - Date.parse(a.fields['Check Out'] || 0);
+      });
+    const booking = candidates[0] || null;
+    if (!booking) {
+      logToAxiom('info', 'paid_rejected', { phone: ctx.phone, reason: 'no_booking', roomId: room.id });
+      await sendWhatsApp(ctx.phone, msg('paidNoBooking', { roomName: room.fields['Room Name'] }));
+      return;
+    }
+
+    // Idempotency (locked): an already-Paid booking is reported, never rewritten.
+    // Reception re-sending after a lost reply, or two handsets recording the same
+    // cash, must not double-write — and must not silently look like a second
+    // payment either.
+    if (booking.fields['Payment Status'] === 'Paid') {
+      logToAxiom('info', 'paid_already_recorded', {
+        phone: ctx.phone, bookingId: booking.id, bookingRef: booking.fields['Booking Ref'] || null,
+        amountPaid: booking.fields['Amount Paid'] || null
+      });
+      await sendWhatsApp(ctx.phone, msg('paidAlreadyRecorded', {
+        roomName: room.fields['Room Name'],
+        bookingRef: booking.fields['Booking Ref'] || '',
+        amountPaid: formatAmount(booking.fields['Amount Paid'])
+      }));
+      return;
+    }
+
+    const amountDue = Number(booking.fields['Amount Due']) || 0;
+
+    // Partial payments do not exist in this business (CEO, 6 Aug), and that is
+    // what decides the mismatch rule rather than a preference: if every payment
+    // settles the bill in full, then an amount that is not the amount owed is
+    // not a short payment — it is a TYPO. So it is refused with zero writes and
+    // reception re-sends the right figure.
+    //
+    // The alternative (record it, flag the mismatch, mark Paid) was rejected
+    // because it is unrecoverable in one step: the write marks the booking Paid,
+    // and the idempotency guard immediately above then refuses every correction,
+    // so a fat-fingered R40 against R400 would be frozen into the record that
+    // B17 builds the owner's revenue report from. Refusing costs one re-send;
+    // accepting costs a wrong number nobody can fix from WhatsApp.
+    //
+    // Compared with a half-cent tolerance so decimal input ("400,00") cannot
+    // fail on float representation alone.
+    const AMOUNT_EPSILON = 0.005;
+    // An unpriced booking has nothing to check against — F19's and F34's
+    // fail-closed paths both produce exactly that (booked or extended, never
+    // priced). Refusing there would leave reception unable to record real cash,
+    // so whatever they send is accepted and the gap is logged instead.
+    const priced = amountDue > 0;
+    if (priced && Math.abs(parsed.amount - amountDue) > AMOUNT_EPSILON) {
+      logToAxiom('warn', 'payment_amount_mismatch', {
+        phone: ctx.phone, bookingId: booking.id, bookingRef: booking.fields['Booking Ref'] || null,
+        roomName: room.fields['Room Name'], amountSent: parsed.amount, amountDue,
+        delta: Number((parsed.amount - amountDue).toFixed(2)), written: false
+      });
+      await sendWhatsApp(ctx.phone, msg('paidAmountMismatch', {
+        roomName: room.fields['Room Name'],
+        amountSent: formatAmount(parsed.amount),
+        amountDue: formatAmount(amountDue)
+      }));
+      return;
+    }
+    if (!priced) {
+      logToAxiom('warn', 'payment_recorded_unpriced', {
+        phone: ctx.phone, bookingId: booking.id, bookingRef: booking.fields['Booking Ref'] || null,
+        amountSent: parsed.amount, reason: 'booking has no Amount Due to check against'
+      });
+    }
+
+    const status = 'Paid';
+    const method = parsed.method || 'Cash';
+
+    const update = {
+      'Amount Paid': parsed.amount,
+      'Payment Method': method,
+      'Payment Status': status
+    };
+    await airtableUpdate('WS_Bookings', booking.id, update);
+
+    // The confirmation timestamp lives HERE and only here: WS_Bookings has no
+    // payment-timestamp field (confirmed against the live base this session),
+    // and writing an unrecognised field name would make Airtable reject the
+    // whole PATCH — including the payment itself. Flagged in the PR: once the
+    // CEO adds `Paid At` (dateTime), it is a one-line addition to `update`.
+    logToAxiom('info', 'payment_recorded', {
+      phone: ctx.phone, roleId: role.id, propertyId: property.id,
+      bookingId: booking.id, bookingRef: booking.fields['Booking Ref'] || null,
+      roomId: room.id, roomName: room.fields['Room Name'],
+      amountPaid: parsed.amount, amountDue, method, status,
+      recordedAt: new Date().toISOString()
+    });
+
+    await sendWhatsApp(ctx.phone, msg('paidRecorded', {
+      roomName: room.fields['Room Name'],
+      bookingRef: booking.fields['Booking Ref'] || '',
+      amountPaid: formatAmount(parsed.amount),
+      method
     }));
   },
 
@@ -2028,6 +2340,23 @@ const actions = {
         await sendWhatsApp(formattedCleanerPhone, msg('cleanerDispatch', { cleanerName, roomName }));
       }
     }
+    // B8: tell Reception what to collect. After the booking/room writes and the
+    // cleaner dispatch, so a failure here cannot cost the guest their checkout —
+    // and deliberately NOT gating the cleaner dispatch on payment (the 5 Jul
+    // spec proposed moving dispatch behind PAID; CEO kept it at checkout).
+    if (bookings.length > 0) {
+      const b = bookings[0];
+      await notifyReceptionOfPayment({
+        propertyId: scopePropertyId,
+        bookingId: b.id,
+        bookingRef: b.fields['Booking Ref'] || null,
+        roomName,
+        guestName: ctx.guest.fields['Guest Name'],
+        amountDue: b.fields['Amount Due'],
+        source: 'manual'
+      });
+    }
+
     await airtableUpdate('WS_Guests', ctx.guest.id, { 'Session State': ctx.next });
     logToAxiom('info', 'state_transition', { phone: ctx.phone, guestId: ctx.guest.id, from: 'CHECKED_IN', to: ctx.next, reason: 'checkout', roomName });
     await sendWhatsApp(ctx.phone, msg('checkoutThanks', { propertyName: ctx.property.fields['Property Name'] }));
@@ -2157,6 +2486,19 @@ async function settleAutoCheckout(booking, room, guest, propertyName, propertyId
       }));
     }
   }
+  // B8: same push as the manual path. This is the branch that matters most —
+  // walk-ins and hourly stays are normally closed here, not by the guest, and a
+  // walk-in guest may have no phone on record to close it with at all.
+  await notifyReceptionOfPayment({
+    propertyId: bookingPropertyId(booking, propertyId),
+    bookingId: booking.id,
+    bookingRef: booking.fields['Booking Ref'] || null,
+    roomName,
+    guestName: guest ? guest.fields['Guest Name'] : null,
+    amountDue: booking.fields['Amount Due'],
+    source: 'auto'
+  });
+
   if (guest) {
     await airtableUpdate('WS_Guests', guest.id, { 'Session State': 'NEW' });
   }
@@ -2680,6 +3022,9 @@ module.exports.findDateTokens = findDateTokens;
 // consumes it (authorisation, room resolution, booking write) is a separate,
 // schema-dependent commit.
 module.exports.parseWalkinCommand = parseWalkinCommand;
+// B8 (PAID): the command grammar is pure and Airtable-free, so it is unit-tested
+// directly — see test/paid.test.js.
+module.exports.parsePaidCommand = parsePaidCommand;
 // B12: the auto-checkout cron entry point (autoCheckoutHandler wraps it for the
 // Vercel HTTP cron; runAutoCheckout takes an injected `now` for timing tests).
 module.exports.runAutoCheckout = runAutoCheckout;

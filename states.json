@@ -3,6 +3,7 @@
 
   "global": [
     { "inputs": "*", "guard": "senderIsAuthorizedWalkin", "action": "walkinBooking" },
+    { "inputs": "*", "guard": "senderIsAuthorizedPaid", "action": "paidBooking" },
     { "inputs": ["done"], "guard": "senderIsCleaner", "action": "cleanerDone" },
     { "inputs": "*", "guard": "senderIsCleanerNamingRoom", "action": "cleanerRoomReply" }
   ],
@@ -95,6 +96,14 @@
     "walkinWrongProperty": "That walk-in is for a different property to the one this number handles. Please send it from that property's number.",
     "walkinNotConfigured": "Your staff profile isn't linked to a property yet, so a walk-in can't be created. Please contact the owner.",
     "walkinFailed": "Something went wrong saving that walk-in — nothing was booked. Please try again.",
-    "walkinConfirmed": "✅ Walk-in recorded\n\n*Ref:* {bookingRef}\n*Guest:* {guestName}\n*Room:* {roomName}\n*Duration:* {durationText}\n*Checkout:* {checkOutText}\n*Amount due:* R{amount}\n\n{roomName} is now marked occupied."
+    "walkinConfirmed": "✅ Walk-in recorded\n\n*Ref:* {bookingRef}\n*Guest:* {guestName}\n*Room:* {roomName}\n*Duration:* {durationText}\n*Checkout:* {checkOutText}\n*Amount due:* R{amount}\n\n{roomName} is now marked occupied.",
+    "paidUsage": "Payment format:\n\n*PAID ROOM 2 500*\n\nRoom, then the amount received. Add CASH, EFT or CARD at the end if it wasn't cash.",
+    "paidNoSuchRoom": "No room matching \"{roomToken}\" at this property.\n\nUse the room number, like *PAID ROOM 2 500*",
+    "paidNoBooking": "No booking found for {roomName} to record a payment against.",
+    "paidNotConfigured": "Your staff profile isn't linked to a property yet, so a payment can't be recorded. Please contact the owner.",
+    "paidWrongProperty": "That room is at a different property to the one this number handles. Please send it from that property's number.",
+    "paidRecorded": "✅ Payment recorded\n\n*Ref:* {bookingRef}\n*Room:* {roomName}\n*Received:* R{amountPaid}\n*Method:* {method}\n\nSettled in full.",
+    "paidAmountMismatch": "That doesn't match what's owed on {roomName}.\n\n*You sent:* R{amountSent}\n*Amount owed:* R{amountDue}\n\nNothing was recorded. Send *PAID ROOM* again with R{amountDue}.",
+    "paidAlreadyRecorded": "Already recorded — {roomName} ({bookingRef}) was settled at R{amountPaid}. Nothing changed."
   }
 }
