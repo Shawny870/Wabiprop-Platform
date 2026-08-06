@@ -341,6 +341,48 @@ const EXTENSION_MS = {
   Overnight: 24 * 60 * 60 * 1000 // +1 day
 };
 
+// What one extension is WORTH. B12 shipped the time extension without the money:
+// `extendStay` pushed `Check Out` out and wrote nothing financial, so every
+// extension since has been free, and B17's revenue total (which sums
+// `Amount Due`) has understated every extended booking. This resolves the price
+// of exactly one extension — the same unit `EXTENSION_MS` moves the clock by —
+// and the caller ADDS it to whatever `Amount Due` already holds.
+//
+// The two paths mirror how each booking type was priced at creation, so an
+// extension costs what the stay costs:
+//   · Overnight — the booking's own `Rate Applied` link (F19's occupancy-keyed
+//     rate). Read from the booking, not re-derived from the guest's occupancy
+//     answer, so a rate row edited mid-stay cannot silently reprice history.
+//   · Hourly (and Walk-in, which IS Booking Type 'Hourly') — the property's
+//     1-hour rate, since the extension unit is one hour.
+//
+// Returns null when the price cannot be established, and the caller then leaves
+// `Amount Due` ALONE rather than guessing. Never invent a number: a wrong figure
+// on a bill the guest pays at the desk is worse than a missing one, and the
+// same fail-closed posture already governs F19 and `hourlyRates`.
+async function extensionCharge(booking, property) {
+  // Unknown/blank Booking Type falls to Overnight here for exactly the reason it
+  // does in EXTENSION_MS above — the two must agree, or a booking would be given
+  // a day of time at an hour's price.
+  const type = booking.fields['Booking Type'] === 'Hourly' ? 'Hourly' : 'Overnight';
+
+  if (type === 'Hourly') {
+    // HOURLY_RATE_FIELDS[1] rather than a typed field name — same constant the
+    // booking flow prices from, so the two cannot drift apart.
+    const raw = property && property.fields[HOURLY_RATE_FIELDS[1]];
+    const amount = Number(raw);
+    if (raw === undefined || raw === null || raw === '' || !Number.isFinite(amount) || amount <= 0) return null;
+    return amount;
+  }
+
+  const rateId = (booking.fields['Rate Applied'] || [])[0];
+  if (!rateId) return null; // e.g. F19's fail-closed path: booked, never priced
+  const rates = await airtableGet('WS_Rates', `RECORD_ID() = '${rateId}'`);
+  const amount = Number(rates[0] && rates[0].fields['Amount']);
+  if (!Number.isFinite(amount) || amount <= 0) return null;
+  return amount;
+}
+
 // B14 (STOP opt-out). Keywords are matched against the already-lowercased inbound
 // text, so STOP / Stop / stop all match — case-insensitive by construction.
 const STOP_KEYWORDS = ['stop'];
@@ -2018,6 +2060,29 @@ const actions = {
     // Set the flag only on the first extension — leave it untouched afterwards so
     // the write log shows no re-notify bookkeeping on later extensions.
     if (!alreadyNotified) bookingUpdate['Extension Owner Notified'] = true;
+
+    // Price the extension onto the bill. Strictly ADDITIVE — the new total is
+    // whatever the booking already carried plus one extension, never a
+    // recomputation from scratch. Recomputing would silently overwrite anything
+    // else that had adjusted the figure, and would make the Nth extension depend
+    // on rates being unchanged since the 1st. Creation-time pricing is untouched.
+    const charge = await extensionCharge(booking, ctx.property);
+    const previousDue = Number(booking.fields['Amount Due']) || 0;
+    if (charge === null) {
+      // Unpriceable (no Rate Applied, or no hourly rate configured). The time
+      // extension still happens — refusing a guest more time over a config gap
+      // would be a worse failure, and is not what B12 promised them — but the
+      // money is left untouched and the gap is made loud rather than papered
+      // over with a guessed figure.
+      logToAxiom('warn', 'extension_not_priced', {
+        phone: ctx.phone, bookingId: booking.id,
+        bookingType: booking.fields['Booking Type'] || null,
+        propertyId: ctx.property.id, amountDue: previousDue
+      });
+    } else {
+      bookingUpdate['Amount Due'] = previousDue + charge;
+    }
+
     await airtableUpdate('WS_Bookings', booking.id, bookingUpdate);
 
     if (!alreadyNotified && OWNER_PHONE) {
@@ -2028,7 +2093,10 @@ const actions = {
       }));
     }
     logToAxiom('info', 'booking_extended', {
-      phone: ctx.phone, bookingId: booking.id, newCheckOut, ownerNotified: !alreadyNotified
+      phone: ctx.phone, bookingId: booking.id, newCheckOut, ownerNotified: !alreadyNotified,
+      // Both figures, so "what did this extension cost and what is owed now" is a
+      // query rather than an inference — the number PAID will eventually display.
+      extensionCharge: charge, amountDue: charge === null ? previousDue : previousDue + charge
     });
     await sendWhatsApp(ctx.phone, msg('extensionConfirmed', { guestName }));
   },
