@@ -42,14 +42,28 @@ const { readRawBody, verifySignature } = require('../lib/hmac');
 
 // ─── AXIOM LOGGER ────────────────────────────────────────────────────────────
 
+// Dataset: wabistay — the only dataset that exists in the Axiom org. This used
+// to read 'wabiprop', which does not exist and never did, so every router log
+// ever written was rejected 404 and dropped. `source` carries the product, so
+// filing everything in one dataset loses nothing that was previously separable.
+const AXIOM_DATASET = 'wabistay';
+
 function logToAxiom(level, event, detail = {}) {
   if (!AXIOM_TOKEN) return;
   const payload = [{ _time: new Date().toISOString(), level, event, source: 'router', ...detail }];
-  fetch('https://api.axiom.co/v1/datasets/wabiprop/ingest', {
+  fetch(`https://api.axiom.co/v1/datasets/${AXIOM_DATASET}/ingest`, {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${AXIOM_TOKEN}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(payload)
-  }).catch(err => console.error('[Axiom ERROR]', err.message));
+  })
+    // fetch does NOT reject on 4xx/5xx — it resolves. Without this branch a
+    // rejected ingest is indistinguishable from a successful one, which is how
+    // a wrong dataset name stayed invisible for weeks. console.error is the
+    // right sink precisely because it does not depend on Axiom working.
+    .then(res => {
+      if (!res.ok) console.error(`[Axiom ERROR] ingest rejected: HTTP ${res.status} dataset=${AXIOM_DATASET} event=${event}`);
+    })
+    .catch(err => console.error('[Axiom ERROR]', err.message));
 }
 
 // ─── HELPERS ─────────────────────────────────────────────────────────────────

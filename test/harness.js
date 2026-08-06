@@ -173,6 +173,12 @@ function installFetch(ctx) {
     }
 
     if (u.hostname === 'api.axiom.co') {
+      // The dataset name was previously ignored here, so a wrong one returned a
+      // cheerful 200 and no test could ever see it — which is exactly how the
+      // nonexistent 'wabiprop' dataset survived 156 passing tests while dropping
+      // every router log in production. Record it so it can be asserted.
+      const dataset = (u.pathname.match(/\/datasets\/([^/]+)\/ingest/) || [])[1] || null;
+      (ctx.axiomDatasets || (ctx.axiomDatasets = [])).push(dataset);
       ctx.axiom.push(...JSON.parse(opts.body));
       return jsonRes({});
     }

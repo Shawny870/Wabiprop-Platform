@@ -494,6 +494,9 @@ function findDateTokens(text) {
 // F12: fire-and-forget log to Axiom HTTP API
 // Never awaited in critical path — cannot block or break the state machine
 // Dataset: wabistay · Token via AXIOM_TOKEN env var
+// This was always the correct name — it is the only dataset that exists in the
+// org, which is why Wabistay logging worked while the router's silently did not.
+const AXIOM_DATASET = 'wabistay';
 
 function logToAxiom(level, event, detail = {}) {
   if (!AXIOM_TOKEN) return;
@@ -501,16 +504,22 @@ function logToAxiom(level, event, detail = {}) {
     _time: new Date().toISOString(),
     level,
     event,
+    source: 'wabistay',
     ...detail
   }];
-  fetch('https://api.axiom.co/v1/datasets/wabistay/ingest', {
+  fetch(`https://api.axiom.co/v1/datasets/${AXIOM_DATASET}/ingest`, {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${AXIOM_TOKEN}`,
       'Content-Type': 'application/json'
     },
     body: JSON.stringify(payload)
-  }).catch(err => console.error('[Axiom ERROR]', err.message));
+  })
+    // fetch resolves on 4xx/5xx — surface it or it is invisible. See api/webhook.js.
+    .then(res => {
+      if (!res.ok) console.error(`[Axiom ERROR] ingest rejected: HTTP ${res.status} dataset=${AXIOM_DATASET} event=${event}`);
+    })
+    .catch(err => console.error('[Axiom ERROR]', err.message));
 }
 
 // B17: instrument the three existing owner/notify sends. Business-initiated
