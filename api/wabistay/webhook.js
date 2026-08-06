@@ -670,6 +670,66 @@ function durationText(hours) {
   return hours === 1 ? '1 hour' : `${hours} hours`;
 }
 
+// ─── WALK-IN COMMAND PARSER (B7) ─────────────────────────────────────────────
+// `WALKIN ROOM <n> <h>HRS` — staff-initiated, no guest thread. This function is
+// PURE: it reads the message and nothing else. Room resolution, authorisation
+// and every Airtable write live in the handler, so the grammar can be tested
+// exhaustively without a base.
+//
+// Deliberately strict, for three reasons that are all live-data hazards:
+//
+//  1. The ROOM keyword is REQUIRED. Villa Liza's rooms are numbered 1–12, so
+//     `WALKIN 12 2` is two bare numbers with no way to tell which is the room.
+//     The keyword is the only thing that disambiguates them.
+//  2. The hour UNIT is REQUIRED (`2hrs`, not `2`). Same reason from the other
+//     side: with the unit, `WALKIN ROOM 12 2HRS` is unambiguous even though both
+//     tokens are numbers and both are valid room numbers.
+//  3. Matching is anchored and exact — NOT `roomMatchesText`. That helper tests
+//     `\b<number>\b` anywhere in the message, so it would match Room 02 on the
+//     DURATION digit of `WALKIN ROOM 12 2HRS` and send staff to the wrong room.
+//     It is correct where it is used (a cleaner naming a room in free text) and
+//     wrong here; this parser is the reason it stays untouched.
+//
+// Three return shapes, and the distinction between the first two is what makes
+// the no-leak rule work:
+//   · null                          — not a WALKIN attempt at all. The guard
+//                                     declines and the message falls through to
+//                                     the ordinary guest flow, so an outsider
+//                                     who types this sees exactly what any
+//                                     stranger sees. Nothing confirms the
+//                                     command exists.
+//   · { ok: false, reason }         — a WALKIN attempt that is malformed. Only
+//                                     an AUTHORISED sender ever sees the usage
+//                                     help; for anyone else the handler is never
+//                                     reached, so this shape still leaks nothing.
+//   · { ok: true, roomToken, hours }— parsed. `roomToken` is the raw token
+//                                     ('2', '02', 'a') for the resolver to match
+//                                     against Room Number / Room Name; the
+//                                     parser does not know what rooms exist.
+const WALKIN_KEYWORD = /^walk\s*-?\s*in\b/;
+// `room2` (no space) and `room 02` (zero-padded, as every live Room Name is)
+// both parse; the token is handed on verbatim rather than coerced to a number,
+// because `Room A` exists in the fixtures and a number would lose it.
+const WALKIN_BODY = /^room\s*([a-z0-9]{1,4})\s+(\d{1,2})\s*(?:hrs|hr|hours|hour|h)\.?$/;
+
+function parseWalkinCommand(text) {
+  const t = String(text || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  if (!WALKIN_KEYWORD.test(t)) return null;
+
+  const body = t.replace(WALKIN_KEYWORD, '').trim();
+  const m = body.match(WALKIN_BODY);
+  if (!m) return { ok: false, reason: 'bad_syntax' };
+
+  const hours = Number(m[2]);
+  // Duration is locked to the hourly rate card (CEO, 6 Aug): 1/2/3 only. A
+  // fourth duration has no price — the overnight rate is occupancy-keyed and a
+  // walk-in has no guest to ask — so it is refused rather than guessed. Reusing
+  // HOURLY_DURATIONS means the command and the rate card can never drift apart.
+  if (!HOURLY_DURATIONS.includes(hours)) return { ok: false, reason: 'bad_duration', hours };
+
+  return { ok: true, roomToken: m[1], hours };
+}
+
 // ─── AVAILABILITY (B8) ───────────────────────────────────────────────────────
 // Rooms are held at enquiry, not at arrival: without a Room link on the booking
 // there is nothing for an overlap check to compare against, and two guests
@@ -2216,6 +2276,11 @@ module.exports.formatSastDateTime = formatSastDateTime;
 // F20: exported for parser unit coverage — findDateTokens locates the spans,
 // parseBookingDate (already exported) validates them.
 module.exports.findDateTokens = findDateTokens;
+// B7 (WALKIN): the command grammar is pure and has no Airtable dependency, so it
+// is tested exhaustively here — see test/walkin.parser.test.js. The handler that
+// consumes it (authorisation, room resolution, booking write) is a separate,
+// schema-dependent commit.
+module.exports.parseWalkinCommand = parseWalkinCommand;
 // B12: the auto-checkout cron entry point (autoCheckoutHandler wraps it for the
 // Vercel HTTP cron; runAutoCheckout takes an injected `now` for timing tests).
 module.exports.runAutoCheckout = runAutoCheckout;
