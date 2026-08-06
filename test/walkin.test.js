@@ -121,6 +121,22 @@ test('authorised staff walk-in creates a Checked In booking on the named room', 
   assert.match(texts(ctx), /Room 02/);
 });
 
+test('the space-separated `walk in` form books identically, end to end', async () => {
+  // Parser coverage proves the grammar; this proves DISPATCH — that the global
+  // guard is actually entered for this spelling and the booking is created,
+  // which is the thing the device test was checking.
+  const ctx = start();
+  await send(STAFF_PHONE, 'Walk In Room 2 2hrs John Smith');
+
+  assert.strictEqual(bookings(ctx).length, 1, 'the walk-in was created');
+  const b = bookings(ctx)[0].fields;
+  assert.strictEqual(b['Status'], 'Checked In');
+  assert.strictEqual(b['Source'], 'Walk-in');
+  assert.deepStrictEqual(b['Room'], ['recR2']);
+  assert.strictEqual(b['Amount Due'], 250);
+  assert.match(texts(ctx), /Walk-in recorded/);
+});
+
 test('the price comes from the property rate card, per duration', async () => {
   for (const [hours, expected] of [[1, 120], [2, 250], [3, 320]]) {
     const ctx = start();

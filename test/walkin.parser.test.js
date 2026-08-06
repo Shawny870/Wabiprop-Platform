@@ -95,6 +95,32 @@ test('case is irrelevant to every command token — the exact device-test input 
   }
 });
 
+// Requested 6 Aug: confirm the space-separated `walk in` form triggers. Verified
+// against the real parser before this test was written — all forms already
+// passed, so nothing in the keyword pattern changed. Pinned because the three
+// spellings are one `\s*-?\s*` apart in a single regex, and a future tightening
+// of that pattern would silently drop whichever form a staff member happens to
+// use. All three must stay interchangeable.
+test('walkin / walk in / walk-in are the same command, down to the parsed result', () => {
+  const expected = { ok: true, roomToken: '2', hours: 2, guestName: 'john smith', guestPhone: null };
+  for (const form of [
+    'walkin room 2 2hrs john smith',
+    'walk in room 2 2hrs john smith',
+    'walk-in room 2 2hrs john smith',
+    'walk  in room 2 2hrs john smith',   // double space
+    'walk - in room 2 2hrs john smith'   // spaced hyphen
+  ]) {
+    assert.deepStrictEqual(parseWalkinCommand(form), expected, `form: ${form}`);
+  }
+});
+
+test('the space-separated form is case-insensitive too', () => {
+  assert.deepStrictEqual(
+    parseWalkinCommand('Walk In Room 2 2hrs John Smith'),
+    { ok: true, roomToken: '2', hours: 2, guestName: 'John Smith', guestPhone: null }
+  );
+});
+
 test('ROOM and the hour unit are matched case-insensitively in isolation', () => {
   // Pinned separately from the keyword so a regression in one token cannot hide
   // behind the others.
