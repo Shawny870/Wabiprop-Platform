@@ -38,14 +38,24 @@ const AXIOM_TOKEN = process.env.AXIOM_TOKEN;
 // Fire-and-forget — never awaited, never blocks the flow
 // Dataset: wabiprop · Token via AXIOM_TOKEN env var
 
+// Dataset: wabistay — see api/webhook.js. The 'wabiprop' dataset this used to
+// target does not exist in the Axiom org, so every Wabiprop log was dropped.
+// `source: 'wabiprop'` keeps the product distinguishable inside the dataset.
+const AXIOM_DATASET = 'wabistay';
+
 function logToAxiom(level, event, detail = {}) {
   if (!AXIOM_TOKEN) return;
-  const payload = [{ _time: new Date().toISOString(), level, event, ...detail }];
-  fetch('https://api.axiom.co/v1/datasets/wabiprop/ingest', {
+  const payload = [{ _time: new Date().toISOString(), level, event, source: 'wabiprop', ...detail }];
+  fetch(`https://api.axiom.co/v1/datasets/${AXIOM_DATASET}/ingest`, {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${AXIOM_TOKEN}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(payload)
-  }).catch(err => console.error('[Axiom ERROR]', err.message));
+  })
+    // fetch resolves on 4xx/5xx — surface it or it is invisible. See api/webhook.js.
+    .then(res => {
+      if (!res.ok) console.error(`[Axiom ERROR] ingest rejected: HTTP ${res.status} dataset=${AXIOM_DATASET} event=${event}`);
+    })
+    .catch(err => console.error('[Axiom ERROR]', err.message));
 }
 
 // ─── AIRTABLE HELPERS ────────────────────────────────────────────────────────
