@@ -960,6 +960,92 @@ function parsePaidCommand(text) {
   return { ok: true, roomToken: m[1], amount, method };
 }
 
+// ─── CLEANING TIME (START / DONE) ────────────────────────────────────────────
+// Two metrics, both emitted at the DONE event:
+//
+//   · Vacant-To-Ready = completion − `WS_Rooms.Cleaning Started At`. The
+//     industry turnaround number: checkout → room sellable again. The baseline
+//     already existed (written at checkout by both checkout paths) and would
+//     have gone dead the moment per-job fields arrived; this is what keeps it
+//     load-bearing.
+//   · Job Duration    = completion − `Cleaning Job Started At`. Actual working
+//     speed once a cleaner engages. Secondary, and only available when the
+//     cleaner sent START.
+//
+// The timestamps live on WS_BOOKINGS, not WS_Rooms (CEO): a room holds exactly
+// one slot and the next checkout overwrites it, so per-cleaner averages over
+// many jobs need a per-job home that survives.
+//
+// HONEST LIMIT, and it belongs next to the code rather than only in the PR:
+// DONE is self-reported and unverified. Nothing confirms a room was actually
+// cleaned, and dispatch is a broadcast to every active cleaner on the property,
+// so whoever replies first is credited. These numbers therefore measure reply
+// speed at least as much as cleaning speed.
+const CLEANING_JOB_STARTED_FIELD = 'Cleaning Job Started At';
+const CLEANING_COMPLETED_FIELD = 'Cleaning Completed At';
+const CLEANED_BY_FIELD = 'Cleaned By';
+
+// A baseline this old is almost certainly a room that sat dirty for days rather
+// than a real turnaround. It is still emitted — the CEO is clearing the known
+// stale rooms by hand before go-live — but flagged so the first averages can be
+// filtered rather than quietly skewed.
+const CLEANING_SUSPECT_MS = 24 * 60 * 60 * 1000;
+
+// `START ROOM <n>` — one-shot, no session state (CEO). Same strict grammar as
+// WALKIN/PAID: the ROOM keyword is mandatory because rooms are numbered 1–12.
+const START_CLEANING_KEYWORD = /^start\b/i;
+const START_CLEANING_BODY = /^room\s*([a-z0-9]{1,4})\.?$/i;
+
+function parseStartCleaningCommand(text) {
+  const t = String(text || '').trim().replace(/\s+/g, ' ');
+  if (!START_CLEANING_KEYWORD.test(t)) return null;
+
+  const body = t.replace(START_CLEANING_KEYWORD, '').trim();
+  // A bare `START` is B14's opt-back-in keyword and must stay that way — only
+  // `START ROOM <n>` is a cleaning command, so anything else returns null and
+  // falls through to the existing handling rather than being claimed here.
+  if (!body) return null;
+
+  const m = body.match(START_CLEANING_BODY);
+  if (!m) return { ok: false, reason: 'bad_syntax' };
+  return { ok: true, roomToken: m[1] };
+}
+
+// The booking whose checkout dirtied this room: its most recent closed stay.
+// Same resolution shape as PAID's, and for the same reason — the room's current
+// clean belongs to the stay that just ended, not to whoever is in it next.
+async function bookingForCleaningJob(roomId) {
+  const closed = await airtableGet('WS_Bookings', `{Status} = 'Checked Out'`);
+  const candidates = closed
+    .filter(b => (b.fields['Room'] || []).includes(roomId))
+    .sort((a, b) => Date.parse(b.fields['Check Out'] || 0) - Date.parse(a.fields['Check Out'] || 0));
+  return candidates[0] || null;
+}
+
+// Both durations, computed at the completion event. Returns nulls rather than
+// guesses: a missing or impossible baseline produces NO number, because a wrong
+// turnaround figure is worse than an absent one (locked).
+function cleaningDurations(room, booking, completedAtIso) {
+  const completedMs = Date.parse(completedAtIso);
+  const out = { vacantToReadyMs: null, jobDurationMs: null, baselineSuspect: false };
+
+  const vacantFrom = room && room.fields['Cleaning Started At'];
+  const vacantMs = vacantFrom ? Date.parse(vacantFrom) : NaN;
+  // A baseline in the FUTURE relative to completion is a stale value from an
+  // earlier cycle or a clock problem — either way it cannot describe this job.
+  if (Number.isFinite(vacantMs) && vacantMs <= completedMs) {
+    out.vacantToReadyMs = completedMs - vacantMs;
+    out.baselineSuspect = out.vacantToReadyMs > CLEANING_SUSPECT_MS;
+  }
+
+  const jobFrom = booking && booking.fields[CLEANING_JOB_STARTED_FIELD];
+  const jobMs = jobFrom ? Date.parse(jobFrom) : NaN;
+  if (Number.isFinite(jobMs) && jobMs <= completedMs) {
+    out.jobDurationMs = completedMs - jobMs;
+  }
+  return out;
+}
+
 // ─── WALK-IN AUTHORISATION (B7) ──────────────────────────────────────────────
 // Authority is a SEAT, not a hardcoded number: `WS_Roles.Current Phone` where
 // the seat is Active. Multiple numbers per property is the normal case (two
@@ -1245,6 +1331,28 @@ const guards = {
     return true;
   },
 
+  // `START ROOM <n>` from a registered cleaner. Registered ahead of the
+  // cleaner-naming-room global for the now-familiar reason: the command
+  // contains a bare room number, and that guard matches \b<number>\b anywhere —
+  // reached first it would mark the room CLEAN at the moment the cleaner is
+  // telling us they have only just started it. Parse first (pure, free, and
+  // returns null for a bare START so B14's opt-back-in keyword is untouched),
+  // Airtable only for something that really is the command.
+  async senderIsCleanerStartingRoom(ctx) {
+    const parsed = parseStartCleaningCommand(ctx.messageText);
+    if (!parsed) return false;
+
+    const cleaners = await airtableGet('WS_Cleaners', `{Phone Number} = '${ctx.phone}'`);
+    if (cleaners.length === 0) {
+      logToAxiom('warn', 'cleaning_start_unauthorised_sender', { phone: ctx.phone });
+      return false;
+    }
+
+    ctx.cleaner = cleaners[0];
+    ctx.cleaningStart = parsed;
+    return true;
+  },
+
   async senderIsCleaner(ctx) {
     const cleanerRecords = await airtableGet('WS_Cleaners', `{Phone Number} = '${ctx.phone}'`);
     ctx.cleaner = cleanerRecords[0] || null;
@@ -1277,11 +1385,30 @@ const guards = {
 // case) -- same side effects either way: room -> Available, thank the cleaner,
 // notify the owner.
 async function resolveRoomClean(ctx, room) {
+  // Locked requirement: only a room actually in Cleaning can be completed. Both
+  // callers already select from `{Status} = 'Cleaning'`, so this is belt-and-
+  // braces — but it is the guard the metric depends on, and an invariant that is
+  // merely implied by two call sites is one refactor away from being untrue.
+  if (room.fields['Status'] !== 'Cleaning') {
+    logToAxiom('warn', 'cleaning_complete_room_not_cleaning', {
+      phone: ctx.phone, roomId: room.id, roomName: room.fields['Room Name'],
+      status: room.fields['Status'] || null
+    });
+    await sendWhatsApp(ctx.phone, msg('cleanerNothingToClean'));
+    return;
+  }
+
+  const completedAt = new Date().toISOString();
+  const booking = await bookingForCleaningJob(room.id);
+  const durations = cleaningDurations(room, booking, completedAt);
+
   // Rule 30 step 2, slice 1: checked but non-fatal, same shape as walkinBooking's
   // room->Occupied write (F40) — Status is a derived display field, not
   // findAvailableRoom's source of truth (that's the WS_Bookings overlap check),
   // so a failure here fails safe (room stays Cleaning, unsellable) rather than
   // unsafe. Logged loud so the write failure is visible instead of inferred.
+  // Non-fatal: job completion and metrics below are the cleaner's declaration
+  // of fact, independent of whether the derived Status field caught up.
   const roomWrite = await airtableUpdate('WS_Rooms', room.id, { 'Status': 'Available' });
   if (roomWrite && roomWrite.error) {
     logToAxiom('error', 'cleaner_done_room_status_write_failed', {
@@ -1289,6 +1416,48 @@ async function resolveRoomClean(ctx, room) {
       error: JSON.stringify(roomWrite.error)
     });
   }
+
+  // Per-job record, on the booking so it survives the next checkout. Written
+  // before the metric is logged so a failed write can never produce a number
+  // with no record behind it. Proceeds regardless of the Status write above.
+  if (booking) {
+    const jobUpdate = { [CLEANING_COMPLETED_FIELD]: completedAt };
+    // Attribution is to whoever declared DONE — the only identity the system
+    // actually observes. If a different cleaner sent START, that divergence is
+    // logged below rather than silently resolved in either direction.
+    if (ctx.cleaner) jobUpdate[CLEANED_BY_FIELD] = [ctx.cleaner.id];
+    await airtableUpdate('WS_Bookings', booking.id, jobUpdate);
+  } else {
+    logToAxiom('warn', 'cleaning_complete_no_booking', {
+      phone: ctx.phone, roomId: room.id, roomName: room.fields['Room Name'],
+      reason: 'no Checked Out booking for this room — nothing to record the job against'
+    });
+  }
+
+  const toMinutes = ms => (ms === null ? null : Number((ms / 60000).toFixed(1)));
+  logToAxiom('info', 'cleaning_job_completed', {
+    phone: ctx.phone,
+    roomId: room.id, roomName: room.fields['Room Name'],
+    bookingId: booking ? booking.id : null,
+    bookingRef: (booking && booking.fields['Booking Ref']) || null,
+    cleanerId: ctx.cleaner ? ctx.cleaner.id : null,
+    cleanerName: (ctx.cleaner && ctx.cleaner.fields['Cleaner Name']) || null,
+    completedAt,
+    // Primary metric: checkout → sellable again.
+    vacantToReadyMs: durations.vacantToReadyMs,
+    vacantToReadyMinutes: toMinutes(durations.vacantToReadyMs),
+    // Secondary: only present when the cleaner sent START ROOM <n>.
+    jobDurationMs: durations.jobDurationMs,
+    jobDurationMinutes: toMinutes(durations.jobDurationMs),
+    // A missing/stale baseline emits NO turnaround rather than a wrong one.
+    vacantToReadyOmitted: durations.vacantToReadyMs === null,
+    baselineSuspect: durations.baselineSuspect,
+    // Carried on every record so no downstream reader can mistake this for a
+    // verified measurement: DONE is self-declared, and dispatch is a broadcast,
+    // so this is reply speed as much as cleaning speed.
+    selfReported: true
+  });
+
   logToAxiom('info', 'state_transition', { phone: ctx.phone, roomId: room.id, roomName: room.fields['Room Name'], from: 'Cleaning', to: 'Available', reason: 'cleaner_done' });
   await sendWhatsApp(ctx.phone, msg('cleanerThanks', { roomName: room.fields['Room Name'] }));
   if (OWNER_PHONE) {
@@ -1760,6 +1929,66 @@ const actions = {
       amountPaid: formatAmount(parsed.amount),
       method
     }));
+  },
+
+  // Cleaner sends `START ROOM <n>` when they actually begin a job. Purely an
+  // instrumentation step: it starts the Job Duration clock and changes nothing
+  // about the room, the booking's status, or the existing DONE flow — a cleaner
+  // who never sends START still completes normally, and simply has no secondary
+  // metric for that job.
+  async startCleaningJob(ctx) {
+    const parsed = ctx.cleaningStart;
+    if (!parsed.ok) {
+      await sendWhatsApp(ctx.phone, msg('cleaningStartUsage'));
+      return;
+    }
+
+    // Only a room already marked for cleaning can have a job started on it —
+    // the same invariant the completion side enforces.
+    const cleaningRooms = await airtableGet('WS_Rooms', `{Status} = 'Cleaning'`);
+    const room = cleaningRooms.find(r => roomMatchesWalkinToken(r, parsed.roomToken)) || null;
+    if (!room) {
+      logToAxiom('info', 'cleaning_start_rejected', {
+        phone: ctx.phone, roomToken: parsed.roomToken, reason: 'no room in Cleaning matches'
+      });
+      await sendWhatsApp(ctx.phone, msg('cleaningStartNotCleaning', { roomToken: parsed.roomToken }));
+      return;
+    }
+
+    const booking = await bookingForCleaningJob(room.id);
+    if (!booking) {
+      // Nowhere to record the job. The cleaner is still told to carry on — the
+      // room genuinely needs cleaning — but the gap is visible rather than
+      // swallowed, because a missing job record is a missing metric later.
+      logToAxiom('warn', 'cleaning_start_no_booking', {
+        phone: ctx.phone, roomId: room.id, roomName: room.fields['Room Name']
+      });
+      await sendWhatsApp(ctx.phone, msg('cleaningStarted', { roomName: room.fields['Room Name'] }));
+      return;
+    }
+
+    // FIRST start wins. A second START on the same job would reset the clock and
+    // silently understate how long the work took, which is the one way this
+    // metric could flatter itself.
+    if (booking.fields[CLEANING_JOB_STARTED_FIELD]) {
+      logToAxiom('info', 'cleaning_start_already_recorded', {
+        phone: ctx.phone, roomId: room.id, bookingId: booking.id,
+        startedAt: booking.fields[CLEANING_JOB_STARTED_FIELD]
+      });
+      await sendWhatsApp(ctx.phone, msg('cleaningStarted', { roomName: room.fields['Room Name'] }));
+      return;
+    }
+
+    const startedAt = new Date().toISOString();
+    await airtableUpdate('WS_Bookings', booking.id, { [CLEANING_JOB_STARTED_FIELD]: startedAt });
+    logToAxiom('info', 'cleaning_job_started', {
+      phone: ctx.phone, roomId: room.id, roomName: room.fields['Room Name'],
+      bookingId: booking.id, bookingRef: booking.fields['Booking Ref'] || null,
+      cleanerId: ctx.cleaner ? ctx.cleaner.id : null,
+      cleanerName: (ctx.cleaner && ctx.cleaner.fields['Cleaner Name']) || null,
+      startedAt
+    });
+    await sendWhatsApp(ctx.phone, msg('cleaningStarted', { roomName: room.fields['Room Name'] }));
   },
 
   // Cleaner replies DONE (global, any state)
@@ -3680,6 +3909,11 @@ module.exports.parseWalkinCommand = parseWalkinCommand;
 // B8 (PAID): the command grammar is pure and Airtable-free, so it is unit-tested
 // directly — see test/paid.test.js.
 module.exports.parsePaidCommand = parsePaidCommand;
+// Cleaning time: the START grammar is pure, and the bare-`START` case is the one
+// that must never regress (it is B14's opt-back-in keyword). Unit-tested in
+// test/cleaningtime.test.js alongside the derived metrics.
+module.exports.parseStartCleaningCommand = parseStartCleaningCommand;
+module.exports.cleaningDurations = cleaningDurations;
 // B12: the auto-checkout cron entry point (autoCheckoutHandler wraps it for the
 // Vercel HTTP cron; runAutoCheckout takes an injected `now` for timing tests).
 module.exports.runAutoCheckout = runAutoCheckout;
