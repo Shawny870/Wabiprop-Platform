@@ -139,6 +139,56 @@ test('reception records a full payment: amount, method and status all written', 
   assert.ok(axiomEvents(ctx).includes('payment_recorded'));
 });
 
+test('Paid At is stamped with the confirmation time, in the same write as the payment', async () => {
+  // The field did not exist when F35 shipped, so the timestamp could only be
+  // logged to Axiom. It is live now and goes in the same PATCH as the money —
+  // a payment without its timestamp is a half-written record.
+  const before = Date.now();
+  const ctx = start();
+  await send(RECEPTION_PHONE, 'PAID ROOM 2 400');
+  const after = Date.now();
+
+  const paidAt = bookingRow(ctx)['Paid At'];
+  assert.ok(paidAt, 'Paid At populated');
+  const t = Date.parse(paidAt);
+  assert.ok(Number.isFinite(t), 'a parseable ISO instant');
+  assert.ok(t >= before && t <= after, 'stamped at confirmation time, not some other clock');
+
+  // One PATCH, not two: the money and the timestamp land together.
+  const patches = ctx.airtable.log.filter(w => w.table === 'WS_Bookings' && w.op === 'update');
+  assert.strictEqual(patches.length, 1, 'a single write');
+  assert.strictEqual(patches[0].fields['Payment Status'], 'Paid');
+  assert.strictEqual(patches[0].fields['Paid At'], paidAt);
+});
+
+test('the Airtable timestamp and the Axiom event report the SAME instant', async () => {
+  // Generated once and shared. Two `new Date()` calls would let the record and
+  // its log entry disagree by however long the write took — and reconciling the
+  // two is the whole point of the field.
+  const ctx = start();
+  await send(RECEPTION_PHONE, 'PAID ROOM 2 400');
+
+  const event = ctx.axiom.find(e => e.event === 'payment_recorded');
+  assert.ok(event, 'payment_recorded logged');
+  assert.strictEqual(event.recordedAt, bookingRow(ctx)['Paid At']);
+});
+
+test('a refused mismatch stamps nothing', async () => {
+  const ctx = start();
+  await send(RECEPTION_PHONE, 'PAID ROOM 2 100');
+  assert.strictEqual(bookingRow(ctx)['Paid At'], undefined, 'no timestamp without a payment');
+});
+
+test('an idempotent re-send does not restamp the original payment', async () => {
+  const ctx = start();
+  await send(RECEPTION_PHONE, 'PAID ROOM 2 400');
+  const firstStamp = bookingRow(ctx)['Paid At'];
+
+  await send(RECEPTION_PHONE, 'PAID ROOM 2 400');
+
+  assert.strictEqual(bookingRow(ctx)['Paid At'], firstStamp, 'the original settlement time stands');
+});
+
 test('the payment method can be overridden on the command', async () => {
   const ctx = start();
   await send(RECEPTION_PHONE, 'PAID ROOM 2 400 EFT');

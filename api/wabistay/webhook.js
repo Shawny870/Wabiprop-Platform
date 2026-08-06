@@ -1539,24 +1539,32 @@ const actions = {
     const status = 'Paid';
     const method = parsed.method || 'Cash';
 
+    // One instant, written to both sinks. Generating it twice would let the
+    // Airtable field and the Axiom event disagree by however long the write
+    // takes, and reconciling a payment against its log entry is exactly what
+    // this timestamp is for.
+    const recordedAt = new Date().toISOString();
+
     const update = {
       'Amount Paid': parsed.amount,
       'Payment Method': method,
-      'Payment Status': status
+      'Payment Status': status,
+      // `Paid At` — created live by the CEO after F35 shipped, which is why the
+      // original build could only log it. It goes in the SAME patch as the
+      // payment fields deliberately: a payment recorded without its timestamp,
+      // or a timestamp without its payment, is a half-written record either way.
+      // (Contrast `Cleaning Started At`, which is a separate call precisely
+      // because it was NOT confirmed live at the time.)
+      'Paid At': recordedAt
     };
     await airtableUpdate('WS_Bookings', booking.id, update);
 
-    // The confirmation timestamp lives HERE and only here: WS_Bookings has no
-    // payment-timestamp field (confirmed against the live base this session),
-    // and writing an unrecognised field name would make Airtable reject the
-    // whole PATCH — including the payment itself. Flagged in the PR: once the
-    // CEO adds `Paid At` (dateTime), it is a one-line addition to `update`.
     logToAxiom('info', 'payment_recorded', {
       phone: ctx.phone, roleId: role.id, propertyId: property.id,
       bookingId: booking.id, bookingRef: booking.fields['Booking Ref'] || null,
       roomId: room.id, roomName: room.fields['Room Name'],
       amountPaid: parsed.amount, amountDue, method, status,
-      recordedAt: new Date().toISOString()
+      recordedAt
     });
 
     await sendWhatsApp(ctx.phone, msg('paidRecorded', {
