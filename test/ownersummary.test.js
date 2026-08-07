@@ -109,3 +109,99 @@ test('B17: daily variant narrows the period to 1 day', async () => {
   // Period [07-21 12:00, 07-22 12:00) contains none of the seeded check-ins.
   assert.strictEqual(a.totalBookings, 0);
 });
+
+// ── Stage 1: payment reconciliation / leakage-detection ─────────────────────
+// Reuses the SAME periodBookings window the rest of the summary is already
+// computed from — no new query, no new scheduler, extends runOwnerSummary's
+// existing weekly cron. Design note carried in the code, not just here: delta
+// can only ever be known once reception has recorded a real collection via
+// PAID/COLLECTED — a booking nobody has acted on correctly shows its full
+// Amount Due as outstanding delta, not a gap to "fix" later.
+
+function reconSeed() {
+  const s = structuredClone(seed);
+  s.WS_Guests = [
+    { id: 'recGA1', fields: { 'Guest Name': 'Thabo Nkosi' } },
+    { id: 'recGA2', fields: { 'Guest Name': 'Sarah Cohen' } }
+  ];
+  // recBA1: R700 due, fully paid via PAID/COLLECTED — delta 0.
+  s.WS_Bookings[0].fields['Guest'] = ['recGA1'];
+  s.WS_Bookings[0].fields['Amount Paid'] = 700;
+  // recBA2: R300 due, nothing recorded yet — full amount is outstanding delta.
+  s.WS_Bookings[1].fields['Guest'] = ['recGA2'];
+  // recBB1 (Lodge B): R5000 due, partially recorded (reception under-recorded, or a discount not yet reflected).
+  s.WS_Bookings[4].fields['Amount Paid'] = 4500;
+  return s;
+}
+
+test('B17/Stage1: payment lines carry room, guest, Amount Due, Amount Paid and delta per booking', async () => {
+  const ctx = setup(reconSeed());
+  const summaries = await wh.runOwnerSummary({ now: NOW });
+  const a = byId(summaries, 'recPA');
+
+  assert.strictEqual(a.paymentLines.length, 2);
+  const paid = a.paymentLines.find(l => l.bookingId === 'recBA1');
+  const unpaid = a.paymentLines.find(l => l.bookingId === 'recBA2');
+
+  assert.deepStrictEqual(
+    { room: paid.roomName, guest: paid.guestName, due: paid.amountDue, paidAmt: paid.amountPaid, delta: paid.delta },
+    { room: 'A1', guest: 'Thabo Nkosi', due: 700, paidAmt: 700, delta: 0 }
+  );
+  assert.deepStrictEqual(
+    { room: unpaid.roomName, guest: unpaid.guestName, due: unpaid.amountDue, paidAmt: unpaid.amountPaid, delta: unpaid.delta },
+    { room: 'A2', guest: 'Sarah Cohen', due: 300, paidAmt: 0, delta: 300 }
+  );
+});
+
+test('B17/Stage1: aggregate delta sums every line, not just the mismatched ones', async () => {
+  const ctx = setup(reconSeed());
+  const summaries = await wh.runOwnerSummary({ now: NOW });
+  const a = byId(summaries, 'recPA');
+  const b = byId(summaries, 'recPB');
+
+  assert.strictEqual(a.paymentDeltaTotal, 300, '0 (settled) + 300 (outstanding)');
+  assert.strictEqual(b.paymentDeltaTotal, 500, '5000 due, 4500 recorded so far');
+});
+
+test('B17/Stage1: a booking with no Guest link degrades to a labelled placeholder, not a crash', async () => {
+  const s = reconSeed();
+  delete s.WS_Bookings[1].fields['Guest'];
+  const ctx = setup(s);
+  const summaries = await wh.runOwnerSummary({ now: NOW });
+  const a = byId(summaries, 'recPA');
+  const line = a.paymentLines.find(l => l.bookingId === 'recBA2');
+  assert.strictEqual(line.guestName, null);
+});
+
+test('B17/Stage1: a zero-booking week has zero payment lines and zero delta, not an error', async () => {
+  const ctx = setup(reconSeed());
+  const summaries = await wh.runOwnerSummary({ now: NOW });
+  const c = byId(summaries, 'recPC');
+  assert.deepStrictEqual(c.paymentLines, []);
+  assert.strictEqual(c.paymentDeltaTotal, 0);
+});
+
+test('B17/Stage1: the weekly payload carries a rendered reconciliation message with a top-line total and one line per booking', async () => {
+  const ctx = setup(reconSeed());
+  await wh.runOwnerSummary({ now: NOW });
+  const payloads = ctx.axiom.filter(e => e.event === 'owner_summary_payload');
+  const a = payloads.find(p => p.propertyId === 'recPA');
+
+  assert.ok(a.paymentReconciliationMessage.startsWith('💰 *Payment Reconciliation — Lodge A*'));
+  assert.match(a.paymentReconciliationMessage, /\*Total Delta:\* R300\.00/);
+  assert.match(a.paymentReconciliationMessage, /A1 — Thabo Nkosi: Due R700\.00 \/ Paid R700\.00 \(Δ R0\.00\)/);
+  assert.match(a.paymentReconciliationMessage, /A2 — Sarah Cohen: Due R300\.00 \/ Paid R0\.00 \(Δ R300\.00\)/);
+  // The total line appears before the per-booking lines, not after.
+  assert.ok(a.paymentReconciliationMessage.indexOf('Total Delta') < a.paymentReconciliationMessage.indexOf('A1 —'));
+});
+
+test('formatPaymentReconciliationMessage renders an overpayment delta with a minus sign, not a misleading positive figure', () => {
+  const summary = {
+    propertyName: 'Lodge A',
+    paymentDeltaTotal: -50,
+    paymentLines: [{ roomName: 'A1', guestName: 'Thabo Nkosi', amountDue: 400, amountPaid: 450, delta: -50 }]
+  };
+  const message = wh.formatPaymentReconciliationMessage(summary);
+  assert.match(message, /\*Total Delta:\* -R50\.00/);
+  assert.match(message, /\(Δ -R50\.00\)/);
+});
