@@ -30,7 +30,7 @@ This file is read at the start of EVERY Claude Code session. If code and this co
 - Business-initiated sends (cleaner, owner, summaries) must use approved utility templates — free-form text silently fails outside the 24h window.
 - Changes touching message templates, pricing values, state machine, or POPIA/consent code: label PR `needs-decision` — Shawn reviews before merging.
 - Airtable is not transactional. After any room or record assignment, re-query to verify. On conflict, roll back and re-offer.
-- Rule 28: Builder never edits CLAUDE.md directly. Status updates go to FIXLOG.md. Contract changes require CEO/Design Engineer sign-off.
+- Rule 28: Builder may co-author edits to CLAUDE.md directly (commit as normal, Co-Authored-By trailer required). Every CLAUDE.md-touching PR must be flagged in the PR body: '⚠️ CLAUDE.md modified — Design Engineer review required.' After every 3 cumulative rule additions/edits since last review, CEO pastes the current full CLAUDE.md rules section back to Design Engineer (Claude.ai) for a confirmation pass before further edits proceed. Status updates still go to FIXLOG.md, not CLAUDE.md.
 
 ## Diagnostic protocol (3-lens rule — mandatory for every bug fix)
 When a flow is broken:
