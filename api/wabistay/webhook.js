@@ -937,7 +937,16 @@ function parseWalkinCommand(text) {
 // Return shapes match the walk-in parser exactly, and the null / {ok:false}
 // split carries the same meaning: `null` is "not a PAID attempt" and falls
 // through to the ordinary guest flow, so an unauthorised sender learns nothing.
-const PAID_KEYWORD = /^paid\b/i;
+//
+// Stage 1 (payment reconciliation): `COLLECTED` is accepted as an alias for
+// the identical keyword, not a second command. Deliberately just widening
+// the keyword regex rather than adding a parallel parser/dispatch/handler —
+// COLLECTED and PAID produce byte-identical `{ok, roomToken, amount, method}`
+// shapes and flow through senderIsAuthorizedPaid -> paidBooking exactly the
+// same way, so the mismatch-refusal rule, idempotency guard, and every write
+// (Amount Paid, Payment Status) cannot diverge between the two spellings by
+// construction — there is only one code path to diverge from.
+const PAID_KEYWORD = /^(?:paid|collected)\b/i;
 // `R500`, `500`, `500.00` and `500,00` all parse. The optional trailing method
 // is NOT in the locked grammar — see the PR — but a reception that types CASH
 // should not be refused for being more specific than required.
