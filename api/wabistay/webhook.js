@@ -45,7 +45,18 @@ function receptionPaymentTemplate() {
 
 // ─── AIRTABLE HELPERS ───────────────────────────────────────────────────────
 
-async function airtableGet(table, filterFormula) {
+// `opts.throwOnError` (default false): every existing caller relies on the
+// original contract — a failed page logs to Axiom and returns whatever was
+// accumulated so far, silently. That is the RIGHT default for most callers
+// (e.g. "how many active cleaners" failing open to zero still fails loud via
+// the existing no-cleaner-found logging). It is the WRONG default for a
+// caller whose empty result means "nothing blocks this room" — there, a
+// swallowed error and a genuine zero-rows answer are indistinguishable, and
+// the difference is a fail-open double-booking. `findAvailableRoom` is the
+// one caller (PR1 / P1b) that opts in, specifically for that query, and
+// treats the throw as fail-CLOSED. No other call site is touched.
+async function airtableGet(table, filterFormula, opts = {}) {
+  const { throwOnError = false } = opts;
   // B10.5 BUG 1: Airtable's list API returns at most 100 records per response and
   // signals "there is more" with an `offset` token in the body. A single fetch
   // therefore SILENTLY truncates past 100 rows — no error, just a short list — and
@@ -68,6 +79,9 @@ async function airtableGet(table, filterFormula) {
     if (data.error) {
       console.error(`[Airtable ERROR] ${table}:`, JSON.stringify(data.error));
       logToAxiom('error', 'airtable_get_error', { table, filterFormula, status: res.status, error: JSON.stringify(data.error) });
+      if (throwOnError) {
+        throw new Error(`airtableGet failed: ${table} — ${JSON.stringify(data.error)}`);
+      }
       break;
     }
     if (data.records) records.push(...data.records);
@@ -1037,7 +1051,25 @@ async function findAvailableRoom(propertyId, checkInIso, checkOutIso, opts = {})
   // not hold inventory. Bookings carry no Property field, so they are scoped to
   // this property by the room link itself — a booking on another property's room
   // can never mark one of these rooms taken.
-  const blocking = await airtableGet('WS_Bookings', orFormula('Status', BLOCKING_BOOKING_STATUSES));
+  //
+  // P1b: this is THE availability check — an empty result must mean "genuinely
+  // nothing blocks this room", never "the read failed and we don't know". Before
+  // this fix, airtableGet swallowed a failed page and returned whatever it had
+  // (possibly []), which made a transient Airtable error indistinguishable from
+  // a free room — a fail-OPEN path into exactly the double-booking this function
+  // exists to prevent, independent of the P1a timing race. `throwOnError` makes
+  // the failure loud instead of silent, and the catch below fails the whole
+  // check CLOSED (room unavailable) rather than guessing the room is free.
+  let blocking;
+  try {
+    blocking = await airtableGet('WS_Bookings', orFormula('Status', BLOCKING_BOOKING_STATUSES), { throwOnError: true });
+  } catch (err) {
+    logToAxiom('error', 'availability_check_failed_closed', {
+      propertyId, checkInIso, checkOutIso, error: err.message,
+      reason: 'blocking-bookings read failed — refusing rather than risking a double-booking'
+    });
+    return null;
+  }
   const takenRoomIds = new Set();
   for (const booking of blocking) {
     if (excludeBookingId && booking.id === excludeBookingId) continue;
@@ -1781,6 +1813,52 @@ const actions = {
     const bookingRef = booking.id ? `WS-${booking.id.slice(-6).toUpperCase()}` : 'WS-000001';
     // F13: write Booking Ref back to Airtable after CREATE
     if (booking.id) {
+      // P1a: Airtable is not transactional (CLAUDE.md rule 32) — the
+      // findAvailableRoom check above and this create are two separate calls,
+      // and this is a WhatsApp-facing path with real concurrency (unlike
+      // walkinBooking's single reception handset). Two guests racing the same
+      // dates can both pass the pre-check before either's create lands. Ported
+      // from walkinBooking's rollback pattern: re-verify excluding this
+      // booking's own hold, and if the room did not survive, cancel rather than
+      // let two Confirmed bookings exist on the same room discovered only at
+      // the gate.
+      const stillFree = await findAvailableRoom(ctx.property.id, checkInIso, checkOutIso, {
+        excludeBookingId: booking.id, preferRoomId: room.id
+      });
+      if (!stillFree || stillFree.id !== room.id) {
+        // Unlike walkinBooking's line-1556 rollback, THIS write is checked —
+        // Rule 30 / PR3's finding applies to new code from the moment it's
+        // written, not just to the handler that surfaced the bug.
+        const rollback = await airtableUpdate('WS_Bookings', booking.id, { 'Status': 'Cancelled' });
+        if (rollback && rollback.error) {
+          // No clean recovery left at this point — the booking exists, holds a
+          // room that may now be double-held, and the write meant to fix that
+          // has itself failed. Nothing to do but make it maximally visible.
+          logToAxiom('error', 'booking_rollback_failed', {
+            phone: ctx.phone, bookingId: booking.id, roomId: room.id,
+            error: JSON.stringify(rollback.error),
+            reason: 'lost the availability race AND the Cancelled write failed — booking may still be holding a contested room'
+          });
+        }
+        // The guest's Session State was already advanced to AWAITING_OCCUPANCY
+        // above, before this booking existed to occupy that state. Leaving them
+        // there with no valid booking is the same stuck-loop symptom PR1 exists
+        // to prevent, just reached via the race instead of a create failure —
+        // so it is reset here rather than left for PR4, which owns the
+        // create-fails-outright case, not this one.
+        await airtableUpdate('WS_Guests', ctx.guest.id, { 'Session State': 'AWAITING_DETAILS' });
+        logToAxiom('warn', 'booking_race_lost', {
+          phone: ctx.phone, bookingId: booking.id, roomId: room.id,
+          checkIn: checkInIso, checkOut: checkOutIso,
+          reason: 'room taken by a concurrent booking between the pre-check and this create'
+        });
+        await logEnquiry(ctx.property, ctx.phone, 'No Availability', {
+          checkInIso, checkOutIso, bookingType: 'Overnight'
+        });
+        await sendWhatsApp(ctx.phone, msg('noAvailability', { guestName, checkIn, checkOut }));
+        return;
+      }
+
       await airtableUpdate('WS_Bookings', booking.id, { 'Booking Ref': bookingRef });
       // B19: Booked, logged at creation. recordEta re-affirms on confirmation but
       // the booking-id dedup keeps it to one row.
@@ -2095,6 +2173,44 @@ const actions = {
       // Amount Due, which is populated for every booking type.
       'Amount Due': amount
     });
+
+    // P1a: the write above is what puts this booking on the room (Room + Status
+    // Confirmed in one call) — no intermediate Enquiry step the way overnight
+    // has, so this is the SAME moment overnight's create happens, just phrased
+    // as an update to the pending row. Same race, same fix: re-verify excluding
+    // this booking's own hold before treating the room as genuinely secured.
+    const stillFree = await findAvailableRoom(ctx.property.id, checkInIso, checkOutIso, {
+      excludeBookingId: pending.id, preferRoomId: room.id
+    });
+    if (!stillFree || stillFree.id !== room.id) {
+      const rollback = await airtableUpdate('WS_Bookings', pending.id, { 'Status': 'Cancelled' });
+      if (rollback && rollback.error) {
+        logToAxiom('error', 'booking_rollback_failed', {
+          phone: ctx.phone, bookingId: pending.id, roomId: room.id,
+          error: JSON.stringify(rollback.error),
+          reason: 'lost the availability race AND the Cancelled write failed — booking may still be holding a contested room'
+        });
+      }
+      // Same re-offer the existing no-availability branch above uses (line
+      // ~2139) — the booking stays inert with Check Out cleared conceptually
+      // by virtue of being Cancelled, and the guest can offer a different time.
+      await airtableUpdate('WS_Guests', ctx.guest.id, { 'Session State': 'AWAITING_HOURLY_DETAILS' });
+      logToAxiom('warn', 'booking_race_lost', {
+        phone: ctx.phone, bookingId: pending.id, roomId: room.id,
+        checkIn: checkInIso, checkOut: checkOutIso,
+        reason: 'room taken by a concurrent booking between the pre-check and this update'
+      });
+      await logEnquiry(ctx.property, ctx.phone, 'No Availability', {
+        checkInIso, checkOutIso, bookingType: 'Hourly'
+      });
+      await sendWhatsApp(ctx.phone, msg('hourlyNoAvailability', {
+        guestName,
+        checkInText: formatSastDateTime(checkInIso),
+        checkOutText: formatSastDateTime(checkOutIso)
+      }));
+      return;
+    }
+
     logToAxiom('info', 'booking_create', {
       phone: ctx.phone, guestName, bookingRef, bookingType: 'Hourly',
       hours: choice, airtableId: pending.id
