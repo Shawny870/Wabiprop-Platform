@@ -1946,6 +1946,20 @@ const actions = {
       error: booking.error ? JSON.stringify(booking.error) : null
     });
 
+    // F41-4 (fix-order item 4): the create itself failed outright — no room was
+    // held, no booking exists. Session State was already written to ctx.next
+    // above, before this create ran, so left unhandled the guest silently
+    // stayed in AWAITING_OCCUPANCY with nothing behind it — selectOccupancy's
+    // next turn finds no matching Enquiry row and just re-prompts forever,
+    // with no path back to AWAITING_DETAILS. Reset here, tell the guest
+    // plainly, and skip the owner notify — there is nothing for the owner to
+    // action.
+    if (!booking.id) {
+      await airtableUpdate('WS_Guests', ctx.guest.id, { 'Session State': 'AWAITING_DETAILS' });
+      await sendWhatsApp(ctx.phone, msg('bookingCreateFailed', { guestName }));
+      return;
+    }
+
     // F7: notify owner on new booking (owner copy carries no rate, so it is
     // correct to send before occupancy is chosen — the human owner sees the
     // enquiry immediately and can finalise price if the fail-closed path fires).
@@ -2139,18 +2153,32 @@ const actions = {
     // phantom inventory. Reused rather than duplicated if the guest re-enters
     // a time after being told there is no availability.
     const pending = await findPendingHourlyBooking(ctx.guest.id);
-    if (pending) {
-      await airtableUpdate('WS_Bookings', pending.id, { 'Check In': checkInIso });
-    } else {
-      await airtableCreate('WS_Bookings', {
-        'Guest': [ctx.guest.id],
-        'Booking Type': 'Hourly',
-        'Source': 'WhatsApp',
-        'Status': 'Enquiry',
-        'Logged By': 'WhatsApp Bot',
-        'Check In': checkInIso,
-        'Payment Status': 'Unpaid'
+    const bookingResult = pending
+      ? await airtableUpdate('WS_Bookings', pending.id, { 'Check In': checkInIso })
+      : await airtableCreate('WS_Bookings', {
+          'Guest': [ctx.guest.id],
+          'Booking Type': 'Hourly',
+          'Source': 'WhatsApp',
+          'Status': 'Enquiry',
+          'Logged By': 'WhatsApp Bot',
+          'Check In': checkInIso,
+          'Payment Status': 'Unpaid'
+        });
+
+    // F41-4: same unchecked-write pattern as collectDetails, same fix shape.
+    // Previously this return value was discarded entirely — a failed write
+    // left the guest advanced to AWAITING_HOURLY_DURATION with no pending row
+    // behind it. selectHourlyDuration's own missing-checkInIso guard would
+    // eventually catch this on the guest's NEXT message, but silently — no
+    // log, no explanation, a round-trip of confusion before self-healing.
+    if (!bookingResult || !bookingResult.id) {
+      logToAxiom('error', 'hourly_booking_write_failed', {
+        phone: ctx.phone, guestName,
+        error: bookingResult && bookingResult.error ? JSON.stringify(bookingResult.error) : null
       });
+      await airtableUpdate('WS_Guests', ctx.guest.id, { 'Session State': 'AWAITING_DETAILS' });
+      await sendWhatsApp(ctx.phone, msg('hourlyBookingCreateFailed', { guestName }));
+      return;
     }
 
     await sendWhatsApp(ctx.phone, msg('hourlyDurationMenu', {
