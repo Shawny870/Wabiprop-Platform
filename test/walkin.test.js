@@ -372,12 +372,14 @@ test('a malformed walk-in from authorised staff gets usage help, not the guest g
 
 test('WALKIN from a phone that is also a cleaner books the room instead of marking it clean', async () => {
   // The B11.5 collision, now guaranteed by live data: 27825999279 holds the
-  // Reception seat AND is a registered cleaner. Room 02 is mid-clean and is the
-  // room being sold — a real turnaround, which BOOKABLE_ROOM_STATUSES allows.
-  // `senderIsCleanerNamingRoom` matches \b2\b anywhere in the message, so it
-  // matches the "2" in this very command; if it is reached first it marks Room
-  // 02 Available and the walk-in never happens. Registering WALKIN ahead of it
-  // is the whole fix, and this test is the only thing holding that order.
+  // Reception seat AND is a registered cleaner. `senderIsCleanerNamingRoom`
+  // matches \b2\b anywhere in the message, so it matches the "2" in this very
+  // command; if it is reached first it marks Room 02 Available and the walk-in
+  // never happens. Registering WALKIN ahead of it is the whole fix, and this
+  // test is the only thing holding that order. Room 02 is 'Available', not
+  // 'Cleaning' — F43/5b now refuses WALKIN against a mid-clean room (see the
+  // dedicated test below), so this test uses an ordinary available room to
+  // isolate the ordering claim from that separate behaviour.
   const ctx = start({
     WS_Cleaners: [{
       id: 'recC1',
@@ -385,7 +387,7 @@ test('WALKIN from a phone that is also a cleaner books the room instead of marki
     }],
     WS_Rooms: [
       { id: 'recR1', fields: { 'Room Name': 'Room 01', 'Room Number': 1, 'Status': 'Available', 'Property': ['recP1'] } },
-      { id: 'recR2', fields: { 'Room Name': 'Room 02', 'Room Number': 2, 'Status': 'Cleaning', 'Property': ['recP1'] } }
+      { id: 'recR2', fields: { 'Room Name': 'Room 02', 'Room Number': 2, 'Status': 'Available', 'Property': ['recP1'] } }
     ]
   });
   await send(STAFF_PHONE, 'WALKIN ROOM 2 2HRS John Smith');
@@ -395,6 +397,40 @@ test('WALKIN from a phone that is also a cleaner books the room instead of marki
   // Occupied, NOT Available: 'Available' is what cleanerRoomReply would have
   // written, so this assertion distinguishes the two outcomes precisely.
   assert.strictEqual(room(ctx, 'recR2').fields['Status'], 'Occupied', 'sold, not marked clean');
+});
+
+// ── F43/5b: WALKIN must not sell a room mid-clean ───────────────────────────
+
+test('WALKIN refuses a room that is currently mid-clean — an immediate sale, not a future-dated one', async () => {
+  // BOOKABLE_ROOM_STATUSES deliberately includes 'Cleaning' so a FUTURE-dated
+  // overnight/hourly booking can still be offered against it (same-day
+  // turnover, sellable by the guest's real check-in time). WALKIN's stay
+  // starts NOW, so that reasoning does not apply — this is the bug fix-order
+  // item 5b targeted.
+  const ctx = start({
+    WS_Rooms: [
+      { id: 'recR1', fields: { 'Room Name': 'Room 01', 'Room Number': 1, 'Status': 'Available', 'Property': ['recP1'] } },
+      { id: 'recR2', fields: { 'Room Name': 'Room 02', 'Room Number': 2, 'Status': 'Cleaning', 'Property': ['recP1'] } }
+    ]
+  });
+  await send(STAFF_PHONE, 'WALKIN ROOM 2 2HRS John Smith');
+
+  assert.strictEqual(bookings(ctx).length, 0, 'no booking created against a room that is not actually ready');
+  assert.strictEqual(room(ctx, 'recR2').fields['Status'], 'Cleaning', 'room status is untouched');
+  assert.match(texts(ctx), /being cleaned|not ready/i);
+});
+
+test('WALKIN still books a different, available room even when the requested one is mid-clean', async () => {
+  const ctx = start({
+    WS_Rooms: [
+      { id: 'recR1', fields: { 'Room Name': 'Room 01', 'Room Number': 1, 'Status': 'Available', 'Property': ['recP1'] } },
+      { id: 'recR2', fields: { 'Room Name': 'Room 02', 'Room Number': 2, 'Status': 'Cleaning', 'Property': ['recP1'] } }
+    ]
+  });
+  await send(STAFF_PHONE, 'WALKIN ROOM 1 2HRS John Smith');
+
+  assert.strictEqual(bookings(ctx).length, 1, 'a different, non-cleaning room books normally');
+  assert.deepStrictEqual(bookings(ctx)[0].fields['Room'], ['recR1']);
 });
 
 test('the same phone can still do ordinary cleaner work — WALKIN did not swallow it', async () => {

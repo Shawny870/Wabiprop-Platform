@@ -1330,6 +1330,23 @@ const actions = {
       return;
     }
 
+    // BOOKABLE_ROOM_STATUSES deliberately includes 'Cleaning' (comment above its
+    // definition) so a FUTURE-dated overnight/hourly booking can still be offered
+    // against a room that happens to be mid-clean right now — same-day turnover,
+    // sellable by the guest's actual check-in time. WALKIN is the one caller of
+    // findAvailableRoom where that reasoning does not hold: the stay starts NOW
+    // (line ~1321), so "sellable by check-in time" and "sellable this instant"
+    // are the same instant. Guarded here, not in findAvailableRoom/
+    // BOOKABLE_ROOM_STATUSES itself, so collectDetails/collectHourlyDetails/
+    // selectHourlyDuration's legitimate future-dated case is untouched.
+    if (requested.fields['Status'] === 'Cleaning') {
+      logToAxiom('info', 'walkin_room_mid_clean', {
+        phone: ctx.phone, roomId: requested.id, roomName: requested.fields['Room Name']
+      });
+      await sendWhatsApp(ctx.phone, msg('walkinRoomCleaning', { roomName: requested.fields['Room Name'] }));
+      return;
+    }
+
     // ONE availability path, the same one both guest flows use. preferRoomId
     // re-offers a different room when the preferred one is taken — correct for a
     // guest chatting on WhatsApp, wrong for a staff member standing in front of
@@ -3102,6 +3119,29 @@ async function handleMessage(from, messageText, phoneNumberId, wamid) {
   //     / Checked In) still deliver, until that booking closes.
   const activeBooking = ACTIVE_BOOKING_STATES.includes(sessionState);
   if (STOP_KEYWORDS.includes(text)) {
+    // F43 (fix-order item 5a): STOP previously ran before any staff-identity
+    // check and wrote 'Opted Out': true to WS_Guests for ANY number, staff or
+    // guest — including creating a brand-new WS_Guests row for a cleaner/
+    // reception/owner number never seen before. Confirmed by diagnosis this
+    // never actually blocked an operational send (cleaner dispatch, owner
+    // notify, reception notify all look up their target via WS_Cleaners/
+    // WS_Roles/OWNER_PHONE directly, never WS_Guests) and never broke a staff
+    // member's own commands (senderIsAuthorizedWalkin etc. resolve purely from
+    // WS_Roles/WS_Cleaners too) — so this was data-hygiene pollution, not an
+    // operational lockout. Fixed anyway: a stray Opted-Out guest row for a
+    // staff seat is still wrong, and opt-out is a guest-facing concept a
+    // staff number never meant to invoke by typing a word that happens to
+    // collide. Same identity check the POPIA-consent block below already
+    // uses, run here first instead — cost is one extra pair of reads, paid
+    // only on the rare message that is literally "stop", not on every inbound
+    // message.
+    const isCleanerNumber = (await airtableGet('WS_Cleaners', `{Phone Number} = '${phone}'`)).length > 0;
+    const isOwnerNumber = OWNER_PHONE && phone === formatPhone(OWNER_PHONE);
+    const isStaffNumber = isCleanerNumber || isOwnerNumber || (await activeWalkinRoleForPhone(phone)) !== null;
+    if (isStaffNumber) {
+      logToAxiom('info', 'stop_ignored_staff_number', { phone });
+      return;
+    }
     const at = new Date().toISOString();
     if (guest) {
       await airtableUpdate('WS_Guests', guest.id, { 'Opted Out': true, 'Opted Out At': at });

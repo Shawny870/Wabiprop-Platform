@@ -94,6 +94,7 @@
     "walkinBadDuration": "Walk-ins are 1, 2 or 3 hours only — {hours} isn't available.\n\nExample: *WALKIN ROOM 2 2HRS John Smith*",
     "walkinNoSuchRoom": "No room matching \"{roomToken}\" at this property.\n\nUse the room number or its name, like *WALKIN ROOM 2 2HRS John Smith*",
     "walkinRoomTaken": "{roomName} isn't free for that time — it's already booked.\n\nTry another room.",
+    "walkinRoomCleaning": "{roomName} is still being cleaned and isn't ready yet.\n\nTry another room, or try again once cleaning is done.",
     "walkinRatesUnavailable": "Short-stay rates aren't set up for {propertyName} yet, so a walk-in can't be priced. Please set the hourly rates first.",
     "walkinWrongProperty": "That walk-in is for a different property to the one this number handles. Please send it from that property's number.",
     "walkinNotConfigured": "Your staff profile isn't linked to a property yet, so a walk-in can't be created. Please contact the owner.",
