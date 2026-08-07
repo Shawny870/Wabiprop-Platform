@@ -1418,7 +1418,18 @@ const actions = {
     }
 
     const bookingRef = `WS-${booking.id.slice(-6).toUpperCase()}`;
-    await airtableUpdate('WS_Bookings', booking.id, { 'Booking Ref': bookingRef });
+    // PR3 3c: checked, but non-fatal on failure. bookingRef is already computed
+    // locally and used in every message/log below regardless of whether this
+    // PATCH lands — the booking is Checked In, priced and roomed either way, so
+    // a failed writeback is a "does the Airtable record match what everyone was
+    // told" gap, not a broken booking. Logged loud rather than discovered later
+    // by someone finding a blank Booking Ref on an otherwise-complete row.
+    const refWrite = await airtableUpdate('WS_Bookings', booking.id, { 'Booking Ref': bookingRef });
+    if (refWrite && refWrite.error) {
+      logToAxiom('warn', 'walkin_bookingref_writeback_failed', {
+        phone: ctx.phone, bookingId: booking.id, bookingRef, error: JSON.stringify(refWrite.error)
+      });
+    }
 
     // CLAUDE.md rule 32 — Airtable is not transactional. Re-query after the
     // assignment and confirm this booking still holds the room alone. A second
@@ -1429,7 +1440,18 @@ const actions = {
       excludeBookingId: booking.id, preferRoomId: requested.id
     });
     if (!stillFree || stillFree.id !== requested.id) {
-      await airtableUpdate('WS_Bookings', booking.id, { 'Status': 'Cancelled' });
+      // PR3 3c: this rollback write is now checked — mirrors PR1's identical
+      // fix for the same class of write (a Cancelled rollback with nothing
+      // clean left to do if IT fails too). Same event name as PR1 deliberately,
+      // for one queryable signal across every rollback-failure in the file.
+      const rollback = await airtableUpdate('WS_Bookings', booking.id, { 'Status': 'Cancelled' });
+      if (rollback && rollback.error) {
+        logToAxiom('error', 'booking_rollback_failed', {
+          phone: ctx.phone, bookingId: booking.id, roomId: requested.id,
+          error: JSON.stringify(rollback.error),
+          reason: 'lost the availability race AND the Cancelled write failed — booking may still be holding a contested room'
+        });
+      }
       logToAxiom('warn', 'walkin_rolled_back', {
         phone: ctx.phone, bookingId: booking.id, roomId: requested.id, reason: 'room taken between check and create'
       });
@@ -1439,7 +1461,17 @@ const actions = {
 
     // Only now is the room really occupied — after the conflict check, so a
     // rolled-back booking never leaves a room marked Occupied behind it.
-    await airtableUpdate('WS_Rooms', requested.id, { 'Status': 'Occupied' });
+    // PR3 3c: checked, but non-fatal on failure for the same reason as the
+    // Booking Ref writeback — the BOOKING (its Check In/Check Out range) is
+    // what findAvailableRoom actually blocks against, not this Status field,
+    // which is cosmetic/ops-visibility for staff reading the room grid. A
+    // failed write here risks a stale-looking room, not a double-booking.
+    const roomWrite = await airtableUpdate('WS_Rooms', requested.id, { 'Status': 'Occupied' });
+    if (roomWrite && roomWrite.error) {
+      logToAxiom('error', 'walkin_room_status_write_failed', {
+        phone: ctx.phone, roomId: requested.id, bookingId: booking.id, error: JSON.stringify(roomWrite.error)
+      });
+    }
 
     logToAxiom('info', 'booking_create', {
       phone: ctx.phone, guestName: parsed.guestName, bookingRef, bookingType: 'Hourly',
@@ -1609,7 +1641,27 @@ const actions = {
       // because it was NOT confirmed live at the time.)
       'Paid At': recordedAt
     };
-    await airtableUpdate('WS_Bookings', booking.id, update);
+    // PR3 3b: the write is now checked before anything downstream trusts it.
+    // `result.error` is exactly the same test airtableUpdate itself uses
+    // internally to decide between logging airtable_update_success and
+    // airtable_update_error (PR2) — that IS the signal; there is no separate
+    // subscription mechanism to a fire-and-forget Axiom log, so the caller
+    // checks the same condition the callee already checks, on the same
+    // return value. Before this, the confirmation reply and payment_recorded
+    // fired regardless of whether the PATCH actually landed — reception could
+    // be told "Settled in full" while Payment Status stayed Unpaid, with
+    // nothing but an easily-missed airtable_update_error to say otherwise.
+    const result = await airtableUpdate('WS_Bookings', booking.id, update);
+    if (result && result.error) {
+      logToAxiom('error', 'payment_write_failed', {
+        phone: ctx.phone, roleId: role.id, propertyId: property.id,
+        bookingId: booking.id, bookingRef: booking.fields['Booking Ref'] || null,
+        amountAttempted: parsed.amount, method,
+        error: JSON.stringify(result.error)
+      });
+      await sendWhatsApp(ctx.phone, msg('paidWriteFailed', { roomName: room.fields['Room Name'] }));
+      return;
+    }
 
     logToAxiom('info', 'payment_recorded', {
       phone: ctx.phone, roleId: role.id, propertyId: property.id,
@@ -2521,6 +2573,36 @@ const actions = {
       return;
     }
 
+    // PR3 3a — idempotency, but NOT paidBooking's pattern, and deliberately so.
+    // paidBooking can check "is Payment Status already Paid" because paying
+    // twice is meaningless — there is a genuine terminal state to refuse
+    // against. Extensions have no such state: they are locked (16 July) as
+    // repeatable and uncapped, so "already extended" is not a valid refusal —
+    // a guest who genuinely wants a second extension an hour later must get
+    // one. Copying paidBooking's exact shape here would either do nothing or,
+    // built carelessly, silently break that locked behaviour.
+    //
+    // What IS available, matching the threat actually named for this fix
+    // (WhatsApp at-least-once delivery; a slow handler can cause Meta to
+    // retry BEFORE the first 200 lands — i.e. a genuinely CONCURRENT second
+    // invocation of the same inbound message, not one arriving minutes later):
+    // a fresh re-read, immediately before the write, compared against what
+    // THIS invocation started from — the same optimistic-concurrency idiom
+    // PR1 used for the booking-availability race. If a concurrent duplicate
+    // already committed its write in the gap, this invocation's own read is
+    // now stale and it stands down rather than adding a second increment on
+    // top of one it never saw.
+    //
+    // RESIDUAL GAP, stated plainly rather than papered over: this catches
+    // concurrent/overlapping duplicate delivery, not a duplicate that arrives
+    // well after the first has already fully completed — that case is
+    // genuinely indistinguishable from a deliberate second EXTEND without the
+    // inbound message's own id, which is not currently threaded through
+    // handleMessage/ctx anywhere in this file. Closing that fully is a
+    // separate, larger change (plumbing, not a guard) — flagged in the PR,
+    // not built here.
+    const readCheckOut = booking.fields['Check Out'];
+
     const extendMs = EXTENSION_MS[booking.fields['Booking Type']] || EXTENSION_MS.Overnight;
     const newCheckOut = new Date(Date.parse(booking.fields['Check Out']) + extendMs).toISOString();
     const alreadyNotified = !!booking.fields['Extension Owner Notified'];
@@ -2554,6 +2636,23 @@ const actions = {
       });
     } else {
       bookingUpdate['Amount Due'] = previousDue + charge;
+    }
+
+    // The re-check itself: fresh read, compared against what this invocation
+    // started from. A concurrent duplicate that already committed changes
+    // Check Out out from under us — stand down rather than adding a second
+    // increment neither the guest nor B17's revenue report should ever see.
+    const freshBookings = await airtableGetBookingsByGuestId(ctx.guest.id, 'Checked In');
+    const freshBooking = freshBookings.find(b => b.id === booking.id) || null;
+    if (!freshBooking || freshBooking.fields['Check Out'] !== readCheckOut) {
+      logToAxiom('warn', 'extend_duplicate_delivery_suspected', {
+        phone: ctx.phone, bookingId: booking.id,
+        readCheckOut, currentCheckOut: freshBooking ? freshBooking.fields['Check Out'] : null
+      });
+      // The extension the guest wanted already happened — courtesy reply, not
+      // an error, and definitely not a second charge.
+      await sendWhatsApp(ctx.phone, msg('extensionConfirmed', { guestName }));
+      return;
     }
 
     await airtableUpdate('WS_Bookings', booking.id, bookingUpdate);
