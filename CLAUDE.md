@@ -83,3 +83,12 @@ NO frameworks, NO TypeScript, NO ORMs, NO npm bloat. Deterministic state machine
 - BUG-09: WhatsApp profile displays "MyNumber" not "Wabiprop"
 - Dispatch layer defect: Wabistay messages routing through Wabiprop handler (current session priority)
 - BUG-10: `test/router.dispatch.test.js`'s "dispatches to Wabistay handler cleanly" test has no `WS_Properties` seed row, so it now hits the 6.4 `resolveProperty()` refusal path instead of the real greeting — same fix pattern as the fixture `WS_Properties` seed sync done for all 14 fixtures after the 6.4 merge, just never applied to this one test.
+
+## Rule 29 — Interaction Surface Declaration
+Every feature PR must name shared state, shared identity, shared grammar, and ordering dependence with existing flows, plus at least one interaction test per declared surface.
+
+## Rule 30 — No Unverified Success
+No handler reports success, logs success, or proceeds to a dependent write without checking that the preceding write or send actually succeeded.
+
+## Rule 31 — CEO-Stated Status Not Authoritative
+CEO-stated merge/deploy status is not authoritative until independently confirmed on GitHub/origin. Builder verifies against origin, not against what it's told.
