@@ -2593,14 +2593,22 @@ const actions = {
     // now stale and it stands down rather than adding a second increment on
     // top of one it never saw.
     //
-    // RESIDUAL GAP, stated plainly rather than papered over: this catches
-    // concurrent/overlapping duplicate delivery, not a duplicate that arrives
-    // well after the first has already fully completed — that case is
-    // genuinely indistinguishable from a deliberate second EXTEND without the
-    // inbound message's own id, which is not currently threaded through
-    // handleMessage/ctx anywhere in this file. Closing that fully is a
-    // separate, larger change (plumbing, not a guard) — flagged in the PR,
-    // not built here.
+    // PR3b — closes the residual gap PR3 flagged above: a duplicate delivery
+    // arriving AFTER the first EXTEND already fully completed is otherwise
+    // indistinguishable from a deliberate second EXTEND. wamid (now threaded
+    // through handleMessage/ctx) is the only thing that tells them apart.
+    // Field-based check, matching this codebase's existing idempotency
+    // convention (e.g. paidBooking's Payment Status check) rather than a new
+    // generic dedup store — cheaper and avoids an in-memory cache that
+    // wouldn't survive Vercel's serverless cold starts anyway.
+    if (ctx.wamid && booking.fields['Last Extend Wamid'] === ctx.wamid) {
+      logToAxiom('warn', 'extend_duplicate_wamid_suspected', {
+        phone: ctx.phone, bookingId: booking.id, wamid: ctx.wamid
+      });
+      await sendWhatsApp(ctx.phone, msg('extensionConfirmed', { guestName }));
+      return;
+    }
+
     const readCheckOut = booking.fields['Check Out'];
 
     const extendMs = EXTENSION_MS[booking.fields['Booking Type']] || EXTENSION_MS.Overnight;
@@ -2610,7 +2618,8 @@ const actions = {
     const bookingUpdate = {
       'Check Out': newCheckOut,
       // Re-arm the warning cycle for the extended window.
-      'Checkout Warning Sent At': null
+      'Checkout Warning Sent At': null,
+      'Last Extend Wamid': ctx.wamid || null
     };
     // Set the flag only on the first extension — leave it untouched afterwards so
     // the write log shows no re-notify bookkeeping on later extensions.
@@ -3036,7 +3045,7 @@ function matchTransition(rows, text) {
   return rows.find(t => t.inputs === '*' || t.inputs.includes(text)) || null;
 }
 
-async function handleMessage(from, messageText, phoneNumberId) {
+async function handleMessage(from, messageText, phoneNumberId, wamid) {
   const phone = formatPhone(from);
   const text = messageText.trim().toLowerCase();
   console.log(`[handleMessage] from: ${phone} | text: ${text}`);
@@ -3125,7 +3134,7 @@ async function handleMessage(from, messageText, phoneNumberId) {
     }
   }
 
-  const ctx = { phone, text, messageText, guest, next: null, cleaner: null, property };
+  const ctx = { phone, text, messageText, wamid, guest, next: null, cleaner: null, property };
 
   // Global transitions (cleaner DONE) — guard decides, any state
   for (const t of STATES.global) {
@@ -3216,6 +3225,7 @@ module.exports = async function handler(req, res) {
     const message = messages[0];
     const from = message.from;
     const messageText = message?.text?.body;
+    const wamid = message.id || null;
 
     console.log(`[POST] from: ${from} | text: ${messageText}`);
 
@@ -3226,7 +3236,7 @@ module.exports = async function handler(req, res) {
 
     // F2: handleMessage runs FULLY before we respond 200
     try {
-      await handleMessage(from, messageText, phoneNumberId);
+      await handleMessage(from, messageText, phoneNumberId, wamid);
     } catch (err) {
       console.error('[FATAL]', err.message, err.stack);
       logToAxiom('error', 'fatal', { message: err.message, stack: err.stack });

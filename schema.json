@@ -173,6 +173,11 @@
           "linkedTable": "WS_Properties",
           "prefersSingleRecordLink": true,
           "comment": "B10.5 Bug 2: property persisted on the booking at check-in; both checkout paths scope cleaner dispatch off this."
+        },
+        "Last Extend Wamid": {
+          "id": "fldNPKnKVjIR5zrlZ",
+          "type": "singleLineText",
+          "comment": "F41/PR3b: inbound wamid of the most recent EXTEND, used to catch a duplicate delivery arriving after the first EXTEND already fully completed."
         }
       }
     },

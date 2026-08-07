@@ -189,7 +189,13 @@ function installFetch(ctx) {
 
 // ── Meta payload builder + res capture ──────────────────────────────────────
 
-function metaTextPayload(from, text) {
+let _wamidCounter = 0;
+
+// id defaults to a fresh value per call — sequential test sends (e.g. two
+// real, separate EXTEND messages) must not collide on the same wamid, which
+// would make the second look like a duplicate of the first. Pass an explicit
+// id to simulate an actual redelivered duplicate.
+function metaTextPayload(from, text, id) {
   return {
     object: 'whatsapp_business_account',
     entry: [{
@@ -200,7 +206,7 @@ function metaTextPayload(from, text) {
           messaging_product: 'whatsapp',
           metadata: { display_phone_number: '27000000000', phone_number_id: TEST_ENV.WA_PHONE_NUMBER_ID },
           contacts: [{ profile: { name: 'Test' }, wa_id: from }],
-          messages: [{ from, id: 'wamid.incoming.test', timestamp: '1750000000', type: 'text', text: { body: text } }]
+          messages: [{ from, id: id || `wamid.incoming.test.${++_wamidCounter}`, timestamp: '1750000000', type: 'text', text: { body: text } }]
         }
       }]
     }]
