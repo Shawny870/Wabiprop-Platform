@@ -987,6 +987,22 @@ async function activeWalkinRoleForPhone(phone) {
   }) || null;
 }
 
+// Unfiltered sibling, used ONLY by senderIsAuthorizedWalkin's logging — deliberately
+// NOT a replacement for activeWalkinRoleForPhone, which stays untouched because it
+// also gates the STOP staff-check and the POPIA staff-check (rule 26: no refactor
+// while adding a feature; those two call sites are out of scope for this fix).
+// Fetches by role type + phone WITHOUT the {Active}=TRUE() filter, so a
+// deactivated seat is still found — the caller decides what "found but inactive"
+// means, rather than the query silently discarding the distinction.
+async function walkinRoleRecordForPhone(phone) {
+  const roles = await airtableGet('WS_Roles', orFormula('Role Type', WALKIN_ROLE_TYPES));
+  return roles.find(r => {
+    const raw = r.fields['Current Phone'];
+    if (!raw) return false;
+    return formatPhone(String(raw)) === phone;
+  }) || null;
+}
+
 // ─── PAYMENT SEAT LOOKUPS (B8) ───────────────────────────────────────────────
 // PAID is Reception-only, per the locked spec's refusal rule ("non-Reception
 // seat ... falls through silently") — narrower than WALKIN, which also accepts
@@ -1185,13 +1201,23 @@ const guards = {
     const parsed = parseWalkinCommand(ctx.messageText);
     if (!parsed) return false;
 
-    const role = await activeWalkinRoleForPhone(ctx.phone);
-    if (!role) {
-      // Logged (an unauthorised number attempting a staff command is worth
-      // seeing in Axiom) but never answered.
-      logToAxiom('warn', 'walkin_unauthorised_sender', { phone: ctx.phone });
+    // Logging-granularity split, CEO decision: the no-leak guarantee to the
+    // sender is unchanged either way (both cases return false with no reply,
+    // identical fallthrough to the ordinary guest flow) — this only splits
+    // WHAT gets logged, so Axiom can distinguish a stranger probing for the
+    // command from a known staff seat whose Active box is off (revoked or
+    // accidentally unticked), which the old single event name could not tell
+    // apart.
+    const record = await walkinRoleRecordForPhone(ctx.phone);
+    if (!record) {
+      logToAxiom('warn', 'walkin_unauthorised_stranger', { phone: ctx.phone });
       return false;
     }
+    if (!record.fields['Active']) {
+      logToAxiom('warn', 'walkin_unauthorised_deactivated', { phone: ctx.phone, roleId: record.id });
+      return false;
+    }
+    const role = record;
 
     ctx.walkin = parsed;
     ctx.walkinRole = role;
