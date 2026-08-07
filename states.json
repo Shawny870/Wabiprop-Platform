@@ -104,6 +104,7 @@
     "paidWrongProperty": "That room is at a different property to the one this number handles. Please send it from that property's number.",
     "paidRecorded": "✅ Payment recorded\n\n*Ref:* {bookingRef}\n*Room:* {roomName}\n*Received:* R{amountPaid}\n*Method:* {method}\n\nSettled in full.",
     "paidAmountMismatch": "That doesn't match what's owed on {roomName}.\n\n*You sent:* R{amountSent}\n*Amount owed:* R{amountDue}\n\nNothing was recorded. Send *PAID ROOM* again with R{amountDue}.",
-    "paidAlreadyRecorded": "Already recorded — {roomName} ({bookingRef}) was settled at R{amountPaid}. Nothing changed."
+    "paidAlreadyRecorded": "Already recorded — {roomName} ({bookingRef}) was settled at R{amountPaid}. Nothing changed.",
+    "paidWriteFailed": "Something went wrong saving that payment for {roomName} — nothing was recorded. Please try *PAID ROOM* again."
   }
 }
