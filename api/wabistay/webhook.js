@@ -1230,7 +1230,18 @@ const guards = {
 // case) -- same side effects either way: room -> Available, thank the cleaner,
 // notify the owner.
 async function resolveRoomClean(ctx, room) {
-  await airtableUpdate('WS_Rooms', room.id, { 'Status': 'Available' });
+  // Rule 30 step 2, slice 1: checked but non-fatal, same shape as walkinBooking's
+  // room->Occupied write (F40) — Status is a derived display field, not
+  // findAvailableRoom's source of truth (that's the WS_Bookings overlap check),
+  // so a failure here fails safe (room stays Cleaning, unsellable) rather than
+  // unsafe. Logged loud so the write failure is visible instead of inferred.
+  const roomWrite = await airtableUpdate('WS_Rooms', room.id, { 'Status': 'Available' });
+  if (roomWrite && roomWrite.error) {
+    logToAxiom('error', 'cleaner_done_room_status_write_failed', {
+      phone: ctx.phone, roomId: room.id, roomName: room.fields['Room Name'],
+      error: JSON.stringify(roomWrite.error)
+    });
+  }
   logToAxiom('info', 'state_transition', { phone: ctx.phone, roomId: room.id, roomName: room.fields['Room Name'], from: 'Cleaning', to: 'Available', reason: 'cleaner_done' });
   await sendWhatsApp(ctx.phone, msg('cleanerThanks', { roomName: room.fields['Room Name'] }));
   if (OWNER_PHONE) {
@@ -1948,7 +1959,16 @@ const actions = {
         return;
       }
 
-      await airtableUpdate('WS_Bookings', booking.id, { 'Booking Ref': bookingRef });
+      // Rule 30 step 2, slice 1: checked but non-fatal, same shape as
+      // walkinBooking's identical Booking Ref writeback (F40) — bookingRef is
+      // computed locally and used in every message/log regardless of whether
+      // this PATCH lands, so a failure here is cosmetic, not a booking failure.
+      const refWrite = await airtableUpdate('WS_Bookings', booking.id, { 'Booking Ref': bookingRef });
+      if (refWrite && refWrite.error) {
+        logToAxiom('warn', 'collectdetails_bookingref_writeback_failed', {
+          phone: ctx.phone, bookingId: booking.id, bookingRef, error: JSON.stringify(refWrite.error)
+        });
+      }
       // B19: Booked, logged at creation. recordEta re-affirms on confirmation but
       // the booking-id dedup keeps it to one row.
       await logEnquiry(ctx.property, ctx.phone, 'Booked', {
@@ -2044,10 +2064,24 @@ const actions = {
       return;
     }
 
-    await airtableUpdate('WS_Bookings', booking.id, {
+    // Rule 30 step 2, slice 1: FATAL on failure — this write sets the price the
+    // guest is about to be told and billed, so an unchecked failure here would
+    // confirm a booking at a rate that was never actually saved. Session State
+    // is deliberately NOT advanced on failure, so the guest's next "1"/"2" reply
+    // re-runs this same handler rather than landing in AWAITING_ETA with no
+    // rate behind it.
+    const rateWrite = await airtableUpdate('WS_Bookings', booking.id, {
       'Rate Applied': [rate.id],
       'Amount Due': rate.fields['Amount']
     });
+    if (rateWrite && rateWrite.error) {
+      logToAxiom('error', 'occupancy_rate_write_failed', {
+        phone: ctx.phone, bookingId: booking.id, occupancyType,
+        amount: rate.fields['Amount'], error: JSON.stringify(rateWrite.error)
+      });
+      await sendWhatsApp(ctx.phone, msg('occupancyWriteFailed', { guestName }));
+      return;
+    }
     await airtableUpdate('WS_Guests', ctx.guest.id, { 'Session State': ctx.next, 'Last Inbound At': new Date().toISOString() });
     logToAxiom('info', 'occupancy_selected', {
       phone: ctx.phone, guestId: ctx.guest.id, occupancyType, amount: rate.fields['Amount']
@@ -2216,7 +2250,19 @@ const actions = {
       // fourth hourly option. Cancel the half-built hourly booking on the way
       // out so the guest does not end up with two open Enquiry rows, which
       // would make recordEta ambiguous about which one to confirm.
-      if (pending) await airtableUpdate('WS_Bookings', pending.id, { 'Status': 'Cancelled' });
+      // Rule 30 step 2, slice 1: checked but non-fatal, same shape as the
+      // rollback writes elsewhere in this handler — cancelling a half-built
+      // hold is cleanup, not the guest's actual outcome (they're being
+      // redirected to overnight regardless), so a failed cancel is logged
+      // loud rather than blocking the redirect.
+      if (pending) {
+        const cancelWrite = await airtableUpdate('WS_Bookings', pending.id, { 'Status': 'Cancelled' });
+        if (cancelWrite && cancelWrite.error) {
+          logToAxiom('error', 'hourly_redirect_cancel_failed', {
+            phone: ctx.phone, bookingId: pending.id, error: JSON.stringify(cancelWrite.error)
+          });
+        }
+      }
       await airtableUpdate('WS_Guests', ctx.guest.id, { 'Session State': 'AWAITING_DETAILS' });
       logToAxiom('info', 'hourly_redirect_overnight', { phone: ctx.phone, requestedHours: choice });
       await sendWhatsApp(ctx.phone, msg('hourlyTooLong'));
@@ -2269,7 +2315,13 @@ const actions = {
     // Completes the pending row rather than creating a second one: Check Out and
     // the room hold are what turn it from inert into a real, blocking booking.
     const bookingRef = `WS-${pending.id.slice(-6).toUpperCase()}`;
-    await airtableUpdate('WS_Bookings', pending.id, {
+    // Rule 30 step 2, slice 1: FATAL on failure — this is the write that sells
+    // the room and sets the price (Amount Due), the hourly-flow analog of
+    // walkinBooking's checked create (F40). Checked BEFORE the stillFree
+    // re-check below: if this write never landed, there is nothing to
+    // re-verify or roll back, and running that check anyway would misreport
+    // a race loss for what is actually a write failure.
+    const confirmWrite = await airtableUpdate('WS_Bookings', pending.id, {
       'Check Out': checkOutIso,
       'Room': [room.id],
       'Booking Ref': bookingRef,
@@ -2290,6 +2342,14 @@ const actions = {
       // Amount Due, which is populated for every booking type.
       'Amount Due': amount
     });
+    if (confirmWrite && confirmWrite.error) {
+      logToAxiom('error', 'hourly_confirm_write_failed', {
+        phone: ctx.phone, bookingId: pending.id, roomId: room.id, amount,
+        error: JSON.stringify(confirmWrite.error)
+      });
+      await sendWhatsApp(ctx.phone, msg('hourlyBookingCreateFailed', { guestName }));
+      return;
+    }
 
     // P1a: the write above is what puts this booking on the room (Room + Status
     // Confirmed in one call) — no intermediate Enquiry step the way overnight
@@ -2357,11 +2417,25 @@ const actions = {
     // F5: was FIND/ARRAYJOIN — now JS filter on fetched records
     const bookings = await airtableGetBookingsByGuestId(ctx.guest.id, 'Enquiry');
     const confirmedBooking = bookings[0] || null;
+    // Rule 30 step 2, slice 1: FATAL on failure — this write is what moves the
+    // booking from 'Enquiry' to 'Confirmed', and both cancelBooking and
+    // gateArrival query strictly on 'Confirmed' (same invariant selectHourlyDuration's
+    // comment above already documents). A failed write here left silently would
+    // tell the guest their stay is confirmed while the booking stays invisible
+    // to both of those handlers. Session State is deliberately NOT advanced on
+    // failure, so the guest's next ETA message retries the same write.
     if (confirmedBooking) {
-      await airtableUpdate('WS_Bookings', confirmedBooking.id, {
+      const etaWrite = await airtableUpdate('WS_Bookings', confirmedBooking.id, {
         'ETA': eta,
         'Status': 'Confirmed'
       });
+      if (etaWrite && etaWrite.error) {
+        logToAxiom('error', 'eta_confirm_write_failed', {
+          phone: ctx.phone, bookingId: confirmedBooking.id, error: JSON.stringify(etaWrite.error)
+        });
+        await sendWhatsApp(ctx.phone, msg('etaWriteFailed'));
+        return;
+      }
     }
     await airtableUpdate('WS_Guests', ctx.guest.id, { 'Session State': ctx.next });
     // B19: Booked, re-affirmed on confirmation — deduped by booking id, so this is
@@ -2450,11 +2524,24 @@ const actions = {
     const assignedRoomName = room ? room.fields['Room Name'] : null;
 
     // Step 3: room → Occupied. Now it really is occupancy, not a hold.
+    // Rule 30 step 2, slice 1: checked but non-fatal — Status is a derived
+    // display field here too, not findAvailableRoom's source of truth, so a
+    // failure fails safe (room reads as still-available rather than sold).
     if (assignedRoomId) {
-      await airtableUpdate('WS_Rooms', assignedRoomId, { 'Status': 'Occupied' });
+      const roomWrite = await airtableUpdate('WS_Rooms', assignedRoomId, { 'Status': 'Occupied' });
+      if (roomWrite && roomWrite.error) {
+        logToAxiom('error', 'gate_arrival_room_status_write_failed', {
+          phone: ctx.phone, roomId: assignedRoomId, error: JSON.stringify(roomWrite.error)
+        });
+      }
     }
 
     // Step 4: booking → Checked In + link room + timestamp
+    // Rule 30 step 2, slice 1: FATAL on failure — this is the write that
+    // actually checks the guest in. A silent failure here would welcome a
+    // guest into a room with no Checked-In record behind it, and Step 6b's
+    // cleaner dispatch / Step 7's welcome message would both be false
+    // positives. Everything past this point is skipped on failure.
     if (booking) {
       const bookingUpdate = {
         'Status': 'Checked In',
@@ -2466,7 +2553,14 @@ const actions = {
       // from the inbound phone_number_id), so both checkout paths can scope off
       // the record instead of re-deriving it. Single-record link → one-element array.
       bookingUpdate['WS_Property'] = [ctx.property.id];
-      await airtableUpdate('WS_Bookings', booking.id, bookingUpdate);
+      const checkInWrite = await airtableUpdate('WS_Bookings', booking.id, bookingUpdate);
+      if (checkInWrite && checkInWrite.error) {
+        logToAxiom('error', 'gate_arrival_checkin_write_failed', {
+          phone: ctx.phone, bookingId: booking.id, error: JSON.stringify(checkInWrite.error)
+        });
+        await sendWhatsApp(ctx.phone, msg('gateArrivalWriteFailed'));
+        return;
+      }
     }
 
     // Step 5: session → CHECKED_IN
@@ -2516,8 +2610,19 @@ const actions = {
   async cancelBooking(ctx) {
     // F5: was FIND/ARRAYJOIN
     const bookings = await airtableGetBookingsByGuestId(ctx.guest.id, 'Confirmed');
+    // Rule 30 step 2, slice 1: FATAL on failure — telling the guest "cancelled"
+    // while the booking stays Confirmed leaves it still holding its room via
+    // BLOCKING_BOOKING_STATUSES with no way for the guest to know it's still
+    // live. Session State is deliberately NOT advanced on failure.
     if (bookings.length > 0) {
-      await airtableUpdate('WS_Bookings', bookings[0].id, { 'Status': 'Cancelled' });
+      const cancelWrite = await airtableUpdate('WS_Bookings', bookings[0].id, { 'Status': 'Cancelled' });
+      if (cancelWrite && cancelWrite.error) {
+        logToAxiom('error', 'cancel_booking_write_failed', {
+          phone: ctx.phone, bookingId: bookings[0].id, error: JSON.stringify(cancelWrite.error)
+        });
+        await sendWhatsApp(ctx.phone, msg('cancelWriteFailed'));
+        return;
+      }
     }
     await airtableUpdate('WS_Guests', ctx.guest.id, { 'Session State': ctx.next });
     logToAxiom('info', 'state_transition', { phone: ctx.phone, guestId: ctx.guest.id, from: 'CONFIRMED', to: ctx.next, reason: 'cancel' });
@@ -2550,16 +2655,40 @@ const actions = {
     if (bookings.length > 0) {
       const booking = bookings[0];
       scopePropertyId = bookingPropertyId(booking, ctx.property.id);
-      await airtableUpdate('WS_Bookings', booking.id, {
+      // Rule 30 step 2, slice 1: FATAL on failure — this write is what closes
+      // out the stay, and its Amount Due later feeds notifyReceptionOfPayment
+      // below. A silent failure here would dispatch cleaners and bill
+      // reception for a checkout that never actually recorded.
+      const checkoutWrite = await airtableUpdate('WS_Bookings', booking.id, {
         'Status': 'Checked Out',
         'Checkout Confirmed': true
       });
+      if (checkoutWrite && checkoutWrite.error) {
+        logToAxiom('error', 'checkout_write_failed', {
+          phone: ctx.phone, bookingId: booking.id, error: JSON.stringify(checkoutWrite.error)
+        });
+        await sendWhatsApp(ctx.phone, msg('checkoutWriteFailed'));
+        return;
+      }
       if (booking.fields['Room'] && booking.fields['Room'].length > 0) {
         const roomId = booking.fields['Room'][0];
         const roomRecords = await airtableGet('WS_Rooms', `RECORD_ID() = '${roomId}'`);
         if (roomRecords.length > 0) {
           roomName = roomRecords[0].fields['Room Name'];
-          await airtableUpdate('WS_Rooms', roomId, { 'Status': 'Cleaning' });
+          // Rule 30 step 2, slice 1: checked but non-fatal, same shape as the
+          // other room-status writes in this sweep — Status is a derived
+          // display field, and cleaner dispatch below is a direct message,
+          // not gated on this write succeeding. Logged loud: a failure here
+          // does have a real downstream cost (senderIsCleanerNamingRoom only
+          // matches rooms with Status='Cleaning', so the cleaner's own later
+          // room-naming reply would silently fail to match), worth surfacing
+          // even though it isn't blocked in this slice.
+          const cleaningWrite = await airtableUpdate('WS_Rooms', roomId, { 'Status': 'Cleaning' });
+          if (cleaningWrite && cleaningWrite.error) {
+            logToAxiom('error', 'checkout_room_status_write_failed', {
+              phone: ctx.phone, roomId, error: JSON.stringify(cleaningWrite.error)
+            });
+          }
           // Separate call, deliberately not combined with the Status update above:
           // 'Cleaning Started At' does not exist on WS_Rooms in Airtable yet (confirmed
           // live via meta API) -- Airtable rejects an entire PATCH if any field in it is
@@ -2709,7 +2838,18 @@ const actions = {
       return;
     }
 
-    await airtableUpdate('WS_Bookings', booking.id, bookingUpdate);
+    // Rule 30 step 2, slice 1: FATAL on failure — this write sets Amount Due
+    // and Check Out, the two facts the owner notify and guest confirmation
+    // below both report as settled. F41's dedup write (Last Extend Wamid) is
+    // part of this same bookingUpdate object, so this check also covers that.
+    const extendWrite = await airtableUpdate('WS_Bookings', booking.id, bookingUpdate);
+    if (extendWrite && extendWrite.error) {
+      logToAxiom('error', 'extend_write_failed', {
+        phone: ctx.phone, bookingId: booking.id, error: JSON.stringify(extendWrite.error)
+      });
+      await sendWhatsApp(ctx.phone, msg('extendWriteFailed', { guestName }));
+      return;
+    }
 
     if (!alreadyNotified && OWNER_PHONE) {
       await sendWhatsApp(OWNER_PHONE, msg('ownerExtension', {
@@ -2762,14 +2902,32 @@ const actions = {
 // B10.5 Bug 2: `propertyId` is the caller's room-walk result, used only as a
 // fallback for bookings checked in before WS_Property was persisted.
 async function settleAutoCheckout(booking, room, guest, propertyName, propertyId) {
-  await airtableUpdate('WS_Bookings', booking.id, {
+  // Rule 30 step 2, slice 1: FATAL on failure, cron twin of the manual
+  // checkout write. No guest to reply to here — on failure this just logs
+  // loud and returns without dispatching cleaners/reception/guest-thanks;
+  // the booking stays 'Status: Checked In' so runAutoCheckout's own query
+  // (`{Status} = 'Checked In'`) naturally retries it on the next tick.
+  const checkoutWrite = await airtableUpdate('WS_Bookings', booking.id, {
     'Status': 'Checked Out',
     'Checkout Confirmed': true
   });
+  if (checkoutWrite && checkoutWrite.error) {
+    logToAxiom('error', 'auto_checkout_write_failed', {
+      bookingId: booking.id, error: JSON.stringify(checkoutWrite.error)
+    });
+    return;
+  }
   let roomName = 'your room';
   if (room) {
     roomName = room.fields['Room Name'];
-    await airtableUpdate('WS_Rooms', room.id, { 'Status': 'Cleaning' });
+    // Rule 30 step 2, slice 1: checked but non-fatal, same shape as the
+    // manual checkout path's equivalent write.
+    const cleaningWrite = await airtableUpdate('WS_Rooms', room.id, { 'Status': 'Cleaning' });
+    if (cleaningWrite && cleaningWrite.error) {
+      logToAxiom('error', 'auto_checkout_room_status_write_failed', {
+        roomId: room.id, error: JSON.stringify(cleaningWrite.error)
+      });
+    }
     await airtableUpdate('WS_Rooms', room.id, { 'Cleaning Started At': new Date().toISOString() });
   }
   // B10.5 Bug 2: was `{Active} = TRUE()` — identical unscoped query to the manual
