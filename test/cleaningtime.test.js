@@ -301,3 +301,122 @@ test('a bare START still opts an opted-out guest back in', async () => {
   assert.strictEqual(ctx.airtable.tables['WS_Guests'][0].fields['Opted Out'], false, 'B14 still works');
   assert.match(ctx.sends.map(s => s.body).join('\n'), /Welcome back/);
 });
+
+// ── Rule 29: interaction surface with F43 (WALKIN mid-clean / STOP lockout) ──
+// Declared surface: shared state is WS_Rooms.Status, contended between F37's
+// cleaner START/DONE flow and F43's WALKIN mid-clean guard — both read and
+// write the same field on the same room. No shared identity, no shared
+// grammar. Reconciled in resolveRoomClean() per CEO-confirmed order: F37's
+// `Status !== 'Cleaning'` guard runs first, then the Status->Available write
+// is wrapped in F44/F45's checked-write (NON-FATAL) pattern, then the
+// metrics/booking-write block proceeds regardless of that write's outcome.
+
+const RECEPTION_PHONE = '27825110000';
+
+function seedWithReception(overrides = {}) {
+  const s = seed({
+    WS_Roles: [{
+      id: 'recRole1',
+      fields: { 'Role Label': 'Villa Liza Reception', 'Role Type': 'Reception', 'Property': ['recP1'], 'Current Phone': RECEPTION_PHONE, 'Active': true }
+    }],
+    ...overrides
+  });
+  // WALKIN requires hourly rates on the property (fails closed otherwise) —
+  // this fixture's base seed() has no rates since it predates WALKIN tests.
+  s.WS_Properties[0].fields['Hourly Rate 1hr'] = 120;
+  s.WS_Properties[0].fields['Hourly Rate 2hr'] = 250;
+  s.WS_Properties[0].fields['Hourly Rate 3hr'] = 320;
+  return s;
+}
+
+// One-shot: makes ONE matching write return an Airtable error body, then
+// restores. Matches money-path-checks.test.js / rule30-money-occupancy-sweep's helper.
+function failNextWrite(ctx, { method, pathIncludes, bodyIncludes } = {}) {
+  const originalFetch = global.fetch;
+  global.fetch = async (url, opts = {}) => {
+    const u = new URL(url);
+    const methodMatches = (opts.method || 'GET').toUpperCase() === method;
+    const pathMatches = !pathIncludes || u.pathname.includes(pathIncludes);
+    const bodyMatches = !bodyIncludes || String(opts.body || '').includes(bodyIncludes);
+    if (methodMatches && pathMatches && bodyMatches) {
+      global.fetch = originalFetch; // one-shot
+      return { status: 422, ok: false, json: async () => ({ error: { type: 'INVALID_REQUEST', message: 'simulated' } }), text: async () => 'simulated' };
+    }
+    return originalFetch(url, opts);
+  };
+}
+
+test('WALKIN still refuses a room a cleaner has genuinely started, but not yet finished', async () => {
+  // Room 02 is seeded Cleaning; the cleaner sends START (F37) but not DONE, so
+  // the room is still mid-clean — F43's WALKIN guard must still fire exactly
+  // as it did before F37 existed. This is the case F37's own diagnosis (F43's
+  // FIXLOG entry) checked and found no overlap for; re-proven here directly
+  // against the reconciled code, not assumed from that note.
+  const ctx = { airtable: new MockAirtable(seedWithReception()), sends: [], axiom: [] };
+  installFetch(ctx);
+
+  await send(CLEANER_PHONE, 'START ROOM 2');
+  assert.strictEqual(roomRow(ctx)['Status'], 'Cleaning', 'still mid-clean after START');
+
+  await send(RECEPTION_PHONE, 'WALKIN ROOM 2 2HRS John Smith');
+
+  assert.strictEqual(roomRow(ctx)['Status'], 'Cleaning', 'WALKIN did not touch room status');
+  assert.strictEqual(bookingRow(ctx)['Cleaning Job Started At'] === undefined, false, 'the cleaner\'s own START clock is untouched');
+  assert.strictEqual(ctx.airtable.tables['WS_Bookings'].some(b => b.fields['Room']?.includes('recR2') && b.fields['Status'] === 'Confirmed'), false, 'no walk-in booking created against the room');
+  assert.ok(event(ctx, 'walkin_room_mid_clean'), 'F43\'s guard still fires with F37\'s START clock running');
+});
+
+test('WALKIN books a room the SAME cleaner has just finished (DONE), proving the two flows hand off correctly', async () => {
+  const ctx = { airtable: new MockAirtable(seedWithReception()), sends: [], axiom: [] };
+  installFetch(ctx);
+
+  await send(CLEANER_PHONE, 'START ROOM 2');
+  await send(CLEANER_PHONE, 'DONE');
+  assert.strictEqual(roomRow(ctx)['Status'], 'Available', 'F37 freed the room');
+
+  await send(RECEPTION_PHONE, 'WALKIN ROOM 2 2HRS John Smith');
+
+  assert.strictEqual(roomRow(ctx)['Status'], 'Occupied', 'WALKIN can sell it the instant it is genuinely free');
+  assert.strictEqual(event(ctx, 'walkin_room_mid_clean'), undefined, 'the guard does not over-fire once the room is legitimately Available');
+});
+
+test('a failed Status->Available write does not block job completion or metrics — the reconciled order holds', async () => {
+  // Proves the reconciliation order explicitly: F37's Cleaning-guard runs
+  // first (so the write attempt happens at all), the write itself is
+  // NON-FATAL per F44/F45's checked-write pattern, and the metrics/booking
+  // write block below it proceeds regardless of whether that write landed.
+  const ctx = start();
+  failNextWrite(ctx, { method: 'PATCH', pathIncludes: 'WS_Rooms/recR2', bodyIncludes: 'Available' });
+
+  await send(CLEANER_PHONE, 'START ROOM 2');
+  await send(CLEANER_PHONE, 'DONE');
+
+  assert.strictEqual(roomRow(ctx)['Status'], 'Cleaning', 'the write genuinely failed and was not silently retried');
+  assert.ok(event(ctx, 'cleaner_done_room_status_write_failed'), 'logged loud, NON-FATAL');
+  assert.ok(bookingRow(ctx)['Cleaning Completed At'], 'job completion recorded regardless');
+  assert.strictEqual(bookingRow(ctx)['Cleaned By'], 'Rose', 'attribution recorded regardless');
+  const e = event(ctx, 'cleaning_job_completed');
+  assert.ok(e, 'the completion metric event still fires');
+  assert.ok(e.jobDurationMs !== null, 'metrics computed regardless of the failed room-status write');
+  assert.match(ctx.sends.map(s => s.body).join('\n'), /clean/i, 'the cleaner is still thanked — non-fatal all the way through');
+});
+
+test('a second DONE after the room is already freed attempts no write — dispatch itself refuses first', async () => {
+  // cleanerDone's own dispatch guard (`{Status} = 'Cleaning'`) finds nothing
+  // once F37 has already freed the room, so it never reaches resolveRoomClean
+  // at all — `cleanerNothingToClean`, not the belt-and-braces Cleaning-status
+  // check inside resolveRoomClean (that check only matters for the
+  // ambiguous-room reply path, `cleanerRoomReply`, which names a room
+  // directly). Confirms no write is attempted a second time either way.
+  const ctx = start();
+  await send(CLEANER_PHONE, 'START ROOM 2');
+  await send(CLEANER_PHONE, 'DONE'); // room now Available
+  ctx.axiom.length = 0;
+  ctx.sends.length = 0;
+
+  await send(CLEANER_PHONE, 'DONE'); // second DONE — nothing left to complete
+
+  assert.strictEqual(event(ctx, 'cleaner_done_room_status_write_failed'), undefined, 'no write was even attempted');
+  assert.strictEqual(event(ctx, 'cleaning_job_completed'), undefined, 'no second completion recorded');
+  assert.match(ctx.sends.map(s => s.body).join('\n'), /No rooms currently marked for cleaning/i);
+});
