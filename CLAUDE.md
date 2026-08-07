@@ -30,7 +30,7 @@ This file is read at the start of EVERY Claude Code session. If code and this co
 - Business-initiated sends (cleaner, owner, summaries) must use approved utility templates — free-form text silently fails outside the 24h window.
 - Changes touching message templates, pricing values, state machine, or POPIA/consent code: label PR `needs-decision` — Shawn reviews before merging.
 - Airtable is not transactional. After any room or record assignment, re-query to verify. On conflict, roll back and re-offer.
-- Rule 28: Builder never edits CLAUDE.md directly. Status updates go to FIXLOG.md. Contract changes require CEO/Design Engineer sign-off.
+- Rule 28: Builder may co-author edits to CLAUDE.md directly (commit as normal, Co-Authored-By trailer required). Every CLAUDE.md-touching PR must be flagged in the PR body: '⚠️ CLAUDE.md modified — Design Engineer review required.' After every 3 cumulative rule additions/edits since last review, CEO pastes the current full CLAUDE.md rules section back to Design Engineer (Claude.ai) for a confirmation pass before further edits proceed. Status updates still go to FIXLOG.md, not CLAUDE.md.
 
 ## Diagnostic protocol (3-lens rule — mandatory for every bug fix)
 When a flow is broken:
@@ -83,3 +83,12 @@ NO frameworks, NO TypeScript, NO ORMs, NO npm bloat. Deterministic state machine
 - BUG-09: WhatsApp profile displays "MyNumber" not "Wabiprop"
 - Dispatch layer defect: Wabistay messages routing through Wabiprop handler (current session priority)
 - BUG-10: `test/router.dispatch.test.js`'s "dispatches to Wabistay handler cleanly" test has no `WS_Properties` seed row, so it now hits the 6.4 `resolveProperty()` refusal path instead of the real greeting — same fix pattern as the fixture `WS_Properties` seed sync done for all 14 fixtures after the 6.4 merge, just never applied to this one test.
+
+## Rule 29 — Interaction Surface Declaration
+Every feature PR must name shared state, shared identity, shared grammar, and ordering dependence with existing flows, plus at least one interaction test per declared surface.
+
+## Rule 30 — No Unverified Success
+No handler reports success, logs success, or proceeds to a dependent write without checking that the preceding write or send actually succeeded.
+
+## Rule 31 — CEO-Stated Status Not Authoritative
+CEO-stated merge/deploy status is not authoritative until independently confirmed on GitHub/origin. Builder verifies against origin, not against what it's told.
