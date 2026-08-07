@@ -5,6 +5,7 @@
     { "inputs": "*", "guard": "senderIsAuthorizedWalkin", "action": "walkinBooking" },
     { "inputs": "*", "guard": "senderIsAuthorizedPaid", "action": "paidBooking" },
     { "inputs": ["done"], "guard": "senderIsCleaner", "action": "cleanerDone" },
+    { "inputs": "*", "guard": "senderIsCleanerStartingRoom", "action": "startCleaningJob" },
     { "inputs": "*", "guard": "senderIsCleanerNamingRoom", "action": "cleanerRoomReply" }
   ],
 
@@ -115,6 +116,9 @@
     "paidRecorded": "✅ Payment recorded\n\n*Ref:* {bookingRef}\n*Room:* {roomName}\n*Received:* R{amountPaid}\n*Method:* {method}\n\nSettled in full.",
     "paidAmountMismatch": "That doesn't match what's owed on {roomName}.\n\n*You sent:* R{amountSent}\n*Amount owed:* R{amountDue}\n\nNothing was recorded. Send *PAID ROOM* again with R{amountDue}.",
     "paidAlreadyRecorded": "Already recorded — {roomName} ({bookingRef}) was settled at R{amountPaid}. Nothing changed.",
-    "paidWriteFailed": "Something went wrong saving that payment for {roomName} — nothing was recorded. Please try *PAID ROOM* again."
+    "paidWriteFailed": "Something went wrong saving that payment for {roomName} — nothing was recorded. Please try *PAID ROOM* again.",
+    "cleaningStartUsage": "To start a room, send:\n\n*START ROOM 2*",
+    "cleaningStartNotCleaning": "Room \"{roomToken}\" isn't marked for cleaning right now.\n\nSend *START ROOM* with a room that needs doing.",
+    "cleaningStarted": "👍 Got it — {roomName} started.\n\nReply *DONE* when the room is ready."
   }
 }
