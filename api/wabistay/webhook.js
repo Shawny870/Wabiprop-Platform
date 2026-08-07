@@ -105,6 +105,14 @@ async function airtableCreate(table, fields) {
   if (data.error) {
     console.error(`[Airtable CREATE ERROR] ${table}:`, JSON.stringify(data.error));
     logToAxiom('error', 'airtable_create_error', { table, status: res.status, error: JSON.stringify(data.error) });
+  } else {
+    // Rule 30 step 1 (visibility only): mirrors sendWhatsAppTemplate's existing
+    // success log exactly — this function already logged failure, never
+    // success, so "did the write actually land" was only ever answerable from
+    // the ABSENCE of an error event, indistinguishable from Axiom itself being
+    // down (F32). This does not check-before-proceeding for any caller; it
+    // only makes a fact visible that was previously only inferred.
+    logToAxiom('info', 'airtable_create_success', { table, id: data.id || null });
   }
   return data;
 }
@@ -124,6 +132,9 @@ async function airtableUpdate(table, recordId, fields) {
   if (data.error) {
     console.error(`[Airtable UPDATE ERROR] ${table}:`, JSON.stringify(data.error));
     logToAxiom('error', 'airtable_update_error', { table, recordId, status: res.status, error: JSON.stringify(data.error) });
+  } else {
+    // Rule 30 step 1 — see airtableCreate's identical comment above.
+    logToAxiom('info', 'airtable_update_success', { table, recordId });
   }
   return data;
 }
@@ -317,6 +328,15 @@ async function sendWhatsApp(to, message) {
   if (data.error) {
     console.error(`[WhatsApp SEND ERROR]:`, JSON.stringify(data.error));
     logToAxiom('error', 'whatsapp_send_error', { to, status: res.status, error: JSON.stringify(data.error) });
+  } else {
+    // Rule 30 step 1: mirrors sendWhatsAppTemplate's whatsapp_template_sent
+    // exactly, same wamid — the join key to B3's whatsapp_status_callback
+    // events. Meta can return HTTP 200 with an error BODY (e.g. 131047), which
+    // is exactly the case the `if (data.error)` branch above already catches;
+    // this only makes the OTHER case — genuine acceptance — equally visible,
+    // where before it was pure absence of a log line.
+    const wamid = (data && data.messages && data.messages[0] && data.messages[0].id) || null;
+    logToAxiom('info', 'whatsapp_sent', { to, wamid });
   }
   return data;
 }
@@ -3160,3 +3180,10 @@ module.exports.ownerSummaryHandler = ownerSummaryHandler;
 module.exports.aggregateOwnerSummary = aggregateOwnerSummary;
 // B19: enquiry-abandonment staleness sweep (injected `now` for timing tests).
 module.exports.runEnquiryAbandonment = runEnquiryAbandonment;
+// Rule 30 step 1: exported so the new success-vs-failure logging on these three
+// shared write/send functions is testable directly — see
+// test/success-logging.test.js — rather than only indirectly through whichever
+// handler happens to call them.
+module.exports.airtableCreate = airtableCreate;
+module.exports.airtableUpdate = airtableUpdate;
+module.exports.sendWhatsApp = sendWhatsApp;
