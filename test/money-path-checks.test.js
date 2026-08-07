@@ -68,9 +68,9 @@ function start(overrides) {
   return ctx;
 }
 
-async function send(from, text) {
+async function send(from, text, wamid) {
   const res = makeRes();
-  await handler({ method: 'POST', body: metaTextPayload(from, text) }, res);
+  await handler({ method: 'POST', body: metaTextPayload(from, text, wamid) }, res);
   return res;
 }
 
@@ -177,6 +177,36 @@ test('a genuine, well-separated second extension still works — the locked repe
   const afterSecond = bookingRow(ctx, 'recBook1');
   assert.strictEqual(afterSecond['Amount Due'], 1200, 'second, genuinely separate extension ALSO charged — not blocked');
   assert.strictEqual(axiomEvents(ctx).filter(e => e === 'extend_duplicate_delivery_suspected').length, 0, 'neither was mistaken for a duplicate');
+});
+
+// ── 3b (this PR): post-completion duplicate EXTEND, closed via wamid ───────
+
+test('a duplicate EXTEND arriving after the first one already fully completed is caught, no second charge', async () => {
+  const ctx = { airtable: new MockAirtable(seedCheckedInBooking()), sends: [], axiom: [] };
+  installFetch(ctx);
+
+  await send(GUEST_PHONE, 'extend', 'wamid.dup.1'); // completes fully
+  const afterFirst = bookingRow(ctx, 'recBook1');
+  assert.strictEqual(afterFirst['Amount Due'], 800);
+
+  await send(GUEST_PHONE, 'extend', 'wamid.dup.1'); // same wamid, redelivered well after completion
+
+  const afterDup = bookingRow(ctx, 'recBook1');
+  assert.strictEqual(afterDup['Amount Due'], 800, 'not 1200 — the redelivered duplicate did not charge again');
+  assert.strictEqual(afterDup['Check Out'], afterFirst['Check Out'], 'not extended a second time');
+  assert.ok(axiomEvents(ctx).includes('extend_duplicate_wamid_suspected'));
+  assert.match(texts(ctx, GUEST_PHONE), /See you at|extended|confirmed/i, 'a courteous reply, not silence or an error');
+});
+
+test('a genuine second extension with a different wamid is not mistaken for the post-completion duplicate', async () => {
+  const ctx = { airtable: new MockAirtable(seedCheckedInBooking()), sends: [], axiom: [] };
+  installFetch(ctx);
+
+  await send(GUEST_PHONE, 'extend', 'wamid.a');
+  await send(GUEST_PHONE, 'extend', 'wamid.b');
+
+  assert.strictEqual(bookingRow(ctx, 'recBook1')['Amount Due'], 1200, 'both extensions charged — different wamids, both real');
+  assert.strictEqual(axiomEvents(ctx).filter(e => e === 'extend_duplicate_wamid_suspected').length, 0);
 });
 
 test('nothing to extend still short-circuits before the guard runs, unchanged', async () => {
