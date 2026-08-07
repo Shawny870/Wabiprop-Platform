@@ -139,6 +139,27 @@ async function airtableUpdate(table, recordId, fields) {
   return data;
 }
 
+// Rule 30 step 2, slice 2: shared wrapper for the ~23 structurally-identical
+// WS_Guests Session State writes across the file, rather than 23 near-duplicate
+// check-and-log blocks. NON-FATAL as a class: each write is paired with a
+// sendWhatsApp reply describing the NEW state, so a failure here does create a
+// guest/DB mismatch for one round-trip — but handleMessage's own dispatch
+// entrypoint re-fetches WS_Guests fresh on every inbound message, so a failed
+// state write self-corrects on the guest's next message rather than
+// compounding. airtableUpdate already logs the generic 'airtable_update_error'
+// (Rule 30 step 1) on any failure; this adds a correlated, guest/handler-scoped
+// event on top, matching F44's precedent of a specific event per checked site
+// rather than relying on the generic log alone to satisfy Rule 30's intent.
+async function updateGuestState(guestId, fields, logContext = {}) {
+  const result = await airtableUpdate('WS_Guests', guestId, fields);
+  if (result && result.error) {
+    logToAxiom('error', 'guest_state_write_failed', {
+      guestId, fields, error: JSON.stringify(result.error), ...logContext
+    });
+  }
+  return result;
+}
+
 // B9: the guest's half-built hourly booking — Check In recorded, duration not
 // yet chosen, so Check Out is still blank. Blank Check Out is exactly what makes
 // it inert to B8's overlap check while the guest is mid-conversation.
@@ -1246,7 +1267,15 @@ async function resolveRoomClean(ctx, room) {
   await sendWhatsApp(ctx.phone, msg('cleanerThanks', { roomName: room.fields['Room Name'] }));
   if (OWNER_PHONE) {
     logOwnerSendWindow('room_cleaned', OWNER_PHONE, ctx.phone); // B17 instrumentation
-    await sendWhatsApp(OWNER_PHONE, msg('ownerRoomCleaned', { roomName: room.fields['Room Name'] }));
+    // Rule 30 step 2, slice 2: checked but non-fatal — pure courtesy
+    // notification, nothing reads a "did the owner get told" flag; the
+    // cleaner already got their own confirmation above regardless.
+    const ownerSend = await sendWhatsApp(OWNER_PHONE, msg('ownerRoomCleaned', { roomName: room.fields['Room Name'] }));
+    if (ownerSend && ownerSend.error) {
+      logToAxiom('error', 'owner_room_cleaned_notify_failed', {
+        roomId: room.id, error: JSON.stringify(ownerSend.error)
+      });
+    }
   }
 }
 
@@ -1388,7 +1417,7 @@ const actions = {
       // An existing name is NOT overwritten — the record may be a returning
       // guest with their own history, and staff typing a shortened name at the
       // desk must not rewrite it.
-      await airtableUpdate('WS_Guests', guest.id, { 'Session State': 'CHECKED_IN' });
+      await updateGuestState(guest.id, { 'Session State': 'CHECKED_IN' });
     } else {
       const fields = {
         'Guest Name': parsed.guestName,
@@ -1772,15 +1801,24 @@ const actions = {
     }
 
     if (!ctx.guest) {
-      await airtableCreate('WS_Guests', {
+      // Rule 30 step 2, slice 2: same NON-FATAL class as updateGuestState — a
+      // failed first-contact create just means the guest's next message hits
+      // this same !ctx.guest branch again (WS_Guests re-queried fresh on
+      // every inbound message), self-correcting rather than compounding.
+      const guestCreate = await airtableCreate('WS_Guests', {
         'Guest Name': 'Unknown',
         'Phone Number': ctx.phone,
         'Guest Type': 'WhatsApp',
         'Session State': ctx.next,
         'First Visit': new Date().toISOString().split('T')[0]
       });
+      if (guestCreate && guestCreate.error) {
+        logToAxiom('error', 'guest_state_write_failed', {
+          phone: ctx.phone, fields: { 'Session State': ctx.next }, error: JSON.stringify(guestCreate.error)
+        });
+      }
     } else {
-      await airtableUpdate('WS_Guests', ctx.guest.id, { 'Session State': ctx.next });
+      await updateGuestState(ctx.guest.id, { 'Session State': ctx.next });
     }
 
     await sendWhatsApp(ctx.phone, msg('greeting', {
@@ -1877,11 +1915,11 @@ const actions = {
       return;
     }
 
-    await airtableUpdate('WS_Guests', ctx.guest.id, {
+    await updateGuestState(ctx.guest.id, {
       'Guest Name': guestName,
       'Session State': ctx.next,
       'Last Inbound At': now.toISOString() // B19: staleness anchor for the abandonment sweep
-    });
+    }, { phone: ctx.phone });
 
     // F19 (Rate-fix): the rate is NOT chosen here any more. It was `activeRates[0]`
     // — no sort, no filter — so pricing was silently position-dependent: reorder the
@@ -1946,7 +1984,7 @@ const actions = {
         // to prevent, just reached via the race instead of a create failure —
         // so it is reset here rather than left for PR4, which owns the
         // create-fails-outright case, not this one.
-        await airtableUpdate('WS_Guests', ctx.guest.id, { 'Session State': 'AWAITING_DETAILS' });
+        await updateGuestState(ctx.guest.id, { 'Session State': 'AWAITING_DETAILS' });
         logToAxiom('warn', 'booking_race_lost', {
           phone: ctx.phone, bookingId: booking.id, roomId: room.id,
           checkIn: checkInIso, checkOut: checkOutIso,
@@ -1992,7 +2030,7 @@ const actions = {
     // plainly, and skip the owner notify — there is nothing for the owner to
     // action.
     if (!booking.id) {
-      await airtableUpdate('WS_Guests', ctx.guest.id, { 'Session State': 'AWAITING_DETAILS' });
+      await updateGuestState(ctx.guest.id, { 'Session State': 'AWAITING_DETAILS' });
       await sendWhatsApp(ctx.phone, msg('bookingCreateFailed', { guestName }));
       return;
     }
@@ -2002,9 +2040,16 @@ const actions = {
     // enquiry immediately and can finalise price if the fail-closed path fires).
     if (OWNER_PHONE) {
       logOwnerSendWindow('new_booking', OWNER_PHONE, ctx.phone); // B17 instrumentation
-      await sendWhatsApp(OWNER_PHONE, msg('ownerNewBooking', {
+      // Rule 30 step 2, slice 2: checked but non-fatal — courtesy notification,
+      // the guest already got their own occupancyMenu reply independent of this.
+      const ownerSend = await sendWhatsApp(OWNER_PHONE, msg('ownerNewBooking', {
         guestName, phone: ctx.phone, bookingRef, checkIn, checkOut: checkOut || 'TBC'
       }));
+      if (ownerSend && ownerSend.error) {
+        logToAxiom('error', 'owner_new_booking_notify_failed', {
+          bookingId: booking.id, error: JSON.stringify(ownerSend.error)
+        });
+      }
     }
 
     // F19: ask occupancy (numbered menu, Rule 11) instead of confirming the
@@ -2059,7 +2104,7 @@ const actions = {
       logToAxiom('warn', 'occupancy_no_matching_rate', {
         phone: ctx.phone, propertyId: ctx.property.id, occupancyType
       });
-      await airtableUpdate('WS_Guests', ctx.guest.id, { 'Session State': ctx.next, 'Last Inbound At': new Date().toISOString() });
+      await updateGuestState(ctx.guest.id, { 'Session State': ctx.next, 'Last Inbound At': new Date().toISOString() });
       await sendWhatsApp(ctx.phone, msg('occupancyContactOwner', { guestName }));
       return;
     }
@@ -2082,7 +2127,7 @@ const actions = {
       await sendWhatsApp(ctx.phone, msg('occupancyWriteFailed', { guestName }));
       return;
     }
-    await airtableUpdate('WS_Guests', ctx.guest.id, { 'Session State': ctx.next, 'Last Inbound At': new Date().toISOString() });
+    await updateGuestState(ctx.guest.id, { 'Session State': ctx.next, 'Last Inbound At': new Date().toISOString() });
     logToAxiom('info', 'occupancy_selected', {
       phone: ctx.phone, guestId: ctx.guest.id, occupancyType, amount: rate.fields['Amount']
     });
@@ -2107,15 +2152,22 @@ const actions = {
       // Property has not configured short stays — fail closed, never quote R0.
       logToAxiom('info', 'hourly_not_configured', { phone: ctx.phone, propertyId: ctx.property.id });
       if (ctx.guest) {
-        await airtableUpdate('WS_Guests', ctx.guest.id, { 'Session State': 'AWAITING_DETAILS' });
+        await updateGuestState(ctx.guest.id, { 'Session State': 'AWAITING_DETAILS' });
       } else {
-        await airtableCreate('WS_Guests', {
+        // Rule 30 step 2, slice 2: same NON-FATAL class, same reasoning as
+        // greetAndAskDetails' equivalent first-contact create.
+        const guestCreate = await airtableCreate('WS_Guests', {
           'Guest Name': 'Unknown',
           'Phone Number': ctx.phone,
           'Guest Type': 'WhatsApp',
           'Session State': 'AWAITING_DETAILS',
           'First Visit': new Date().toISOString().split('T')[0]
         });
+        if (guestCreate && guestCreate.error) {
+          logToAxiom('error', 'guest_state_write_failed', {
+            phone: ctx.phone, fields: { 'Session State': 'AWAITING_DETAILS' }, error: JSON.stringify(guestCreate.error)
+          });
+        }
       }
       await sendWhatsApp(ctx.phone, msg('hourlyUnavailable', {
         propertyName: ctx.property.fields['Property Name']
@@ -2124,15 +2176,22 @@ const actions = {
     }
 
     if (ctx.guest) {
-      await airtableUpdate('WS_Guests', ctx.guest.id, { 'Session State': ctx.next });
+      await updateGuestState(ctx.guest.id, { 'Session State': ctx.next });
     } else {
-      await airtableCreate('WS_Guests', {
+      // Rule 30 step 2, slice 2: same NON-FATAL class, same reasoning as
+      // greetAndAskDetails' equivalent first-contact create.
+      const guestCreate = await airtableCreate('WS_Guests', {
         'Guest Name': 'Unknown',
         'Phone Number': ctx.phone,
         'Guest Type': 'WhatsApp',
         'Session State': ctx.next,
         'First Visit': new Date().toISOString().split('T')[0]
       });
+      if (guestCreate && guestCreate.error) {
+        logToAxiom('error', 'guest_state_write_failed', {
+          phone: ctx.phone, fields: { 'Session State': ctx.next }, error: JSON.stringify(guestCreate.error)
+        });
+      }
     }
     await sendWhatsApp(ctx.phone, msg('hourlyAskDetails', {
       propertyName: ctx.property.fields['Property Name']
@@ -2184,16 +2243,16 @@ const actions = {
     const rates = hourlyRates(ctx.property);
     if (!rates) {
       // Rates removed mid-conversation — same fail-closed redirect as entry.
-      await airtableUpdate('WS_Guests', ctx.guest.id, { 'Session State': 'AWAITING_DETAILS' });
+      await updateGuestState(ctx.guest.id, { 'Session State': 'AWAITING_DETAILS' });
       await sendWhatsApp(ctx.phone, msg('hourlyUnavailable', { propertyName: ctx.property.fields['Property Name'] }));
       return;
     }
 
-    await airtableUpdate('WS_Guests', ctx.guest.id, {
+    await updateGuestState(ctx.guest.id, {
       'Guest Name': guestName,
       'Session State': ctx.next,
       'Last Inbound At': new Date().toISOString() // B19: staleness anchor for the abandonment sweep
-    });
+    }, { phone: ctx.phone });
 
     // The duration menu arrives as a separate WhatsApp message — a separate
     // serverless invocation with no shared memory — so the arrival time has to
@@ -2227,7 +2286,7 @@ const actions = {
         phone: ctx.phone, guestName,
         error: bookingResult && bookingResult.error ? JSON.stringify(bookingResult.error) : null
       });
-      await airtableUpdate('WS_Guests', ctx.guest.id, { 'Session State': 'AWAITING_DETAILS' });
+      await updateGuestState(ctx.guest.id, { 'Session State': 'AWAITING_DETAILS' });
       await sendWhatsApp(ctx.phone, msg('hourlyBookingCreateFailed', { guestName }));
       return;
     }
@@ -2263,7 +2322,7 @@ const actions = {
           });
         }
       }
-      await airtableUpdate('WS_Guests', ctx.guest.id, { 'Session State': 'AWAITING_DETAILS' });
+      await updateGuestState(ctx.guest.id, { 'Session State': 'AWAITING_DETAILS' });
       logToAxiom('info', 'hourly_redirect_overnight', { phone: ctx.phone, requestedHours: choice });
       await sendWhatsApp(ctx.phone, msg('hourlyTooLong'));
       return;
@@ -2274,7 +2333,7 @@ const actions = {
       // Unreadable choice, or the flow lost its footing (no pending booking,
       // rates pulled mid-conversation). Re-offer rather than dead-end.
       if (!checkInIso || !rates) {
-        await airtableUpdate('WS_Guests', ctx.guest.id, { 'Session State': 'AWAITING_DETAILS' });
+        await updateGuestState(ctx.guest.id, { 'Session State': 'AWAITING_DETAILS' });
         await sendWhatsApp(ctx.phone, msg('hourlyUnavailable', { propertyName: ctx.property.fields['Property Name'] }));
         return;
       }
@@ -2299,7 +2358,7 @@ const actions = {
       });
       // Booking stays pending with Check Out blank — inert, and reused when the
       // guest offers a different time.
-      await airtableUpdate('WS_Guests', ctx.guest.id, { 'Session State': 'AWAITING_HOURLY_DETAILS' });
+      await updateGuestState(ctx.guest.id, { 'Session State': 'AWAITING_HOURLY_DETAILS' });
       // B19: B9's hourly availability check refused — turned away, Hourly.
       await logEnquiry(ctx.property, ctx.phone, 'No Availability', {
         checkInIso, checkOutIso, bookingType: 'Hourly'
@@ -2371,7 +2430,7 @@ const actions = {
       // Same re-offer the existing no-availability branch above uses (line
       // ~2139) — the booking stays inert with Check Out cleared conceptually
       // by virtue of being Cancelled, and the guest can offer a different time.
-      await airtableUpdate('WS_Guests', ctx.guest.id, { 'Session State': 'AWAITING_HOURLY_DETAILS' });
+      await updateGuestState(ctx.guest.id, { 'Session State': 'AWAITING_HOURLY_DETAILS' });
       logToAxiom('warn', 'booking_race_lost', {
         phone: ctx.phone, bookingId: pending.id, roomId: room.id,
         checkIn: checkInIso, checkOut: checkOutIso,
@@ -2393,7 +2452,7 @@ const actions = {
       hours: choice, airtableId: pending.id
     });
 
-    await airtableUpdate('WS_Guests', ctx.guest.id, { 'Session State': ctx.next });
+    await updateGuestState(ctx.guest.id, { 'Session State': ctx.next });
     // B19: Booked, Hourly. Completed in one handler, so this is the single log site.
     await logEnquiry(ctx.property, ctx.phone, 'Booked', {
       checkInIso, checkOutIso, bookingType: 'Hourly', bookingId: pending.id
@@ -2406,7 +2465,14 @@ const actions = {
       checkOutText: formatSastDateTime(checkOutIso)
     };
     if (OWNER_PHONE) {
-      await sendWhatsApp(OWNER_PHONE, msg('hourlyOwnerNewBooking', { ...view, phone: ctx.phone }));
+      // Rule 30 step 2, slice 2: checked but non-fatal, same shape as
+      // collectDetails' equivalent owner notify.
+      const ownerSend = await sendWhatsApp(OWNER_PHONE, msg('hourlyOwnerNewBooking', { ...view, phone: ctx.phone }));
+      if (ownerSend && ownerSend.error) {
+        logToAxiom('error', 'owner_hourly_booking_notify_failed', {
+          bookingId: pending.id, error: JSON.stringify(ownerSend.error)
+        });
+      }
     }
     await sendWhatsApp(ctx.phone, msg('hourlyBookingReceived', view));
   },
@@ -2437,7 +2503,7 @@ const actions = {
         return;
       }
     }
-    await airtableUpdate('WS_Guests', ctx.guest.id, { 'Session State': ctx.next });
+    await updateGuestState(ctx.guest.id, { 'Session State': ctx.next });
     // B19: Booked, re-affirmed on confirmation — deduped by booking id, so this is
     // a no-op when collectDetails already logged it at creation, and the single
     // logging site when the booking reached AWAITING_ETA another way.
@@ -2564,19 +2630,27 @@ const actions = {
     }
 
     // Step 5: session → CHECKED_IN
-    await airtableUpdate('WS_Guests', ctx.guest.id, { 'Session State': ctx.next });
+    await updateGuestState(ctx.guest.id, { 'Session State': ctx.next });
     logToAxiom('info', 'state_transition', { phone: ctx.phone, guestId: ctx.guest.id, from: 'CONFIRMED', to: ctx.next, assignedRoom: assignedRoomName || null });
 
     // Step 6: notify party
     if (notifyPhone) {
       logOwnerSendWindow('gate_arrival', notifyPhone, ctx.phone); // B17 instrumentation
-      await sendWhatsApp(notifyPhone, msg('gateNotify', {
+      // Rule 30 step 2, slice 2: checked but non-fatal — courtesy notification.
+      // notifyCleanerOfArrival (Step 6b, right after) is the operationally
+      // load-bearing dispatch and already checks its own send properly.
+      const ownerSend = await sendWhatsApp(notifyPhone, msg('gateNotify', {
         guestName: ctx.guest.fields['Guest Name'],
         roomInfo: assignedRoomName
           ? msg('gateRoomAssignedInfo', { roomName: assignedRoomName })
           : msg('gateNoRoomInfo'),
         phone: ctx.phone
       }));
+      if (ownerSend && ownerSend.error) {
+        logToAxiom('error', 'gate_arrival_notify_failed', {
+          bookingId: booking ? booking.id : null, error: JSON.stringify(ownerSend.error)
+        });
+      }
     }
 
     // Step 6b: notify the property's cleaner. IN ADDITION to the owner send
@@ -2624,7 +2698,7 @@ const actions = {
         return;
       }
     }
-    await airtableUpdate('WS_Guests', ctx.guest.id, { 'Session State': ctx.next });
+    await updateGuestState(ctx.guest.id, { 'Session State': ctx.next });
     logToAxiom('info', 'state_transition', { phone: ctx.phone, guestId: ctx.guest.id, from: 'CONFIRMED', to: ctx.next, reason: 'cancel' });
     await sendWhatsApp(ctx.phone, msg('cancelled'));
   },
@@ -2707,7 +2781,19 @@ const actions = {
       const cleanerName = cleaner.fields['Cleaner Name'];
       if (cleanerPhone) {
         const formattedCleanerPhone = formatPhone(cleanerPhone);
-        await sendWhatsApp(formattedCleanerPhone, msg('cleanerDispatch', { cleanerName, roomName }));
+        // Rule 30 step 2, slice 2: checked but non-fatal — a missed cleaner
+        // text shouldn't block reception notify or the guest's own checkout
+        // confirmation below. sendWhatsApp already logs the generic
+        // 'whatsapp_send_error' on failure; this adds correlation to the
+        // booking/cleaner/room, matching notifyCleanerOfArrival's own
+        // checked-send pattern for the equivalent gate-arrival dispatch.
+        const dispatchSend = await sendWhatsApp(formattedCleanerPhone, msg('cleanerDispatch', { cleanerName, roomName }));
+        if (dispatchSend && dispatchSend.error) {
+          logToAxiom('error', 'cleaner_dispatch_failed', {
+            bookingId: bookings[0] && bookings[0].id, cleanerId: cleaner.id, roomName,
+            error: JSON.stringify(dispatchSend.error)
+          });
+        }
       }
     }
     // B8: tell Reception what to collect. After the booking/room writes and the
@@ -2727,7 +2813,7 @@ const actions = {
       });
     }
 
-    await airtableUpdate('WS_Guests', ctx.guest.id, { 'Session State': ctx.next });
+    await updateGuestState(ctx.guest.id, { 'Session State': ctx.next });
     logToAxiom('info', 'state_transition', { phone: ctx.phone, guestId: ctx.guest.id, from: 'CHECKED_IN', to: ctx.next, reason: 'checkout', roomName });
     await sendWhatsApp(ctx.phone, msg('checkoutThanks', { propertyName: ctx.property.fields['Property Name'] }));
   },
@@ -2852,11 +2938,18 @@ const actions = {
     }
 
     if (!alreadyNotified && OWNER_PHONE) {
-      await sendWhatsApp(OWNER_PHONE, msg('ownerExtension', {
+      // Rule 30 step 2, slice 2: checked but non-fatal — courtesy notification,
+      // the guest already got their own extensionConfirmed reply below regardless.
+      const ownerSend = await sendWhatsApp(OWNER_PHONE, msg('ownerExtension', {
         guestName,
         bookingRef: booking.fields['Booking Ref'] || '',
         checkOut: formatSastDateTime(newCheckOut)
       }));
+      if (ownerSend && ownerSend.error) {
+        logToAxiom('error', 'owner_extension_notify_failed', {
+          bookingId: booking.id, error: JSON.stringify(ownerSend.error)
+        });
+      }
     }
     logToAxiom('info', 'booking_extended', {
       phone: ctx.phone, bookingId: booking.id, newCheckOut, ownerNotified: !alreadyNotified,
@@ -2875,7 +2968,7 @@ const actions = {
   // Unknown session state: reset to NEW
   async unknownStateReset(ctx) {
     if (ctx.guest) {
-      await airtableUpdate('WS_Guests', ctx.guest.id, { 'Session State': ctx.next });
+      await updateGuestState(ctx.guest.id, { 'Session State': ctx.next });
     }
     await sendWhatsApp(ctx.phone, msg('unknownFallback'));
   }
@@ -2936,9 +3029,17 @@ async function settleAutoCheckout(booking, room, guest, propertyName, propertyId
   for (const cleaner of cleaners) {
     const cleanerPhone = cleaner.fields['Phone Number'];
     if (cleanerPhone) {
-      await sendWhatsApp(formatPhone(cleanerPhone), msg('cleanerDispatch', {
+      // Rule 30 step 2, slice 2: checked but non-fatal, same shape as the
+      // manual checkout path's equivalent dispatch.
+      const dispatchSend = await sendWhatsApp(formatPhone(cleanerPhone), msg('cleanerDispatch', {
         cleanerName: cleaner.fields['Cleaner Name'], roomName
       }));
+      if (dispatchSend && dispatchSend.error) {
+        logToAxiom('error', 'auto_checkout_cleaner_dispatch_failed', {
+          bookingId: booking.id, cleanerId: cleaner.id, roomName,
+          error: JSON.stringify(dispatchSend.error)
+        });
+      }
     }
   }
   // B8: same push as the manual path. This is the branch that matters most —
@@ -2955,7 +3056,7 @@ async function settleAutoCheckout(booking, room, guest, propertyName, propertyId
   });
 
   if (guest) {
-    await airtableUpdate('WS_Guests', guest.id, { 'Session State': 'NEW' });
+    await updateGuestState(guest.id, { 'Session State': 'NEW' });
   }
   const guestPhone = guest && formatPhone(String(guest.fields['Phone Number'] || ''));
   if (guestPhone) {
@@ -2988,7 +3089,17 @@ async function runAutoCheckout(now = new Date()) {
     const warnedAt = booking.fields['Checkout Warning Sent At'];
     if (!warnedAt) {
       // First pass past checkout → warn and stamp the time.
-      await airtableUpdate('WS_Bookings', booking.id, { 'Checkout Warning Sent At': now.toISOString() });
+      // Rule 30 step 2, slice 2 (deferred from F44/slice 1): NON-FATAL —
+      // nothing reads this field except this same cron function on its own
+      // NEXT run (line ~3009, freshly refetched). A failed stamp just means
+      // the warning re-sends every tick until the write succeeds — a
+      // self-healing annoyance, not a broken state.
+      const warnStampWrite = await airtableUpdate('WS_Bookings', booking.id, { 'Checkout Warning Sent At': now.toISOString() });
+      if (warnStampWrite && warnStampWrite.error) {
+        logToAxiom('error', 'checkout_warning_stamp_write_failed', {
+          bookingId: booking.id, error: JSON.stringify(warnStampWrite.error)
+        });
+      }
       if (guestPhone) await sendWhatsApp(guestPhone, msg('checkoutWarning', { guestName, propertyName }));
       logToAxiom('info', 'auto_checkout_warning', { bookingId: booking.id, phone: guestPhone || null, checkOut });
       summary.warnings++;
@@ -3051,7 +3162,19 @@ async function logEnquiry(property, phone, outcome, opts = {}) {
   if (checkOutIso) fields['Requested Check Out'] = checkOutIso;
   if (bookingType) fields['Booking Type'] = bookingType;
   if (bookingId) fields['Booking'] = [bookingId];
-  await airtableCreate('WS_Enquiries', fields);
+  // Rule 30 step 2, slice 2: NON-FATAL — WS_Enquiries is a one-way reporting
+  // sink, nothing in the live guest/booking flow reads it back. The dedup
+  // guards above (lines 3069-3073) re-query fresh on each future call, so a
+  // failed write here just risks a duplicate row next attempt, not a broken
+  // state. Previously logged 'enquiry_logged' unconditionally even on a
+  // failed create, which was itself a small Rule 30 violation — now split.
+  const enquiryWrite = await airtableCreate('WS_Enquiries', fields);
+  if (enquiryWrite && enquiryWrite.error) {
+    logToAxiom('error', 'enquiry_log_write_failed', {
+      phone, propertyId: property.id, outcome, error: JSON.stringify(enquiryWrite.error)
+    });
+    return false;
+  }
   logToAxiom('info', 'enquiry_logged', { phone, propertyId: property.id, outcome, bookingType: bookingType || null });
   return true;
 }
@@ -3301,15 +3424,31 @@ async function handleMessage(from, messageText, phoneNumberId, wamid) {
       return;
     }
     const at = new Date().toISOString();
-    if (guest) {
-      await airtableUpdate('WS_Guests', guest.id, { 'Opted Out': true, 'Opted Out At': at });
-    } else {
+    // Rule 30 step 2, slice 2 — scope correction, not a slice default: this is
+    // FATAL-style not because it's a WS_Guests write (most of this slice's
+    // WS_Guests writes, like Session State, are NON-FATAL) but because of what
+    // 'Opted Out' actually gates — every subsequent inbound message from this
+    // number branches on it (the check just below this block). If this write
+    // silently fails, telling the guest "you're opted out" while the record
+    // still reads opted-IN means their very next message runs straight through
+    // the booking flow instead of staying suppressed — a real compliance
+    // mismatch, not a cosmetic miss. The rule was never "table X gets
+    // treatment Y" — it's "does failure leave the system asserting something
+    // false to the guest."
+    const optOutWrite = guest
+      ? await airtableUpdate('WS_Guests', guest.id, { 'Opted Out': true, 'Opted Out At': at })
       // STOP from a number we have never seen — record the opt-out so future
       // messages stay silent.
-      await airtableCreate('WS_Guests', {
-        'Phone Number': phone, 'Guest Type': 'WhatsApp', 'Session State': 'NEW',
-        'Opted Out': true, 'Opted Out At': at
+      : await airtableCreate('WS_Guests', {
+          'Phone Number': phone, 'Guest Type': 'WhatsApp', 'Session State': 'NEW',
+          'Opted Out': true, 'Opted Out At': at
+        });
+    if (optOutWrite && optOutWrite.error) {
+      logToAxiom('error', 'guest_opt_out_write_failed', {
+        phone, error: JSON.stringify(optOutWrite.error)
       });
+      await sendWhatsApp(phone, msg('optOutWriteFailed'));
+      return;
     }
     logToAxiom('info', 'guest_opted_out', { phone, activeBooking });
     // The single acknowledgement explaining status + how to opt back in.
@@ -3318,7 +3457,18 @@ async function handleMessage(from, messageText, phoneNumberId, wamid) {
   }
   if (guest && guest.fields['Opted Out']) {
     if (START_KEYWORDS.includes(text)) {
-      await airtableUpdate('WS_Guests', guest.id, { 'Opted Out': false, 'Opted Out At': null });
+      // Rule 30 step 2, slice 2: same FATAL-style reasoning as the STOP write
+      // above, mirrored — a silent failure here would tell the guest they're
+      // opted back in while the record still reads opted-out, silencing the
+      // booking flow on their very next message.
+      const optInWrite = await airtableUpdate('WS_Guests', guest.id, { 'Opted Out': false, 'Opted Out At': null });
+      if (optInWrite && optInWrite.error) {
+        logToAxiom('error', 'guest_opt_in_write_failed', {
+          phone, error: JSON.stringify(optInWrite.error)
+        });
+        await sendWhatsApp(phone, msg('optOutWriteFailed'));
+        return;
+      }
       logToAxiom('info', 'guest_opted_back_in', { phone });
       await sendWhatsApp(phone, msg('optedBackIn'));
       return;
