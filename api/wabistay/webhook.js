@@ -937,7 +937,16 @@ function parseWalkinCommand(text) {
 // Return shapes match the walk-in parser exactly, and the null / {ok:false}
 // split carries the same meaning: `null` is "not a PAID attempt" and falls
 // through to the ordinary guest flow, so an unauthorised sender learns nothing.
-const PAID_KEYWORD = /^paid\b/i;
+//
+// Stage 1 (payment reconciliation): `COLLECTED` is accepted as an alias for
+// the identical keyword, not a second command. Deliberately just widening
+// the keyword regex rather than adding a parallel parser/dispatch/handler —
+// COLLECTED and PAID produce byte-identical `{ok, roomToken, amount, method}`
+// shapes and flow through senderIsAuthorizedPaid -> paidBooking exactly the
+// same way, so the mismatch-refusal rule, idempotency guard, and every write
+// (Amount Paid, Payment Status) cannot diverge between the two spellings by
+// construction — there is only one code path to diverge from.
+const PAID_KEYWORD = /^(?:paid|collected)\b/i;
 // `R500`, `500`, `500.00` and `500,00` all parse. The optional trailing method
 // is NOT in the locked grammar — see the PR — but a reception that types CASH
 // should not be refused for being more specific than required.
@@ -3527,9 +3536,36 @@ function bookingRoomNights(booking) {
   return booking.fields['Booking Type'] === 'Hourly' ? rawDays : Math.round(rawDays);
 }
 
+// Stage 1 (payment reconciliation): per-booking Amount Due vs Amount Paid,
+// over the same period window the rest of the summary already uses — no new
+// query, no new window, just read off the same `periodBookings` the revenue
+// total is already computed from. Design note, not a gap: a delta can only
+// ever be known once reception has actually recorded a collection via
+// PAID/COLLECTED — there is no way to auto-detect real-world cash changing
+// hands. A booking reception has not yet acted on shows its full Amount Due
+// as delta, which is correct: it IS outstanding, by definition, until
+// reception reports otherwise.
+function paymentReconciliationLines(periodBookings, roomsById, guestsById) {
+  return periodBookings.map(b => {
+    const amountDue = Number(b.fields['Amount Due']) || 0;
+    const amountPaid = Number(b.fields['Amount Paid']) || 0;
+    const roomId = (b.fields['Room'] || [])[0] || null;
+    const guestId = (b.fields['Guest'] || [])[0] || null;
+    return {
+      bookingId: b.id,
+      bookingRef: b.fields['Booking Ref'] || null,
+      roomName: roomId ? (roomsById.get(roomId) || null) : null,
+      guestName: guestId ? (guestsById.get(guestId) || null) : null,
+      amountDue,
+      amountPaid,
+      delta: amountDue - amountPaid
+    };
+  });
+}
+
 // Aggregates one property's bookings over the reporting window. `bookings` is
 // already scoped to this property (via room link) and already excludes Cancelled.
-function aggregateOwnerSummary(property, rooms, bookings, w) {
+function aggregateOwnerSummary(property, rooms, bookings, w, guestsById = new Map()) {
   const checkInMs = b => (b.fields['Check In'] ? Date.parse(b.fields['Check In']) : NaN);
   const inPeriod = b => {
     const t = checkInMs(b);
@@ -3547,6 +3583,10 @@ function aggregateOwnerSummary(property, rooms, bookings, w) {
     return Number.isFinite(t) && t >= w.periodEndMs && t < w.upcomingEndMs;
   }).length;
 
+  const roomsById = new Map(rooms.map(r => [r.id, r.fields['Room Name'] || null]));
+  const paymentLines = paymentReconciliationLines(periodBookings, roomsById, guestsById);
+  const paymentDeltaTotal = paymentLines.reduce((s, l) => s + l.delta, 0);
+
   return {
     propertyId: property.id,
     propertyName: property.fields['Property Name'],
@@ -3557,8 +3597,38 @@ function aggregateOwnerSummary(property, rooms, bookings, w) {
     roomNightsAvailable,
     // Rounded to 4 dp so partial (hourly) nights are visible without float noise.
     occupancyRate: Math.round(occupancyRate * 10000) / 10000,
-    upcomingBookings
+    upcomingBookings,
+    paymentLines,
+    paymentDeltaTotal
   };
+}
+
+// Renders the Stage 1 reconciliation section of the weekly message: one
+// aggregate delta line at the top (the number an owner actually needs first),
+// then one line per booking. A booking reception has already fully settled
+// still appears, at R0.00 delta — completeness matters more than brevity
+// here, since the entire point is "is anything unaccounted for," and a
+// filtered list can't answer that as trustworthily as a complete one can.
+function formatPaymentReconciliationMessage(summary) {
+  const sign = summary.paymentDeltaTotal >= 0 ? '' : '-';
+  const lines = [
+    `💰 *Payment Reconciliation — ${summary.propertyName}*`,
+    `*Total Delta:* ${sign}R${formatAmount(Math.abs(summary.paymentDeltaTotal))}`,
+    ''
+  ];
+  if (summary.paymentLines.length === 0) {
+    lines.push('No bookings this period.');
+  } else {
+    for (const l of summary.paymentLines) {
+      const lSign = l.delta >= 0 ? '' : '-';
+      lines.push(
+        `${l.roomName || 'Unknown room'} — ${l.guestName || 'Unknown guest'}: ` +
+        `Due R${formatAmount(l.amountDue)} / Paid R${formatAmount(l.amountPaid)} ` +
+        `(Δ ${lSign}R${formatAmount(Math.abs(l.delta))})`
+      );
+    }
+  }
+  return lines.join('\n');
 }
 
 // The send surface. STUBBED until OWNER_SUMMARY_TEMPLATE is approved: logs the
@@ -3568,7 +3638,8 @@ async function sendOwnerSummary(property, summary) {
   const notifyPhone = property.fields['Notify Phone']
     ? property.fields['Notify Phone'].replace(/[\s\-\+]/g, '')
     : (OWNER_PHONE || null);
-  const payload = { ...summary, template: OWNER_SUMMARY_TEMPLATE, notifyPhone };
+  const paymentReconciliationMessage = formatPaymentReconciliationMessage(summary);
+  const payload = { ...summary, template: OWNER_SUMMARY_TEMPLATE, notifyPhone, paymentReconciliationMessage };
   logToAxiom('info', 'owner_summary_payload', payload);
 
   // TODO(B17): `sendWhatsAppTemplate` now EXISTS (see the WhatsApp template helper
@@ -3603,13 +3674,18 @@ async function runOwnerSummary(opts = {}) {
   // occupancy. Scoped to each property below via its room link (WS_Bookings has
   // no Property field of its own).
   const allBookings = await airtableGet('WS_Bookings', orFormula('Status', BLOCKING_BOOKING_STATUSES.concat(['Checked Out'])));
+  // Stage 1: guest names for the reconciliation line items. One extra table
+  // read, same shape as allRooms/allBookings above — not a new query per
+  // property, and not a new per-booking lookup either.
+  const allGuests = await airtableGet('WS_Guests', '');
+  const guestsById = new Map(allGuests.map(g => [g.id, g.fields['Guest Name'] || null]));
 
   const summaries = [];
   for (const property of properties) {
     const rooms = allRooms.filter(r => (r.fields['Property'] || []).includes(property.id));
     const roomIds = new Set(rooms.map(r => r.id));
     const bookings = allBookings.filter(b => (b.fields['Room'] || []).some(id => roomIds.has(id)));
-    const summary = aggregateOwnerSummary(property, rooms, bookings, w);
+    const summary = aggregateOwnerSummary(property, rooms, bookings, w, guestsById);
     await sendOwnerSummary(property, summary);
     summaries.push(summary);
   }
@@ -3932,6 +4008,8 @@ module.exports.autoCheckoutHandler = autoCheckoutHandler;
 module.exports.runOwnerSummary = runOwnerSummary;
 module.exports.ownerSummaryHandler = ownerSummaryHandler;
 module.exports.aggregateOwnerSummary = aggregateOwnerSummary;
+module.exports.paymentReconciliationLines = paymentReconciliationLines;
+module.exports.formatPaymentReconciliationMessage = formatPaymentReconciliationMessage;
 // B19: enquiry-abandonment staleness sweep (injected `now` for timing tests).
 module.exports.runEnquiryAbandonment = runEnquiryAbandonment;
 // Rule 30 step 1: exported so the new success-vs-failure logging on these three

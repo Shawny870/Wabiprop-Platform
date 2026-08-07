@@ -470,3 +470,71 @@ test('the push does not gate cleaner dispatch — that stays at checkout', async
   assert.ok(ctx.sends.some(x => x.to === '27830001111'), 'cleaner dispatched at checkout, unpaid');
   assert.strictEqual(ctx.airtable.tables['WS_Rooms'].find(r => r.id === 'recR2').fields['Status'], 'Cleaning');
 });
+
+// ── Rule 29: interaction surface with COLLECTED (Stage 1) ───────────────────
+// Declared surface: COLLECTED and PAID share the SAME keyword regex, the SAME
+// parser, the SAME dispatch guard (senderIsAuthorizedPaid), and the SAME
+// handler (paidBooking) — there is exactly one code path, not two kept in
+// sync. No shared identity beyond that (both are Reception-only, same as
+// PAID alone), no ordering dependence. These tests prove the two spellings
+// cannot diverge by construction, not just that both happen to work today.
+
+test('COLLECTED parses to the identical shape as PAID for the same command body', () => {
+  for (const [prefix, other] of [['COLLECTED', 'collected'], ['collected', 'Collected']]) {
+    assert.deepStrictEqual(
+      parsePaidCommand(`${prefix} ROOM 2 500`),
+      parsePaidCommand('PAID ROOM 2 500'),
+      `prefix: ${prefix}`
+    );
+  }
+  assert.deepStrictEqual(parsePaidCommand('COLLECTED ROOM 2 R500 cash'), { ok: true, roomToken: '2', amount: 500, method: 'Cash' });
+});
+
+test('COLLECTED records a payment through the exact same write path as PAID — same fields, same event names', async () => {
+  const collectedCtx = start();
+  await send(RECEPTION_PHONE, 'COLLECTED ROOM 2 400');
+
+  const paidCtx = start();
+  await send(RECEPTION_PHONE, 'PAID ROOM 2 400');
+
+  const c = bookingRow(collectedCtx);
+  const p = bookingRow(paidCtx);
+  assert.strictEqual(c['Amount Paid'], p['Amount Paid']);
+  assert.strictEqual(c['Payment Status'], p['Payment Status']);
+  assert.strictEqual(c['Payment Method'], p['Payment Method']);
+  assert.deepStrictEqual(axiomEvents(collectedCtx), axiomEvents(paidCtx), 'identical event sequence, not a parallel implementation');
+});
+
+test('COLLECTED hits the identical mismatch-refusal path — same rule, cannot diverge', async () => {
+  const ctx = start();
+  const writesBefore = ctx.airtable.log.length;
+  await send(RECEPTION_PHONE, 'COLLECTED ROOM 2 100');
+
+  const b = bookingRow(ctx);
+  assert.strictEqual(b['Payment Status'], 'Unpaid', 'still unpaid');
+  assert.strictEqual(b['Amount Paid'], undefined, 'no figure recorded');
+  assert.strictEqual(ctx.airtable.log.length, writesBefore, 'zero writes — same refusal rule as PAID');
+  assert.match(texts(ctx), /doesn't match what's owed/);
+  assert.ok(axiomEvents(ctx).includes('payment_amount_mismatch'));
+});
+
+test('COLLECTED hits the identical idempotency guard as PAID — a second COLLECTED cannot double-write', async () => {
+  const ctx = start();
+  await send(RECEPTION_PHONE, 'COLLECTED ROOM 2 400');
+  const writesAfterFirst = ctx.airtable.log.length;
+
+  await send(RECEPTION_PHONE, 'COLLECTED ROOM 2 400');
+
+  assert.strictEqual(ctx.airtable.log.length, writesAfterFirst, 'the already-Paid guard fires identically');
+  assert.strictEqual(bookingRow(ctx)['Amount Paid'], 400);
+});
+
+test('COLLECTED is Reception-only, refused for the same reason PAID is — one authorisation check, not two', async () => {
+  const s = seed();
+  s.WS_Roles[0].fields['Role Type'] = 'Cleaner';
+  const ctx = start({ WS_Roles: s.WS_Roles });
+
+  await send(RECEPTION_PHONE, 'COLLECTED ROOM 2 400');
+
+  assert.strictEqual(bookingRow(ctx)['Payment Status'], 'Unpaid', 'a non-Reception seat cannot record payments via either spelling');
+});
