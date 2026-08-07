@@ -85,6 +85,7 @@ const bookings = ctx => ctx.airtable.tables['WS_Bookings'] || [];
 const guests = ctx => ctx.airtable.tables['WS_Guests'] || [];
 const room = (ctx, id) => ctx.airtable.tables['WS_Rooms'].find(r => r.id === id);
 const texts = ctx => ctx.sends.map(s => s.body || '').join('\n---\n');
+const axiomEvents = ctx => ctx.axiom.map(e => e.event);
 
 // ── The happy path ──────────────────────────────────────────────────────────
 
@@ -192,6 +193,47 @@ test('an inactive seat is not authorisation', async () => {
 
   assert.strictEqual(bookings(ctx).length, 0, 'no booking from a deactivated seat');
   assert.doesNotMatch(texts(ctx), /walk-?in/i);
+});
+
+// ── Logging-granularity split: stranger vs. deactivated seat ────────────────
+// CEO decision: the no-leak guarantee to the SENDER stays identical either way
+// — no reply distinguishes "never was staff" from "was staff, now
+// deactivated." The only change is which Axiom event fires, so operations can
+// tell a stranger probing for the command apart from a known seat whose
+// Active box is off (revoked or accidentally unticked).
+
+test('a stranger and a deactivated seat get byte-identical guest-facing output', async () => {
+  const strangerCtx = start(); // OUTSIDER_PHONE has no WS_Roles row at all
+  await send(OUTSIDER_PHONE, 'WALKIN ROOM 2 2HRS John Smith');
+
+  const s = seed();
+  s.WS_Roles[0].fields['Active'] = false;
+  const deactivatedCtx = start({ WS_Roles: s.WS_Roles });
+  await send(STAFF_PHONE, 'WALKIN ROOM 2 2HRS John Smith');
+
+  assert.strictEqual(bookings(strangerCtx).length, 0);
+  assert.strictEqual(bookings(deactivatedCtx).length, 0);
+  assert.strictEqual(texts(strangerCtx), texts(deactivatedCtx), 'identical reply (or identical silence) either way — no leak');
+});
+
+test('a stranger logs walkin_unauthorised_stranger, a deactivated seat logs walkin_unauthorised_deactivated', async () => {
+  const strangerCtx = start();
+  await send(OUTSIDER_PHONE, 'WALKIN ROOM 2 2HRS John Smith');
+
+  const s = seed();
+  s.WS_Roles[0].fields['Active'] = false;
+  const deactivatedCtx = start({ WS_Roles: s.WS_Roles });
+  await send(STAFF_PHONE, 'WALKIN ROOM 2 2HRS John Smith');
+
+  assert.ok(axiomEvents(strangerCtx).includes('walkin_unauthorised_stranger'));
+  assert.strictEqual(axiomEvents(strangerCtx).includes('walkin_unauthorised_deactivated'), false);
+
+  assert.ok(axiomEvents(deactivatedCtx).includes('walkin_unauthorised_deactivated'));
+  assert.strictEqual(axiomEvents(deactivatedCtx).includes('walkin_unauthorised_stranger'), false);
+
+  // Neither the old, undifferentiated event name should appear anywhere anymore.
+  assert.strictEqual(axiomEvents(strangerCtx).includes('walkin_unauthorised_sender'), false);
+  assert.strictEqual(axiomEvents(deactivatedCtx).includes('walkin_unauthorised_sender'), false);
 });
 
 test('a Cleaner seat cannot create bookings', async () => {
