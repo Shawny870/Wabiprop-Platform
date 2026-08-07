@@ -95,6 +95,7 @@
     "numberNotConfigured": "Sorry, this number isn't configured yet. Please contact support.",
     "optedOut": "You've opted out of messages. 🔕 We won't send you anything further.\n\nReply *START* at any time to opt back in.",
     "optedBackIn": "Welcome back! ✅ You're opted back in and will receive messages again.\n\nReply *STOP* any time to opt out.",
+    "optOutWriteFailed": "Sorry, something went wrong on our end and that didn't go through. Please try again.",
     "walkinUsage": "Walk-in format:\n\n*WALKIN ROOM 2 2HRS John Smith*\n\nRoom, then 1, 2 or 3 hours, then the guest's name. Add their number at the end if you have it.",
     "walkinNeedName": "Almost — that walk-in needs the guest's name.\n\nSend it again like this:\n*WALKIN ROOM 2 2HRS John Smith*\n\nAdd their number at the end if you have it.",
     "walkinBadDuration": "Walk-ins are 1, 2 or 3 hours only — {hours} isn't available.\n\nExample: *WALKIN ROOM 2 2HRS John Smith*",
