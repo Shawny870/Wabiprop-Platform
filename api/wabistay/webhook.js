@@ -3703,6 +3703,69 @@ async function ownerSummaryHandler(req, res) {
   }
 }
 
+// ─── DAILY MINI-RECONCILIATION SUMMARY (Stage 3 part 1) ─────────────────────
+// Runs in ADDITION to the Monday weekly cron above, not instead of it — both
+// fire on Mondays. Vercel's native cron (Hobby tier: once/day, UTC-only, hour-
+// imprecise) cannot deliver "fire at property X's chosen SAST hour," so this is
+// invoked hourly by a GitHub Actions workflow instead (.github/workflows/
+// daily-summary.yml — UTC-triggered every hour, deliberately timezone-naive:
+// GitHub Actions' schedule trigger has no IANA-timezone field, so correctness
+// lives entirely here, not in the workflow). Each invocation checks every
+// property's `Daily Summary Hour` against the current SAST hour and only acts
+// on a match — an unconfigured property (field blank) is silently skipped, not
+// defaulted, since a wrong guess would fire at the wrong hour for real.
+//
+// Rule 29 — interaction surface with runOwnerSummary (the Monday weekly cron):
+// both read WS_Properties and WS_Bookings; neither writes to either. Read-only
+// reporting on both sides, so there is no write contention and no ordering
+// dependence — the two can and do fire in the same hour on a Monday (weekly at
+// 06:00 SAST, daily at whatever hour each property is configured for) without
+// interfering, because neither's output depends on the other having run.
+//
+// SKELETON ONLY at this step, per instruction: hour-matching and the fired/
+// skipped shape are real and tested; the actual message content (today's
+// paymentReconciliationLines / formatPaymentReconciliationMessage, reusing
+// Stage 1's pattern exactly rather than rewriting it) is wired in next.
+async function runDailySummary(opts = {}) {
+  const { now = new Date() } = opts;
+  const shifted = new Date(now.getTime() + SAST_OFFSET_MS);
+  const currentSastHour = shifted.getUTCHours();
+
+  const properties = await airtableGet('WS_Properties', '');
+  const fired = [];
+  const skipped = [];
+  for (const property of properties) {
+    const configuredHour = property.fields['Daily Summary Hour'];
+    if (configuredHour === undefined || configuredHour === null) {
+      skipped.push({ propertyId: property.id, reason: 'not_configured' });
+      continue;
+    }
+    if (Number(configuredHour) !== currentSastHour) {
+      skipped.push({ propertyId: property.id, reason: 'hour_not_matched', configuredHour: Number(configuredHour) });
+      continue;
+    }
+    // TODO(Stage 3 part 1, next step): build + log today's reconciliation
+    // message here, same shape as sendOwnerSummary's stub — logged to Axiom
+    // pending Meta template approval, never a free-form send.
+    logToAxiom('info', 'daily_summary_hour_matched', {
+      propertyId: property.id, propertyName: property.fields['Property Name'], currentSastHour
+    });
+    fired.push({ propertyId: property.id, propertyName: property.fields['Property Name'] });
+  }
+  return { currentSastHour, fired, skipped };
+}
+
+async function dailySummaryHandler(req, res) {
+  try {
+    const result = await runDailySummary();
+    res.status(200).json({ ok: true, ...result });
+  } catch (err) {
+    console.error('[DAILY-SUMMARY FATAL]', err.message, err.stack);
+    logToAxiom('error', 'daily_summary_fatal', { message: err.message, stack: err.stack });
+    res.status(200).json({ ok: false, error: err.message });
+  }
+}
+
 // ─── DISPATCHER ──────────────────────────────────────────────────────────────
 // Reads states.json: global rows first (guarded), then the current state's rows.
 // A row matches when `inputs` is "*" or contains the lowercased message.
@@ -4007,6 +4070,8 @@ module.exports.autoCheckoutHandler = autoCheckoutHandler;
 // for tests; ownerSummaryHandler is the Vercel HTTP cron entry.
 module.exports.runOwnerSummary = runOwnerSummary;
 module.exports.ownerSummaryHandler = ownerSummaryHandler;
+module.exports.runDailySummary = runDailySummary;
+module.exports.dailySummaryHandler = dailySummaryHandler;
 module.exports.aggregateOwnerSummary = aggregateOwnerSummary;
 module.exports.paymentReconciliationLines = paymentReconciliationLines;
 module.exports.formatPaymentReconciliationMessage = formatPaymentReconciliationMessage;

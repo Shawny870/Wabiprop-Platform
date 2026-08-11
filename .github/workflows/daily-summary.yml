@@ -1,0 +1,31 @@
+name: Wabistay daily mini-reconciliation summary
+
+# Fires every UTC hour. Deliberately timezone-naive: GitHub Actions' schedule
+# trigger has no IANA-timezone field (unlike some other CI systems), so this
+# workflow does not attempt to encode SAST here. Correctness — "did any
+# property's chosen SAST hour arrive" — lives entirely server-side in
+# runDailySummary() (api/wabistay/webhook.js), which converts the current UTC
+# instant to SAST and compares against each property's Daily Summary Hour.
+# Firing every UTC hour guarantees every SAST hour is covered exactly once a
+# day; the route itself is a no-op for every property whose hour hasn't
+# arrived yet.
+on:
+  schedule:
+    - cron: '0 * * * *'
+  workflow_dispatch: {}
+
+jobs:
+  call-daily-summary:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call Wabistay daily-summary route
+        run: |
+          status=$(curl -s -o /tmp/response.json -w "%{http_code}" \
+            -X GET "https://wabiprop-platform.vercel.app/api/wabistay/cron/daily-summary" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}")
+          echo "HTTP status: $status"
+          cat /tmp/response.json
+          if [ "$status" != "200" ]; then
+            echo "daily-summary route returned $status"
+            exit 1
+          fi
