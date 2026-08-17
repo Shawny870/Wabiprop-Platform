@@ -50,6 +50,18 @@ function resolveAnchor(f, status) {
 }
 
 module.exports = async function handler(req, res) {
+  // CRON_SECRET gate — same fail-closed Authorization: Bearer check as
+  // api/wabistay/cron/daily-summary.js. This file has no thin-wrapper/
+  // webhook.js split to house it in separately (the whole handler lives
+  // here), so the check is inlined at the top of the handler instead of
+  // as a separate wrapper module. Flagging per PR scope: same check logic,
+  // different placement forced by this file's structure.
+  const secret = process.env.CRON_SECRET;
+  const auth = req.headers.authorization || '';
+  if (!secret || auth !== `Bearer ${secret}`) {
+    return res.status(401).json({ ok: false, error: 'unauthorized' });
+  }
+
   console.log('[Cron: agent-morning-summary] Starting run');
   const today = new Date().toLocaleDateString('en-ZA', { timeZone: 'Africa/Johannesburg', day: 'numeric', month: 'long', year: 'numeric' });
   const results = [];
