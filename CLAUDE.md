@@ -84,6 +84,19 @@ NO frameworks, NO TypeScript, NO ORMs, NO npm bloat. Deterministic state machine
 - Dispatch layer defect: Wabistay messages routing through Wabiprop handler (current session priority)
 - BUG-10: `test/router.dispatch.test.js`'s "dispatches to Wabistay handler cleanly" test has no `WS_Properties` seed row, so it now hits the 6.4 `resolveProperty()` refusal path instead of the real greeting — same fix pattern as the fixture `WS_Properties` seed sync done for all 14 fixtures after the 6.4 merge, just never applied to this one test.
 
+## Tracked backlog (non-urgent, do not lose across handoffs)
+- BACKLOG-01: Persist a real vacant-to-ready cleaning timestamp. Today, `resolveRoomClean()`
+  (api/wabistay/webhook.js) computes `vacantToReadyMs` (checkout → room sellable again) from
+  `WS_Rooms.Cleaning Started At`, which is overwritten every checkout cycle and never copied
+  onto the booking record — so the number only ever exists transiently in the
+  `cleaning_job_completed` Axiom log, unrecoverable after the fact. Fix: write a new field
+  (e.g. `WS_Bookings.Vacant At`) at the same moment `WS_Rooms.Cleaning Started At` is set (see
+  webhook.js:3045 and :3297), so the baseline survives per-job like `Cleaning Job Started At`
+  already does. Small, contained addition to the existing checkout/cleaning flow — not a new
+  subsystem. Flagged during Stage 3 part 2 (daily summary content build) when this gap blocked
+  a true "average time-to-ready" metric; `runDailySummary` reports cleaner job duration
+  (`Cleaning Job Started At` → `Cleaning Completed At`) as the available proxy in the meantime.
+
 ## Rule 29 — Interaction Surface Declaration
 Every feature PR must name shared state, shared identity, shared grammar, and ordering dependence with existing flows, plus at least one interaction test per declared surface.
 
