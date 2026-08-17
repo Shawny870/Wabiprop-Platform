@@ -1,5 +1,5 @@
 {
-  "name": "greeting: known guest in NEW state is reset to AWAITING_DETAILS, no duplicate record",
+  "name": "greeting: known guest in NEW state is reset to AWAITING_STAY_TYPE (A1), no duplicate record",
   "seed": {
     "WS_Properties": [
       { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222" } }
@@ -19,7 +19,7 @@
   "expect": {
     "status": 200,
     "writes": [
-      { "op": "update", "table": "WS_Guests", "id": "recG1", "fields": { "Session State": "AWAITING_DETAILS" } }
+      { "op": "update", "table": "WS_Guests", "id": "recG1", "fields": { "Session State": "AWAITING_STAY_TYPE" } }
     ],
     "sends": [
       { "to": "27821234567", "includes": ["Welcome to Test Lodge, Testville", "*1 room* available"] }

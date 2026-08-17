@@ -2043,25 +2043,28 @@ const actions = {
   // diagnostic. If it's wrong, Airtable returns HTTP 200 with an empty record
   // set (not an error) — a formula bug here would silently show 0 rooms/rates
   // rather than fail loudly, so this is the single highest-risk line in 6.4.
-  async greetAndAskDetails(ctx) {
+  // A1 (flow inversion, Stage 4): stay-type (short stay vs multiple days) is now
+  // asked FIRST, before any date/name capture — this replaces the old
+  // greetAndAskDetails, which asked for name+dates directly and buried the
+  // short-stay option in a footnote ("reply HOURLY"). No config branching
+  // (locked decision): every property gets asked both options regardless of its
+  // Allow Anonymous Hourly/Overnight config — availability of each path is
+  // still checked where it already was (hourlyRates() fail-closed in
+  // selectStayType/startHourly), just never used to skip asking the question.
+  async greetAndAskStayType(ctx) {
     // F5-style: FIND/ARRAYJOIN confirmed unreliable for this filter (live-tested
     // 6.4 verification — matched 0 of 3 correctly-linked rooms). Fetch unscoped,
     // filter by property inclusion in JS, same pattern as airtableGetBookingsByGuestId.
     const allAvailableRooms = await airtableGet('WS_Rooms', `{Status} = 'Available'`);
     const availableRooms = allAvailableRooms.filter(r => (r.fields['Property'] || []).includes(ctx.property.id));
     const roomCount = availableRooms.length;
-    // F4: was {Active} = 1
-    const allActiveRates = await airtableGet('WS_Rates', `{Active} = TRUE()`);
-    const activeRates = allActiveRates.filter(r => (r.fields['Property'] || []).includes(ctx.property.id));
-    const rateText = activeRates.length > 0
-      ? activeRates.map(r =>
-          `• ${r.fields['Rate Name']}: R${r.fields['Amount']} ${r.fields['Rate Type'] === 'Per Night' ? 'per night' : 'per hour'}`
-        ).join('\n')
-      : '• Contact us for current rates';
 
     // Data-quality signal: rows with an empty Property field never match the
     // scoped filter above and so silently vanish from every property's greeting.
     // Schema can't force this field non-empty, so surface gaps instead of guessing.
+    // Rates are checked here too (even though rateText itself now builds later,
+    // in selectStayType) so this diagnostic still fires on every first contact,
+    // unchanged from before the reorder.
     const unassignedRooms = await airtableGet('WS_Rooms', `AND({Status} = 'Available', {Property} = BLANK())`);
     const unassignedRates = await airtableGet('WS_Rates', `AND({Active} = TRUE(), {Property} = BLANK())`);
     if (unassignedRooms.length > 0 || unassignedRates.length > 0) {
@@ -2097,9 +2100,78 @@ const actions = {
     await sendWhatsApp(ctx.phone, msg('greeting', {
       propertyName: ctx.property.fields['Property Name'],
       propertyCityLine: propertyCityLine(ctx.property),
-      roomCountText: `${roomCount} room${roomCount !== 1 ? 's' : ''}`,
-      rateText
+      roomCountText: `${roomCount} room${roomCount !== 1 ? 's' : ''}`
     }));
+  },
+
+  // AWAITING_STAY_TYPE: the guest's answer to "short stay or multiple days?".
+  // Branches to a rate menu SCOPED to that answer only (never both types in one
+  // message, locked decision) then continues into the existing capture flow for
+  // that type — collectHourlyDetails (unchanged) for short stay, collectDetails
+  // (unchanged) for multiple days. Both rate fetches below reuse the exact same
+  // functions/queries B2/F19 (rate-fix) already established: hourlyRates() for
+  // short stay, the WS_Rates active+property-scoped fetch (previously inline in
+  // greetAndAskDetails) for overnight — no new pricing logic written here.
+  //
+  // "next" in states.json for this state is a nominal default only, same
+  // convention startHourly already uses for its own fail-closed branch: this
+  // handler always writes an explicit, hardcoded Session State on every real
+  // path below, never ctx.next.
+  async selectStayType(ctx) {
+    const guestName = ctx.guest.fields['Guest Name'];
+    const SHORT_STAY_CHOICES = ['1', 'short stay', 'short'];
+    const MULTI_DAY_CHOICES = ['2', 'multiple days', 'multi-day', 'multiday', 'overnight'];
+
+    if (SHORT_STAY_CHOICES.includes(ctx.text)) {
+      const rates = hourlyRates(ctx.property);
+      if (!rates) {
+        // Same fail-closed posture as startHourly's own equivalent branch —
+        // property has not configured short stays. Route to the overnight
+        // path rather than dead-ending, zero rate quoted.
+        logToAxiom('info', 'hourly_not_configured', { phone: ctx.phone, propertyId: ctx.property.id });
+        await updateGuestState(ctx.guest.id, { 'Session State': 'AWAITING_DETAILS' });
+        await sendWhatsApp(ctx.phone, msg('hourlyUnavailable', {
+          propertyName: ctx.property.fields['Property Name']
+        }));
+        return;
+      }
+
+      await updateGuestState(ctx.guest.id, { 'Session State': 'AWAITING_HOURLY_DETAILS' });
+      const hourlyRateText = HOURLY_DURATIONS
+        .map(hours => `• ${hours} hour${hours === 1 ? '' : 's'}: R${rates[hours]}`)
+        .join('\n');
+      await sendWhatsApp(ctx.phone, msg('hourlyRatesMenu', {
+        propertyName: ctx.property.fields['Property Name'],
+        hourlyRateText
+      }));
+      await sendWhatsApp(ctx.phone, msg('hourlyAskDetails', {
+        propertyName: ctx.property.fields['Property Name']
+      }));
+      return;
+    }
+
+    if (MULTI_DAY_CHOICES.includes(ctx.text)) {
+      // Same fetch as the old greetAndAskDetails rateText build — F4/F5-style,
+      // unfiltered fetch + JS filter by Property inclusion, unchanged.
+      const allActiveRates = await airtableGet('WS_Rates', `{Active} = TRUE()`);
+      const activeRates = allActiveRates.filter(r => (r.fields['Property'] || []).includes(ctx.property.id));
+      const rateText = activeRates.length > 0
+        ? activeRates.map(r =>
+            `• ${r.fields['Rate Name']}: R${r.fields['Amount']} ${r.fields['Rate Type'] === 'Per Night' ? 'per night' : 'per hour'}`
+          ).join('\n')
+        : '• Contact us for current rates';
+
+      await updateGuestState(ctx.guest.id, { 'Session State': 'AWAITING_DETAILS' });
+      await sendWhatsApp(ctx.phone, msg('overnightRatesMenu', {
+        propertyName: ctx.property.fields['Property Name'],
+        rateText
+      }));
+      return;
+    }
+
+    // Unreadable answer — zero writes, same re-prompt-in-place pattern as
+    // selectOccupancy's own invalid-answer branch.
+    await sendWhatsApp(ctx.phone, msg('stayTypeReprompt', { guestName }));
   },
 
   // AWAITING_DETAILS: parse name + dates, create Enquiry booking (F7, F13)
@@ -2361,7 +2433,7 @@ const actions = {
       return;
     }
 
-    // F5-style JS filter — see greetAndAskDetails. Match on {Occupancy Type}, the
+    // F5-style JS filter — see greetAndAskStayType. Match on {Occupancy Type}, the
     // whole point of F19: the selection is by field value, invariant to the order
     // Airtable returns the rows in.
     const allActiveRates = await airtableGet('WS_Rates', `{Active} = TRUE()`);
@@ -2428,7 +2500,7 @@ const actions = {
         await updateGuestState(ctx.guest.id, { 'Session State': 'AWAITING_DETAILS' });
       } else {
         // Rule 30 step 2, slice 2: same NON-FATAL class, same reasoning as
-        // greetAndAskDetails' equivalent first-contact create.
+        // greetAndAskStayType's equivalent first-contact create.
         const guestCreate = await airtableCreate('WS_Guests', {
           'Guest Name': 'Unknown',
           'Phone Number': ctx.phone,
@@ -2452,7 +2524,7 @@ const actions = {
       await updateGuestState(ctx.guest.id, { 'Session State': ctx.next });
     } else {
       // Rule 30 step 2, slice 2: same NON-FATAL class, same reasoning as
-      // greetAndAskDetails' equivalent first-contact create.
+      // greetAndAskStayType's equivalent first-contact create.
       const guestCreate = await airtableCreate('WS_Guests', {
         'Guest Name': 'Unknown',
         'Phone Number': ctx.phone,
@@ -2799,7 +2871,7 @@ const actions = {
       : OWNER_PHONE;
 
     // Step 2: settle which room this guest actually gets.
-    // F5-style: see greetAndAskDetails — FIND/ARRAYJOIN confirmed unreliable, JS-filter instead
+    // F5-style: see greetAndAskStayType — FIND/ARRAYJOIN confirmed unreliable, JS-filter instead
     const bookings = await airtableGetBookingsByGuestId(ctx.guest.id, 'Confirmed');
     const booking = bookings[0] || null;
     const heldRoomId = (booking && (booking.fields['Room'] || [])[0]) || null;

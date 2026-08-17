@@ -1,5 +1,5 @@
 {
-  "name": "greeting: unknown number gets POPIA consent (B13/F22) then rates + overnight instructions, guest record created (F10)",
+  "name": "greeting: unknown number gets POPIA consent (B13/F22) then the stay-type question (A1), guest record created (F10)",
   "seed": {
     "WS_Properties": [
       { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222" } }
@@ -25,7 +25,7 @@
           "Guest Name": "Unknown",
           "Phone Number": "27821234567",
           "Guest Type": "WhatsApp",
-          "Session State": "AWAITING_DETAILS",
+          "Session State": "AWAITING_STAY_TYPE",
           "First Visit": "re:^\\d{4}-\\d{2}-\\d{2}$"
         }
       }
@@ -44,9 +44,10 @@
         "includes": [
           "Welcome to Test Lodge, Testville",
           "*3 rooms* available",
-          "Standard Overnight: R350 per night",
-          "overnight booking",
-          "reply HOURLY"
+          "short stay",
+          "multiple days",
+          "1 - Short stay",
+          "2 - Multiple days"
         ]
       }
     ]
