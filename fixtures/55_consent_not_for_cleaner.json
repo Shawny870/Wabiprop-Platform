@@ -20,10 +20,10 @@
   "expect": {
     "status": 200,
     "writes": [
-      { "op": "create", "table": "WS_Guests", "fields": { "Phone Number": "27821110000", "Session State": "AWAITING_DETAILS" } }
+      { "op": "create", "table": "WS_Guests", "fields": { "Phone Number": "27821110000", "Session State": "AWAITING_STAY_TYPE" } }
     ],
     "sends": [
-      { "to": "27821110000", "includes": ["Welcome to Test Lodge, Testville", "reply HOURLY"] }
+      { "to": "27821110000", "includes": ["Welcome to Test Lodge, Testville", "short stay", "multiple days"] }
     ]
   }
 }

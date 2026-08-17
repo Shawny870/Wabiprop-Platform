@@ -20,10 +20,10 @@
   "expect": {
     "status": 200,
     "writes": [
-      { "op": "update", "table": "WS_Guests", "id": "recG1", "fields": { "Session State": "AWAITING_DETAILS" } }
+      { "op": "update", "table": "WS_Guests", "id": "recG1", "fields": { "Session State": "AWAITING_STAY_TYPE" } }
     ],
     "sends": [
-      { "to": "27821234567", "includes": ["Welcome to Test Lodge, Testville", "reply HOURLY"] }
+      { "to": "27821234567", "includes": ["Welcome to Test Lodge, Testville", "short stay", "multiple days"] }
     ]
   }
 }
