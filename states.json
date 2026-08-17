@@ -41,8 +41,16 @@
     ],
     "CHECKED_IN": [
       { "inputs": ["extend", "extend stay", "more time", "stay longer", "longer"], "action": "extendStay" },
-      { "inputs": ["1", "checking out", "checkout", "check out"], "action": "checkout", "next": "NEW" },
+      { "inputs": ["1", "checking out", "checkout", "check out"], "action": "checkout", "next": "AWAITING_RATING" },
       { "inputs": "*", "action": "showCheckedInMenu" }
+    ],
+    "AWAITING_RATING": [
+      { "inputs": ["1", "2", "3", "4", "5"], "action": "recordRating" },
+      { "inputs": "*", "action": "ratingReprompt" }
+    ],
+    "AWAITING_RATING_FEEDBACK": [
+      { "inputs": ["skip", "no", "none", "no thanks"], "action": "skipRatingFeedback", "next": "NEW" },
+      { "inputs": "*", "action": "recordRatingFeedback", "next": "NEW" }
     ],
     "*": [
       { "inputs": "*", "action": "unknownStateReset", "next": "NEW" }
@@ -94,6 +102,14 @@
     "ownerExtension": "⏰ {guestName} has extended their stay ({bookingRef}).\nNew checkout: {checkOut}",
     "autoCheckoutThanks": "Thanks for staying with us at {propertyName}! 🌟\n\nWe've checked you out automatically as your time was up. We hope you enjoyed your stay — you're welcome back anytime.\n\nSafe travels! 👋",
     "checkoutThanks": "Thank you for staying with us at {propertyName}! 🌟\n\nWe hope you enjoyed your stay. You're welcome back anytime.\n\nSafe travels! 👋",
+    "ratingPrompt": "One last thing — how would you rate your stay at {propertyName}? Reply with a number from 1 to 5:\n1 - Very poor\n2 - Poor\n3 - OK\n4 - Good\n5 - Excellent",
+    "ratingReprompt": "Sorry, I didn't quite get that. Please reply with a number from 1 to 5 to rate your stay.",
+    "ratingLowFollowup": "Sorry to hear that. Would you like to tell us what went wrong? Reply with a few words, or reply *skip* to leave it there.",
+    "ratingFeedbackThanks": "Thanks for letting us know — we'll pass this along. 🙏",
+    "ratingHighThanks": "So glad you enjoyed it! 🌟",
+    "ratingHighReviewPrompt": "So glad you enjoyed it! 🌟 If you have a moment, we'd really appreciate a review: {reviewLink}",
+    "ratingMidThanks": "Thanks for letting us know!",
+    "ratingWriteFailed": "Thanks for the reply — we had trouble saving your rating on our end, but your stay is complete either way.",
     "checkoutWriteFailed": "Sorry, something went wrong on our end and we couldn't process your checkout. Please try again in a moment.",
     "cleanerThanks": "Thank you! {roomName} is marked as clean and available. ✅",
     "ownerRoomCleaned": "✅ {roomName} has been cleaned and is now available for new bookings.",

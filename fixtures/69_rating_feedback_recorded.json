@@ -1,0 +1,25 @@
+{
+  "name": "rating: free text in AWAITING_RATING_FEEDBACK is saved to Rating Feedback verbatim, guest returns to NEW",
+  "seed": {
+    "WS_Properties": [
+      { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222" } }
+    ],
+    "WS_Guests": [
+      { "id": "recG1", "fields": { "Guest Name": "John Smith", "Phone Number": "27821234567", "Session State": "AWAITING_RATING_FEEDBACK" } }
+    ],
+    "WS_Bookings": [
+      { "id": "recB1", "fields": { "Guest": ["recG1"], "Status": "Checked Out", "Check Out": "2026-07-04T10:00:00.000Z", "Rating": 1 } }
+    ]
+  },
+  "message": { "from": "27821234567", "text": "The aircon was broken all night" },
+  "expect": {
+    "status": 200,
+    "writes": [
+      { "op": "update", "table": "WS_Bookings", "id": "recB1", "fields": { "Rating Feedback": "The aircon was broken all night" } },
+      { "op": "update", "table": "WS_Guests", "id": "recG1", "fields": { "Session State": "NEW" } }
+    ],
+    "sends": [
+      { "to": "27821234567", "includes": ["Thanks for letting us know"] }
+    ]
+  }
+}

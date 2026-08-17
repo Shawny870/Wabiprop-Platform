@@ -1,0 +1,25 @@
+{
+  "name": "rating: '2' in AWAITING_RATING writes Rating, then offers a skippable free-text follow-up",
+  "seed": {
+    "WS_Properties": [
+      { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222" } }
+    ],
+    "WS_Guests": [
+      { "id": "recG1", "fields": { "Guest Name": "John Smith", "Phone Number": "27821234567", "Session State": "AWAITING_RATING" } }
+    ],
+    "WS_Bookings": [
+      { "id": "recB1", "fields": { "Guest": ["recG1"], "Status": "Checked Out", "Check Out": "2026-07-04T10:00:00.000Z" } }
+    ]
+  },
+  "message": { "from": "27821234567", "text": "2" },
+  "expect": {
+    "status": 200,
+    "writes": [
+      { "op": "update", "table": "WS_Bookings", "id": "recB1", "fields": { "Rating": 2 } },
+      { "op": "update", "table": "WS_Guests", "id": "recG1", "fields": { "Session State": "AWAITING_RATING_FEEDBACK" } }
+    ],
+    "sends": [
+      { "to": "27821234567", "includes": ["Sorry to hear that", "reply *skip*"] }
+    ]
+  }
+}

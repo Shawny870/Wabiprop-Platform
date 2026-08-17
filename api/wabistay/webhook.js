@@ -198,6 +198,28 @@ function bookingPropertyId(booking, fallbackPropertyId) {
   return linked || fallbackPropertyId || null;
 }
 
+// Rating flow: the guest's Session State carries no booking reference, so the
+// booking a AWAITING_RATING/AWAITING_RATING_FEEDBACK reply belongs to is
+// resolved the same way extendStay resolves "the active booking" — most
+// recent by Check Out, but scoped to Checked Out + not yet rated, since a
+// returning guest may have older, already-rated Checked Out bookings.
+async function findBookingAwaitingRating(guestId) {
+  const bookings = await airtableGetBookingsByGuestId(guestId, 'Checked Out');
+  const unrated = bookings.filter(b => b.fields['Rating'] === undefined);
+  unrated.sort((a, b) => Date.parse(b.fields['Check Out'] || 0) - Date.parse(a.fields['Check Out'] || 0));
+  return unrated[0] || null;
+}
+
+// AWAITING_RATING_FEEDBACK counterpart: by this point Rating is already
+// written on the booking the guest is replying about, so "unrated" no longer
+// identifies it — "rated but no feedback yet" does.
+async function findBookingAwaitingRatingFeedback(guestId) {
+  const bookings = await airtableGetBookingsByGuestId(guestId, 'Checked Out');
+  const unfed = bookings.filter(b => b.fields['Rating'] !== undefined && b.fields['Rating Feedback'] === undefined);
+  unfed.sort((a, b) => Date.parse(b.fields['Check Out'] || 0) - Date.parse(a.fields['Check Out'] || 0));
+  return unfed[0] || null;
+}
+
 async function activeCleanersForProperty(propertyId) {
   // F4: was {Active} = 1 — Airtable checkbox requires TRUE()
   const activeCleaners = await airtableGet('WS_Cleaners', `{Active} = TRUE()`);
@@ -1129,6 +1151,222 @@ async function activeReceptionRolesForProperty(propertyId) {
     (r.fields['Property'] || []).includes(propertyId) &&
     r.fields['Current Phone']
   );
+}
+
+// ─── ISSUE LOGGING (Stage 4, content/data only) ─────────────────────────────
+// WS_Issues (Airtable, created live 17 Aug 2026) — adapted from live WP_Issues
+// for Wabistay's actual entities: linked to WS_Bookings/WS_Rooms, not
+// Tenant/Unit, which don't exist here. Deliberately trimmed relative to
+// WP_Issues: no contractor invoicing/inspection/tenant-availability/cluster
+// fields — none of that has a corresponding flow in Wabistay yet, and adding
+// the columns without the flow that would populate them is dead schema.
+//
+// Ported WP_Issues' live "Issue Resolution Status" options (11 confirmed via
+// Airtable API 17 Aug 2026) MINUS "Agent Attending" — no Agent role exists in
+// Wabistay's actor set (WS_Roles.Role Type is Owner/Manager/Reception/Cleaner
+// only), so that value would be dead vocabulary here. "Contractor Assigned" /
+// "Contractor En Route" ARE ported even though Wabistay has no WS_Contractors
+// table yet — they're plain-text status labels, not links, so they're
+// harmless to carry forward for future use, but nothing in this build wires
+// them to an actual assignment flow.
+//
+// Category/Priority are NOT a direct port: live WP_Issues data is
+// contaminated (Category contains a literal self-referential "Category"
+// choice; Priority and the separate Urgency field both contain near-
+// duplicate junk — Urgent/Urgency/Routine/Owner Decision — confirmed live via
+// Airtable API 17 Aug 2026). Built clean instead: Category minus "Rent"
+// (a lease concept that doesn't exist in Wabistay) and the junk entry;
+// Priority as a plain Low/Medium/High/Emergency scale.
+const WS_ISSUES_TABLE = 'WS_Issues';
+const ISSUE_REPORTER_ROLES = ['Guest', 'Owner', 'Manager', 'Reception', 'Cleaner'];
+
+// The core writer both the guest-side and staff-side entry points below call.
+// Deliberately does NOT send anything itself — notifyIssueReported (below)
+// owns routing, same separation as sendDailySummary/aggregateDailySummary.
+async function logIssue({ propertyId, bookingId, roomId, reporterRole, reporterPhone, title, description }) {
+  if (!ISSUE_REPORTER_ROLES.includes(reporterRole)) {
+    throw new Error(`logIssue: invalid reporterRole '${reporterRole}' — must be one of: ${ISSUE_REPORTER_ROLES.join(', ')}`);
+  }
+  if (!title || !String(title).trim()) {
+    throw new Error('logIssue: title is required');
+  }
+
+  const fields = {
+    'Issue Title': String(title).trim(),
+    'Description': description ? String(description).trim() : '',
+    'Reported By Role': reporterRole,
+    'Issue Resolution Status': 'Open',
+    'Reporter Phone': reporterPhone || null,
+    'Date Reported': new Date().toISOString()
+  };
+  if (propertyId) fields['Property'] = [propertyId];
+  if (bookingId) fields['Linked Booking'] = [bookingId];
+  if (roomId) fields['Linked Room'] = [roomId];
+
+  const created = await airtableCreate(WS_ISSUES_TABLE, fields);
+  if (created && created.error) {
+    logToAxiom('error', 'issue_log_write_failed', {
+      reporterRole, propertyId: propertyId || null, error: JSON.stringify(created.error)
+    });
+    return null;
+  }
+
+  logToAxiom('info', 'issue_logged', {
+    issueId: created.id, propertyId: propertyId || null, reporterRole,
+    bookingId: bookingId || null, roomId: roomId || null
+  });
+
+  await notifyIssueReported(propertyId, created, reporterRole);
+  return created;
+}
+
+// Routing proposal (FLAGGED — needs CEO/Design Engineer confirmation before
+// any live send): reuses activeReceptionRolesForProperty UNCHANGED, so a
+// newly logged issue — guest-reported OR staff-reported — notifies the same
+// active Reception seat(s) that already receive the checkout payment push.
+// This is a proposal, not a settled design: queried WS_Roles live (17 Aug
+// 2026) and Reception is the ONLY role type with a populated, active seat for
+// any property today (Villa Liza: one Reception seat, phone confirmed live;
+// the other two WS_Roles rows are blank placeholders with no phone/role/
+// property set at all). Owner/Manager/Cleaner routing cannot be built against
+// live data yet because no such seat currently exists to route to — if CEO
+// wants owner-reported maintenance issues to notify the Owner instead of/in
+// addition to Reception, an active Owner WS_Roles record with a Current Phone
+// needs to exist first.
+//
+// Stub-and-log only, per Stage 4 scope: no notification TEMPLATE exists for
+// this yet (unlike cleaner dispatch/reception payment, which have an existing
+// stubbed send surface to extend), so this logs the would-be recipients and
+// content rather than attempting either a template or free-form send.
+async function notifyIssueReported(propertyId, issue, reporterRole) {
+  const correlation = { site: 'issue_reported', issueId: issue.id, propertyId: propertyId || null, reporterRole };
+  const seats = await activeReceptionRolesForProperty(propertyId);
+
+  if (seats.length === 0) {
+    // Fails LOUD, matching notifyCleanerOfArrival/notifyReceptionOfPayment:
+    // nobody being told about a new issue is itself worth surfacing, not a
+    // silent no-op.
+    logToAxiom('warn', 'issue_notify_no_seat', { ...correlation, reason: 'no active Reception seat for property' });
+    return;
+  }
+
+  for (const seat of seats) {
+    const to = formatPhone(String(seat.fields['Current Phone']));
+    logToAxiom('info', 'issue_notify_stubbed', {
+      ...correlation, to, roleId: seat.id, roleLabel: seat.fields['Role Label'] || null,
+      title: issue.fields['Issue Title'],
+      reason: 'no issue-notification template built yet — stub-and-log only, no live send in this phase'
+    });
+  }
+}
+
+// ── Guest-side entry point (Stage 4) ─────────────────────────────────────────
+// PROPOSED trigger, NOT wired into handleMessage's dispatch table yet —
+// flagged here for Design Engineer review before going live, per scope.
+// Minimal by design: "ISSUE <description>" as a single-turn command (no new
+// multi-turn UX invented beyond what logging requires) from a guest whose
+// session already resolves to an active booking. reporterRole is always
+// 'Guest' — never inferred from WS_Roles, since a guest is never a WS_Roles
+// seat.
+const ISSUE_REPORT_KEYWORD = /^issue\b/i;
+
+function parseIssueReportCommand(text) {
+  const t = String(text || '').trim();
+  if (!ISSUE_REPORT_KEYWORD.test(t)) return null;
+  const description = t.replace(ISSUE_REPORT_KEYWORD, '').trim();
+  if (!description) return { ok: false, reason: 'missing_description' };
+  return { ok: true, description };
+}
+
+// ctx shape matches the dispatcher's existing state-handler ctx (phone,
+// guest, property, next) — same idiom as the checkout/extendStay handlers
+// above, so wiring this in later is a router-table entry, not a rewrite.
+async function handleGuestIssueReport(ctx, description) {
+  const bookings = await airtableGetBookingsByGuestId(ctx.guest.id, 'Checked In');
+  const booking = bookings[0] || null;
+  const roomId = booking && (booking.fields['Room'] || [])[0];
+  const propertyId = booking ? bookingPropertyId(booking, ctx.property.id) : ctx.property.id;
+
+  const issue = await logIssue({
+    propertyId,
+    bookingId: booking ? booking.id : null,
+    roomId: roomId || null,
+    reporterRole: 'Guest',
+    reporterPhone: ctx.phone,
+    title: description.slice(0, 100),
+    description
+  });
+
+  if (!issue) {
+    await sendWhatsApp(ctx.phone, msg('checkoutWriteFailed'));
+    return;
+  }
+  await sendWhatsApp(ctx.phone, `Thanks — we've logged it and reception has been notified. Ref: ${issue.id.slice(-6).toUpperCase()}`);
+}
+
+// ── Owner/cleaner-side entry point (Stage 4) ─────────────────────────────────
+// PROPOSED trigger, NOT wired into handleMessage's dispatch table yet — same
+// review gate as the guest-side entry point above. Distinct from the guest
+// trigger only in reporterRole (resolved from the sender's actual seat, never
+// assumed) and in requiring authorization first — an unauthorized number gets
+// no different treatment than any other unrecognized message.
+//
+// Deliberately does NOT reuse walkinRoleRecordForPhone: that function
+// explicitly excludes cleaners by design ("a cleaner seat exists to receive
+// dispatch, not to sell rooms" — WALKIN_ROLE_TYPES comment above). Reusing it
+// here would silently lock cleaners out of reporting exactly the maintenance
+// issues they're best placed to spot — the opposite of what "owner/cleaner-
+// side entry point" asks for. Cleaners are a SEPARATE table (WS_Cleaners,
+// matched on Phone Number/Active — see activeCleanersForProperty/senderIsCleaner
+// above), not a WS_Roles seat, even though WS_Roles.Role Type happens to list
+// "Cleaner" as a choice (confirmed unused live — the only populated, active
+// WS_Roles seat today is Villa Liza's Reception). So this checks WS_Roles
+// (Owner/Manager/Reception, via activeWalkinRoleForPhone) OR WS_Cleaners
+// (Active cleaner, by phone) — never invents a merged lookup across the two.
+async function activeCleanerForPhone(phone) {
+  const cleaners = await airtableGet('WS_Cleaners', `{Active} = TRUE()`);
+  return cleaners.find(c => {
+    const raw = c.fields['Phone Number'];
+    if (!raw) return false;
+    return formatPhone(String(raw)) === phone;
+  }) || null;
+}
+
+async function handleStaffIssueReport({ phone, roomName, description }) {
+  const role = await activeWalkinRoleForPhone(phone);
+  let reporterRole, propertyId;
+
+  if (role) {
+    reporterRole = role.fields['Role Type'];
+    propertyId = (role.fields['Property'] || [])[0] || null;
+  } else {
+    const cleaner = await activeCleanerForPhone(phone);
+    if (!cleaner) {
+      // Not authorized (WS_Roles nor WS_Cleaners) — same "no different
+      // treatment" stance as WALKIN's own unauthorized path; caller decides
+      // what, if anything, to reply.
+      return null;
+    }
+    reporterRole = 'Cleaner';
+    propertyId = (cleaner.fields['Assigned Property'] || [])[0] || null;
+  }
+
+  let roomId = null;
+  if (roomName && propertyId) {
+    const rooms = await airtableGet('WS_Rooms', `{Room Name} = '${roomName}'`);
+    const match = rooms.find(r => (r.fields['Property'] || []).includes(propertyId));
+    roomId = match ? match.id : null;
+  }
+
+  return logIssue({
+    propertyId,
+    bookingId: null,
+    roomId,
+    reporterRole,
+    reporterPhone: phone,
+    title: description.slice(0, 100),
+    description
+  });
 }
 
 // Exact match only — never `roomMatchesText`, whose \b<number>\b test would
@@ -3161,6 +3399,92 @@ const actions = {
     await updateGuestState(ctx.guest.id, { 'Session State': ctx.next });
     logToAxiom('info', 'state_transition', { phone: ctx.phone, guestId: ctx.guest.id, from: 'CHECKED_IN', to: ctx.next, reason: 'checkout', roomName });
     await sendWhatsApp(ctx.phone, msg('checkoutThanks', { propertyName: ctx.property.fields['Property Name'] }));
+    await sendWhatsApp(ctx.phone, msg('ratingPrompt', { propertyName: ctx.property.fields['Property Name'] }));
+  },
+
+  // AWAITING_RATING + unrecognized reply: reprompt, stay in state (mirrors
+  // AWAITING_STAY_TYPE / AWAITING_DETAILS convention — required input, no
+  // auto-advance to NEW, so a stray reply doesn't silently drop the rating).
+  async ratingReprompt(ctx) {
+    await sendWhatsApp(ctx.phone, msg('ratingReprompt'));
+  },
+
+  // AWAITING_RATING + "1".."5": write Rating on the most recent unrated
+  // Checked Out booking, then branch:
+  //  <=2  → optional free-text follow-up (AWAITING_RATING_FEEDBACK, skippable)
+  //  ==3  → thanks, back to NEW
+  //  >=4  → thanks + review-link prompt IF the property has one set, else
+  //         same as ==3. No placeholder link is ever invented (CEO to confirm
+  //         WS_Properties field); if the property record has no 'Review Link'
+  //         field or it's blank, this step is skipped silently.
+  async recordRating(ctx) {
+    const rating = parseInt(ctx.text, 10);
+    const booking = await findBookingAwaitingRating(ctx.guest.id);
+    if (booking) {
+      const ratingWrite = await airtableUpdate('WS_Bookings', booking.id, { 'Rating': rating });
+      if (ratingWrite && ratingWrite.error) {
+        logToAxiom('error', 'rating_write_failed', {
+          phone: ctx.phone, bookingId: booking.id, rating, error: JSON.stringify(ratingWrite.error)
+        });
+        await updateGuestState(ctx.guest.id, { 'Session State': 'NEW' });
+        await sendWhatsApp(ctx.phone, msg('ratingWriteFailed'));
+        return;
+      }
+    } else {
+      logToAxiom('error', 'rating_no_booking_found', { phone: ctx.phone, guestId: ctx.guest.id, rating });
+    }
+
+    if (rating <= 2) {
+      await updateGuestState(ctx.guest.id, { 'Session State': 'AWAITING_RATING_FEEDBACK' });
+      logToAxiom('info', 'state_transition', { phone: ctx.phone, guestId: ctx.guest.id, from: 'AWAITING_RATING', to: 'AWAITING_RATING_FEEDBACK', rating });
+      await sendWhatsApp(ctx.phone, msg('ratingLowFollowup'));
+      return;
+    }
+
+    await updateGuestState(ctx.guest.id, { 'Session State': 'NEW' });
+    logToAxiom('info', 'state_transition', { phone: ctx.phone, guestId: ctx.guest.id, from: 'AWAITING_RATING', to: 'NEW', rating });
+
+    if (rating >= 4) {
+      const propertyId = bookingPropertyId(booking, ctx.property.id);
+      const propertyRecord = propertyId === ctx.property.id
+        ? ctx.property
+        : (await airtableGet('WS_Properties', `RECORD_ID() = '${propertyId}'`))[0];
+      const reviewLink = propertyRecord && propertyRecord.fields['Review Link'];
+      if (reviewLink) {
+        if (booking) await airtableUpdate('WS_Bookings', booking.id, { 'Review Prompted': true });
+        await sendWhatsApp(ctx.phone, msg('ratingHighReviewPrompt', { reviewLink }));
+      } else {
+        // No Review Link set on WS_Properties for this property — skip silently.
+        await sendWhatsApp(ctx.phone, msg('ratingHighThanks'));
+      }
+      return;
+    }
+
+    await sendWhatsApp(ctx.phone, msg('ratingMidThanks'));
+  },
+
+  // AWAITING_RATING_FEEDBACK + "skip"/"no"/"none": guest declines the optional follow-up.
+  async skipRatingFeedback(ctx) {
+    await updateGuestState(ctx.guest.id, { 'Session State': ctx.next });
+    logToAxiom('info', 'state_transition', { phone: ctx.phone, guestId: ctx.guest.id, from: 'AWAITING_RATING_FEEDBACK', to: ctx.next, reason: 'skipped' });
+  },
+
+  // AWAITING_RATING_FEEDBACK + free text: optional follow-up for a <=2 rating.
+  async recordRatingFeedback(ctx) {
+    const booking = await findBookingAwaitingRatingFeedback(ctx.guest.id);
+    if (booking) {
+      const feedbackWrite = await airtableUpdate('WS_Bookings', booking.id, { 'Rating Feedback': ctx.messageText });
+      if (feedbackWrite && feedbackWrite.error) {
+        logToAxiom('error', 'rating_feedback_write_failed', {
+          phone: ctx.phone, bookingId: booking.id, error: JSON.stringify(feedbackWrite.error)
+        });
+      }
+    } else {
+      logToAxiom('error', 'rating_feedback_no_booking_found', { phone: ctx.phone, guestId: ctx.guest.id });
+    }
+    await updateGuestState(ctx.guest.id, { 'Session State': ctx.next });
+    logToAxiom('info', 'state_transition', { phone: ctx.phone, guestId: ctx.guest.id, from: 'AWAITING_RATING_FEEDBACK', to: ctx.next });
+    await sendWhatsApp(ctx.phone, msg('ratingFeedbackThanks'));
   },
 
   // CHECKED_IN + "extend": B12. Push the checkout window out (uncapped, per the
@@ -3401,11 +3725,12 @@ async function settleAutoCheckout(booking, room, guest, propertyName, propertyId
   });
 
   if (guest) {
-    await updateGuestState(guest.id, { 'Session State': 'NEW' });
+    await updateGuestState(guest.id, { 'Session State': 'AWAITING_RATING' });
   }
   const guestPhone = guest && formatPhone(String(guest.fields['Phone Number'] || ''));
   if (guestPhone) {
     await sendWhatsApp(guestPhone, msg('autoCheckoutThanks', { propertyName }));
+    await sendWhatsApp(guestPhone, msg('ratingPrompt', { propertyName }));
   }
 }
 
@@ -4497,3 +4822,14 @@ module.exports.resolveOwnerName = resolveOwnerName;
 module.exports.formatSignedAmount = formatSignedAmount;
 module.exports.formatHumanDate = formatHumanDate;
 module.exports.dailySummaryTemplateParams = dailySummaryTemplateParams;
+// Stage 4 — issue logging (content/data only; guest/staff entry points are
+// NOT wired into handleMessage's dispatch table yet — see comments above).
+// Already merged into main via PR #38 — kept here as-is on merge, not
+// relocated, since this branch didn't create the anchor collision.
+module.exports.logIssue = logIssue;
+module.exports.notifyIssueReported = notifyIssueReported;
+module.exports.parseIssueReportCommand = parseIssueReportCommand;
+module.exports.handleGuestIssueReport = handleGuestIssueReport;
+module.exports.handleStaffIssueReport = handleStaffIssueReport;
+module.exports.activeCleanerForPhone = activeCleanerForPhone;
+module.exports.ISSUE_REPORTER_ROLES = ISSUE_REPORTER_ROLES;
