@@ -4312,6 +4312,93 @@ function aggregateDailySummary(property, rooms, bookings, dates, guestsById) {
   };
 }
 
+// Stage 3 part 3 prep — NOT wired to any live send yet. Resolves the property's
+// owner name for the wabistay_owner_daily_summary template's {{1}}. This link
+// (WS_Properties.Owner -> WS_Owners) has never been read anywhere in the
+// daily-summary path before now. Follows the exact same single-hop
+// RECORD_ID() lookup idiom already used elsewhere for linked-record
+// resolution (e.g. guest/room/property resolution around the auto-checkout
+// warning path) — not a new pattern. Returns null, not a guessed default, if
+// the property has no linked owner or the owner record has no name set: a
+// caller sending this straight into a template param must decide what to do
+// with null explicitly, not have this function silently paper over it.
+async function resolveOwnerName(property) {
+  const ownerId = (property.fields['Owner'] || [])[0];
+  if (!ownerId) return null;
+  const owners = await airtableGet('WS_Owners', `RECORD_ID() = '${ownerId}'`);
+  return (owners[0] && owners[0].fields['Owner Name']) || null;
+}
+
+const MONTH_FULL = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+
+// CEO-confirmed: the daily-summary template needs a human-readable date
+// (e.g. "20 August 2026"), not the raw ISO YYYY-MM-DD aggregateDailySummary
+// produces (~webhook.js:3979). Reformats ONLY for this template's output —
+// deliberately does NOT touch `summary.date` itself, since other consumers
+// of aggregateDailySummary's output (the daily_summary_payload Axiom log,
+// the manual report-trigger endpoint) may depend on the ISO string staying
+// intact. Parses the Y-M-D components directly rather than routing through
+// formatSastDateTime, which formats a UTC *instant* with a SAST time-of-day
+// — not what a bare calendar date needs — but reuses this file's existing
+// month-name-array convention (MONTH_ABBR, above) rather than inventing an
+// unrelated approach.
+function formatHumanDate(isoYmd) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(isoYmd);
+  if (!m) throw new Error(`formatHumanDate: expected YYYY-MM-DD, got '${isoYmd}'`);
+  const [, y, mo, d] = m;
+  return `${Number(d)} ${MONTH_FULL[Number(mo) - 1]} ${y}`;
+}
+
+// paymentDeltaTotal, unlike Reception's amountDue (always >= 0, so
+// notifyReceptionOfPayment's params never need a sign), CAN be negative — an
+// overpayment. formatAmount() alone (two decimals, no symbol, no sign) would
+// silently drop that minus sign, showing an overpayment as if it were owed.
+// Reuses the sign+abs pattern formatPaymentReconciliationMessage already
+// uses for the same field, minus the 'R' prefix — the currency symbol
+// decision stays with the template copy, same reasoning as formatAmount's
+// own comment.
+function formatSignedAmount(value) {
+  const n = Number(value) || 0;
+  const sign = n >= 0 ? '' : '-';
+  return `${sign}${formatAmount(Math.abs(n))}`;
+}
+
+// Stage 3 part 3 prep, per the TODO below — builds the wabistay_owner_daily_summary
+// template params in the Meta-locked positional order:
+//   {{1}} ownerName · {{2}} propertyName · {{3}} date · {{4}} paymentDeltaTotalFormatted
+//   {{5}} tomorrowsArrivalsCount
+// NOT wired to sendWhatsAppTemplate yet — that only happens once the template
+// is Meta-approved (see sendDailySummary's TODO). Deliberately synchronous and
+// pure so it can be unit-tested in isolation without Airtable/network: it
+// expects `summary.ownerName` to already be resolved and attached by the
+// caller (via resolveOwnerName, above) before this runs — aggregateDailySummary
+// itself is left untouched (sync, already tested, already reused by the
+// manual report-trigger endpoint) rather than made async to fetch it inline.
+//
+// {{3}} date: CEO-confirmed the template needs human-readable output (e.g.
+// "20 August 2026"), not the raw ISO YYYY-MM-DD aggregateDailySummary
+// produces — reformatted here via formatHumanDate, above. summary.date
+// itself is left untouched.
+//
+// Throws rather than silently defaulting if ownerName is missing: sending
+// "undefined" or a guessed placeholder into a live WhatsApp template to a
+// real owner is worse than a loud failure during wiring.
+function dailySummaryTemplateParams(summary) {
+  if (summary.ownerName === undefined || summary.ownerName === null) {
+    throw new Error(
+      'dailySummaryTemplateParams: summary.ownerName is missing — resolve it with ' +
+      'resolveOwnerName(property) and attach it to the summary before calling this function.'
+    );
+  }
+  return [
+    summary.ownerName,
+    summary.propertyName,
+    formatHumanDate(summary.date),
+    formatSignedAmount(summary.outstandingPayments.paymentDeltaTotal),
+    summary.tomorrowsArrivals.length
+  ];
+}
+
 // The send surface. STUBBED until DAILY_SUMMARY_TEMPLATE is approved: logs the
 // full payload to Axiom (so content is verifiable now) and marks exactly where
 // the template send goes — same stub pattern as sendOwnerSummary above.
@@ -4720,8 +4807,25 @@ module.exports.runEnquiryAbandonment = runEnquiryAbandonment;
 module.exports.airtableCreate = airtableCreate;
 module.exports.airtableUpdate = airtableUpdate;
 module.exports.sendWhatsApp = sendWhatsApp;
+// CEO manual report-trigger (api/wabistay/cron/manual-report.js) needs these
+// to build the SAME live-data fetch + stubbed-send pipeline the real crons
+// use, without duplicating the Airtable query/pagination logic here.
+module.exports.airtableGet = airtableGet;
+module.exports.orFormula = orFormula;
+module.exports.BLOCKING_BOOKING_STATUSES = BLOCKING_BOOKING_STATUSES;
+module.exports.BOOKABLE_ROOM_STATUSES = BOOKABLE_ROOM_STATUSES;
+module.exports.sendDailySummary = sendDailySummary;
+module.exports.sendOwnerSummary = sendOwnerSummary;
+// Stage 3 part 3 prep (dailySummaryTemplateParams) — exported for isolated
+// unit testing per the TODO at sendDailySummary; NOT wired to a live send.
+module.exports.resolveOwnerName = resolveOwnerName;
+module.exports.formatSignedAmount = formatSignedAmount;
+module.exports.formatHumanDate = formatHumanDate;
+module.exports.dailySummaryTemplateParams = dailySummaryTemplateParams;
 // Stage 4 — issue logging (content/data only; guest/staff entry points are
 // NOT wired into handleMessage's dispatch table yet — see comments above).
+// Already merged into main via PR #38 — kept here as-is on merge, not
+// relocated, since this branch didn't create the anchor collision.
 module.exports.logIssue = logIssue;
 module.exports.notifyIssueReported = notifyIssueReported;
 module.exports.parseIssueReportCommand = parseIssueReportCommand;
