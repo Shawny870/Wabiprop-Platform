@@ -3703,6 +3703,296 @@ async function ownerSummaryHandler(req, res) {
   }
 }
 
+// ─── DAILY MINI-RECONCILIATION SUMMARY (Stage 3 part 1) ─────────────────────
+// Runs in ADDITION to the Monday weekly cron above, not instead of it — both
+// fire on Mondays. Vercel's native cron (Hobby tier: once/day, UTC-only, hour-
+// imprecise) cannot deliver "fire at property X's chosen SAST hour," so this is
+// invoked hourly by a GitHub Actions workflow instead (.github/workflows/
+// daily-summary.yml — UTC-triggered every hour, deliberately timezone-naive:
+// GitHub Actions' schedule trigger has no IANA-timezone field, so correctness
+// lives entirely here, not in the workflow). Each invocation checks every
+// property's `Daily Summary Hour` against the current SAST hour and only acts
+// on a match — an unconfigured property (field blank) is silently skipped, not
+// defaulted, since a wrong guess would fire at the wrong hour for real.
+//
+// Rule 29 — interaction surface with runOwnerSummary (the Monday weekly cron):
+// both read WS_Properties and WS_Bookings; neither writes to either. Read-only
+// reporting on both sides, so there is no write contention and no ordering
+// dependence — the two can and do fire in the same hour on a Monday (weekly at
+// 06:00 SAST, daily at whatever hour each property is configured for) without
+// interfering, because neither's output depends on the other having run.
+//
+// Stage 3 part 2: content is now built. Send stays stubbed (same reasoning as
+// sendOwnerSummary — no approved Meta template exists for this use case yet,
+// confirmed live against Meta's template list before this part started).
+//
+// Meta utility template name for the daily summary. FLAG: pending Meta
+// approval/submission — unlike OWNER_SUMMARY_TEMPLATE this hasn't been
+// submitted yet either; naming it here only marks the swap point.
+const DAILY_SUMMARY_TEMPLATE = 'wabistay_daily_summary';
+
+// ── Room state grid ──────────────────────────────────────────────────────────
+// WS_Rooms.Status alone cannot distinguish overnight vs hourly occupancy (both
+// read 'Occupied') — the split requires resolving which booking currently holds
+// the room. 'Maintenance' is excluded from the 4-state grid the spec asks for
+// (same convention as BOOKABLE_ROOM_STATUSES elsewhere in this file, which also
+// excludes it) but counted separately so a room in Maintenance is never silently
+// dropped from the report.
+function roomState(room, bookingsForRoom) {
+  const status = room.fields['Status'];
+  if (status === 'Cleaning') return 'cleaning';
+  if (status === 'Available') return 'ready';
+  if (status === 'Occupied') {
+    const active = bookingsForRoom.find(b => b.fields['Status'] === 'Checked In');
+    return (active && active.fields['Booking Type'] === 'Hourly') ? 'occupied-hourly' : 'occupied-overnight';
+  }
+  return null; // Maintenance (or any future status) — not part of the 4-state grid
+}
+
+function roomStateGrid(rooms, bookingsByRoomId) {
+  const grid = { 'occupied-overnight': 0, 'occupied-hourly': 0, ready: 0, cleaning: 0 };
+  let maintenance = 0;
+  for (const room of rooms) {
+    const state = roomState(room, bookingsByRoomId.get(room.id) || []);
+    if (state) grid[state]++;
+    else maintenance++;
+  }
+  return { ...grid, maintenance };
+}
+
+// ── No-shows (CEO-approved inferred definition, Stage 3 part 2) ─────────────
+// WS_Bookings.Status has no 'No Show' choice (confirmed live via Meta API —
+// only Enquiry/Confirmed/Checked In/Checked Out/Cancelled exist), so this is
+// INFERRED, not a read of an existing fact: Confirmed, Check In date has
+// already arrived (today or earlier), never transitioned to Checked In.
+function isNoShow(booking, todayYmd) {
+  if (booking.fields['Status'] !== 'Confirmed') return false;
+  const ci = booking.fields['Check In'];
+  if (!ci) return false;
+  return compareYmd(sastCalendarDate(new Date(Date.parse(ci))), todayYmd) <= 0;
+}
+
+// ── Overnight: check-ins / check-outs / no-shows today ───────────────────────
+// Check-ins use 'Checked In At' (a real event timestamp). Check-outs have no
+// symmetric real event timestamp on WS_Bookings — only the scheduled 'Check Out'
+// date exists (the same field aggregateOwnerSummary already keys period math
+// off of), so "checked out today" here means Status = Checked Out with a
+// scheduled Check Out date of today, not a captured actual-checkout moment.
+// Flagging rather than silently treating it as precise.
+function overnightStatsToday(bookings, todayYmd) {
+  const dateIs = (iso, ymd) => !!iso && compareYmd(sastCalendarDate(new Date(Date.parse(iso))), ymd) === 0;
+
+  const checkInsToday = bookings.filter(b =>
+    b.fields['Booking Type'] === 'Overnight' && dateIs(b.fields['Checked In At'], todayYmd)
+  ).length;
+
+  const checkOutsToday = bookings.filter(b =>
+    b.fields['Booking Type'] === 'Overnight' && b.fields['Status'] === 'Checked Out' && dateIs(b.fields['Check Out'], todayYmd)
+  ).length;
+
+  const noShowsToday = bookings.filter(b =>
+    b.fields['Booking Type'] === 'Overnight' && isNoShow(b, todayYmd)
+  ).length;
+
+  return { checkInsToday, checkOutsToday, noShowsToday };
+}
+
+// ── Hourly: bookings today + overstay interventions ──────────────────────────
+// 'Checkout Warning Sent At' is written by runAutoCheckout for ANY Checked-In
+// booking it sweeps, regardless of Booking Type — it is not hourly-specific,
+// even though the content spec groups it under "Hourly". Reported unscoped by
+// type here (matching what the field actually measures) rather than silently
+// filtered to Hourly bookings only, which would undercount and misrepresent it.
+function hourlyStatsToday(bookings, todayYmd) {
+  const dateIs = (iso, ymd) => !!iso && compareYmd(sastCalendarDate(new Date(Date.parse(iso))), ymd) === 0;
+
+  const totalHourlyBookingsToday = bookings.filter(b =>
+    b.fields['Booking Type'] === 'Hourly' && dateIs(b.fields['Check In'], todayYmd)
+  ).length;
+
+  const overstayInterventionsToday = bookings.filter(b =>
+    dateIs(b.fields['Checkout Warning Sent At'], todayYmd)
+  ).length;
+
+  return { totalHourlyBookingsToday, overstayInterventionsToday };
+}
+
+// ── Cleaning turnaround — JOB DURATION, explicitly NOT vacant-to-ready ──────
+// See CLAUDE.md BACKLOG-01. The true "checkout → sellable again" number
+// (vacantToReadyMs in resolveRoomClean/cleaningDurations) is never persisted:
+// its baseline, WS_Rooms.'Cleaning Started At', is overwritten every checkout
+// cycle and never copied onto the booking, so after the fact it only ever
+// existed in the 'cleaning_job_completed' Axiom log entry at the moment it
+// happened — unrecoverable here. What DOES survive on WS_Bookings is
+// 'Cleaning Job Started At' -> 'Cleaning Completed At' ("job duration": how
+// long the cleaner spent once dispatched, only present when they sent START).
+// Reported here, labeled explicitly, as the best available proxy.
+function jobDurationMs(booking) {
+  const started = booking.fields['Cleaning Job Started At'];
+  const completed = booking.fields['Cleaning Completed At'];
+  if (!started || !completed) return null;
+  const startMs = Date.parse(started);
+  const completedMs = Date.parse(completed);
+  if (!Number.isFinite(startMs) || !Number.isFinite(completedMs) || completedMs < startMs) return null;
+  return completedMs - startMs;
+}
+
+function cleaningTurnaroundToday(bookings, todayYmd) {
+  const completedToday = bookings.filter(b =>
+    b.fields['Cleaning Completed At'] &&
+    compareYmd(sastCalendarDate(new Date(Date.parse(b.fields['Cleaning Completed At']))), todayYmd) === 0
+  );
+  const durations = completedToday.map(jobDurationMs).filter(ms => ms !== null);
+  const averageJobDurationMs = durations.length > 0
+    ? Math.round(durations.reduce((s, ms) => s + ms, 0) / durations.length)
+    : null;
+  return {
+    metric: 'job_duration', // NOT vacant-to-ready/time-to-ready — see BACKLOG-01 in CLAUDE.md
+    jobsCompletedToday: completedToday.length,
+    jobsWithDuration: durations.length,
+    averageJobDurationMs
+  };
+}
+
+// ── Revenue today (overnight / hourly / combined) ────────────────────────────
+// Scoped to bookings whose Check In date is today, same period-bucketing
+// convention aggregateOwnerSummary already uses for its own totalRevenue.
+function revenueToday(todaysBookings) {
+  const sumDue = list => list.reduce((s, b) => s + (Number(b.fields['Amount Due']) || 0), 0);
+  const overnightRevenue = sumDue(todaysBookings.filter(b => b.fields['Booking Type'] === 'Overnight'));
+  const hourlyRevenue = sumDue(todaysBookings.filter(b => b.fields['Booking Type'] === 'Hourly'));
+  return { overnightRevenue, hourlyRevenue, combinedRevenue: overnightRevenue + hourlyRevenue };
+}
+
+// ── Tomorrow's overnight arrivals ────────────────────────────────────────────
+function tomorrowsOvernightArrivals(bookings, tomorrowYmd, roomsById, guestsById) {
+  return bookings
+    .filter(b => b.fields['Booking Type'] === 'Overnight' &&
+      b.fields['Check In'] &&
+      compareYmd(sastCalendarDate(new Date(Date.parse(b.fields['Check In']))), tomorrowYmd) === 0)
+    .map(b => ({
+      bookingId: b.id,
+      bookingRef: b.fields['Booking Ref'] || null,
+      guestName: guestsById.get((b.fields['Guest'] || [])[0]) || null,
+      roomName: roomsById.get((b.fields['Room'] || [])[0]) || null,
+      checkIn: b.fields['Check In']
+    }));
+}
+
+// ── Full per-property aggregation ────────────────────────────────────────────
+// Reuses paymentReconciliationLines (Stage 1) directly for section 6
+// (outstanding/pending payments), scoped to today's bookings — same helper,
+// same shape, no parallel version written.
+function aggregateDailySummary(property, rooms, bookings, dates, guestsById) {
+  const { todayYmd, tomorrowYmd } = dates;
+
+  const bookingsByRoomId = new Map();
+  for (const b of bookings) {
+    for (const roomId of (b.fields['Room'] || [])) {
+      if (!bookingsByRoomId.has(roomId)) bookingsByRoomId.set(roomId, []);
+      bookingsByRoomId.get(roomId).push(b);
+    }
+  }
+  const roomsById = new Map(rooms.map(r => [r.id, r.fields['Room Name'] || null]));
+
+  const todaysBookings = bookings.filter(b =>
+    b.fields['Check In'] && compareYmd(sastCalendarDate(new Date(Date.parse(b.fields['Check In']))), todayYmd) === 0
+  );
+  const paymentLines = paymentReconciliationLines(todaysBookings, roomsById, guestsById);
+  const paymentDeltaTotal = paymentLines.reduce((s, l) => s + l.delta, 0);
+
+  return {
+    propertyId: property.id,
+    propertyName: property.fields['Property Name'],
+    date: `${todayYmd.y}-${String(todayYmd.m).padStart(2, '0')}-${String(todayYmd.d).padStart(2, '0')}`,
+    roomStateGrid: roomStateGrid(rooms, bookingsByRoomId),
+    overnight: overnightStatsToday(bookings, todayYmd),
+    hourly: hourlyStatsToday(bookings, todayYmd),
+    cleaningTurnaround: cleaningTurnaroundToday(bookings, todayYmd),
+    revenue: revenueToday(todaysBookings),
+    outstandingPayments: { paymentLines, paymentDeltaTotal },
+    tomorrowsArrivals: tomorrowsOvernightArrivals(bookings, tomorrowYmd, roomsById, guestsById)
+  };
+}
+
+// The send surface. STUBBED until DAILY_SUMMARY_TEMPLATE is approved: logs the
+// full payload to Axiom (so content is verifiable now) and marks exactly where
+// the template send goes — same stub pattern as sendOwnerSummary above.
+async function sendDailySummary(property, summary) {
+  const notifyPhone = property.fields['Notify Phone']
+    ? property.fields['Notify Phone'].replace(/[\s\-\+]/g, '')
+    : (OWNER_PHONE || null);
+  const payload = { ...summary, template: DAILY_SUMMARY_TEMPLATE, notifyPhone };
+  logToAxiom('info', 'daily_summary_payload', payload);
+
+  // TODO(Stage 3 part 3): once DAILY_SUMMARY_TEMPLATE is approved by Meta, this
+  // is the one-line swap point:
+  //   await sendWhatsAppTemplate(notifyPhone, DAILY_SUMMARY_TEMPLATE, dailySummaryTemplateParams(summary), { site: 'daily_summary', propertyId: property.id });
+  // Left stubbed here deliberately — enabling it is a separate, CEO-gated change
+  // once the template exists, same reasoning as sendOwnerSummary's stub above.
+  return payload;
+}
+
+async function runDailySummary(opts = {}) {
+  const { now = new Date() } = opts;
+  const shifted = new Date(now.getTime() + SAST_OFFSET_MS);
+  const currentSastHour = shifted.getUTCHours();
+  const todayYmd = sastCalendarDate(now);
+  const tomorrowYmd = addSastDays(todayYmd, 1);
+
+  const properties = await airtableGet('WS_Properties', '');
+  const fired = [];
+  const skipped = [];
+
+  // Rooms/bookings/guests are fetched at most once per run, only if at least
+  // one property's hour actually matches — most hourly invocations match
+  // nothing, so this avoids three Airtable calls on 23/24 runs a day.
+  let allRooms = null, allBookings = null, guestsById = null;
+
+  for (const property of properties) {
+    const configuredHour = property.fields['Daily Summary Hour'];
+    if (configuredHour === undefined || configuredHour === null) {
+      skipped.push({ propertyId: property.id, reason: 'not_configured' });
+      continue;
+    }
+    if (Number(configuredHour) !== currentSastHour) {
+      skipped.push({ propertyId: property.id, reason: 'hour_not_matched', configuredHour: Number(configuredHour) });
+      continue;
+    }
+
+    if (allRooms === null) {
+      // Unfiltered — includes Maintenance, unlike BOOKABLE_ROOM_STATUSES
+      // elsewhere, since the room-state grid counts Maintenance separately
+      // rather than silently dropping those rooms from the report.
+      allRooms = await airtableGet('WS_Rooms', '');
+      allBookings = await airtableGet('WS_Bookings', orFormula('Status', BLOCKING_BOOKING_STATUSES.concat(['Checked Out'])));
+      const allGuests = await airtableGet('WS_Guests', '');
+      guestsById = new Map(allGuests.map(g => [g.id, g.fields['Guest Name'] || null]));
+    }
+
+    const rooms = allRooms.filter(r => (r.fields['Property'] || []).includes(property.id));
+    const roomIds = new Set(rooms.map(r => r.id));
+    const bookings = allBookings.filter(b => (b.fields['Room'] || []).some(id => roomIds.has(id)));
+
+    const summary = aggregateDailySummary(property, rooms, bookings, { todayYmd, tomorrowYmd }, guestsById);
+    await sendDailySummary(property, summary);
+
+    fired.push({ propertyId: property.id, propertyName: property.fields['Property Name'], summary });
+  }
+  return { currentSastHour, fired, skipped };
+}
+
+async function dailySummaryHandler(req, res) {
+  try {
+    const result = await runDailySummary();
+    res.status(200).json({ ok: true, ...result });
+  } catch (err) {
+    console.error('[DAILY-SUMMARY FATAL]', err.message, err.stack);
+    logToAxiom('error', 'daily_summary_fatal', { message: err.message, stack: err.stack });
+    res.status(200).json({ ok: false, error: err.message });
+  }
+}
+
 // ─── DISPATCHER ──────────────────────────────────────────────────────────────
 // Reads states.json: global rows first (guarded), then the current state's rows.
 // A row matches when `inputs` is "*" or contains the lowercased message.
@@ -3971,6 +4261,8 @@ module.exports = async function handler(req, res) {
 module.exports.parseBookingDate = parseBookingDate;
 module.exports.sastToUtcIso = sastToUtcIso;
 module.exports.sastCalendarDate = sastCalendarDate;
+module.exports.addSastDays = addSastDays;
+module.exports.compareYmd = compareYmd;
 // B8: exported for test/availability.test.js. The exclusive-bounds behaviour is
 // only observable when a check-in instant exactly equals a check-out instant,
 // which the overnight flow can never produce (14:00 never equals 10:00) — so it
@@ -4007,6 +4299,18 @@ module.exports.autoCheckoutHandler = autoCheckoutHandler;
 // for tests; ownerSummaryHandler is the Vercel HTTP cron entry.
 module.exports.runOwnerSummary = runOwnerSummary;
 module.exports.ownerSummaryHandler = ownerSummaryHandler;
+module.exports.runDailySummary = runDailySummary;
+module.exports.dailySummaryHandler = dailySummaryHandler;
+// Stage 3 part 2: daily summary content sections, exported individually so
+// each can be unit-tested apart from the full hour-matching loop.
+module.exports.aggregateDailySummary = aggregateDailySummary;
+module.exports.roomStateGrid = roomStateGrid;
+module.exports.isNoShow = isNoShow;
+module.exports.overnightStatsToday = overnightStatsToday;
+module.exports.hourlyStatsToday = hourlyStatsToday;
+module.exports.cleaningTurnaroundToday = cleaningTurnaroundToday;
+module.exports.revenueToday = revenueToday;
+module.exports.tomorrowsOvernightArrivals = tomorrowsOvernightArrivals;
 module.exports.aggregateOwnerSummary = aggregateOwnerSummary;
 module.exports.paymentReconciliationLines = paymentReconciliationLines;
 module.exports.formatPaymentReconciliationMessage = formatPaymentReconciliationMessage;
