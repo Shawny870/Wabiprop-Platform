@@ -4395,3 +4395,12 @@ module.exports.runEnquiryAbandonment = runEnquiryAbandonment;
 module.exports.airtableCreate = airtableCreate;
 module.exports.airtableUpdate = airtableUpdate;
 module.exports.sendWhatsApp = sendWhatsApp;
+// CEO manual report-trigger (api/wabistay/cron/manual-report.js) needs these
+// to build the SAME live-data fetch + stubbed-send pipeline the real crons
+// use, without duplicating the Airtable query/pagination logic here.
+module.exports.airtableGet = airtableGet;
+module.exports.orFormula = orFormula;
+module.exports.BLOCKING_BOOKING_STATUSES = BLOCKING_BOOKING_STATUSES;
+module.exports.BOOKABLE_ROOM_STATUSES = BOOKABLE_ROOM_STATUSES;
+module.exports.sendDailySummary = sendDailySummary;
+module.exports.sendOwnerSummary = sendOwnerSummary;
