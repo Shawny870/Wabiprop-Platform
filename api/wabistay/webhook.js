@@ -4549,6 +4549,21 @@ module.exports = async function handler(req, res) {
 module.exports.parseBookingDate = parseBookingDate;
 module.exports.sastToUtcIso = sastToUtcIso;
 module.exports.sastCalendarDate = sastCalendarDate;
+// Stage 4 — issue logging (content/data only; guest/staff entry points are
+// NOT wired into handleMessage's dispatch table yet — see comments above).
+// Deliberately anchored here rather than next to sendWhatsApp/airtableUpdate
+// below: that's a high-churn insertion point other feature branches also
+// append to, and stacking another purely-additive block on the exact same
+// anchor line there just manufactures a trivial merge conflict for whichever
+// PR lands second.
+module.exports.logIssue = logIssue;
+module.exports.notifyIssueReported = notifyIssueReported;
+module.exports.parseIssueReportCommand = parseIssueReportCommand;
+module.exports.handleGuestIssueReport = handleGuestIssueReport;
+module.exports.handleStaffIssueReport = handleStaffIssueReport;
+module.exports.activeCleanerForPhone = activeCleanerForPhone;
+module.exports.ISSUE_REPORTER_ROLES = ISSUE_REPORTER_ROLES;
+
 module.exports.addSastDays = addSastDays;
 module.exports.compareYmd = compareYmd;
 // B8: exported for test/availability.test.js. The exclusive-bounds behaviour is
@@ -4611,12 +4626,3 @@ module.exports.runEnquiryAbandonment = runEnquiryAbandonment;
 module.exports.airtableCreate = airtableCreate;
 module.exports.airtableUpdate = airtableUpdate;
 module.exports.sendWhatsApp = sendWhatsApp;
-// Stage 4 — issue logging (content/data only; guest/staff entry points are
-// NOT wired into handleMessage's dispatch table yet — see comments above).
-module.exports.logIssue = logIssue;
-module.exports.notifyIssueReported = notifyIssueReported;
-module.exports.parseIssueReportCommand = parseIssueReportCommand;
-module.exports.handleGuestIssueReport = handleGuestIssueReport;
-module.exports.handleStaffIssueReport = handleStaffIssueReport;
-module.exports.activeCleanerForPhone = activeCleanerForPhone;
-module.exports.ISSUE_REPORTER_ROLES = ISSUE_REPORTER_ROLES;
