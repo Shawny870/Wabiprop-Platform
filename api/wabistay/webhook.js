@@ -198,6 +198,28 @@ function bookingPropertyId(booking, fallbackPropertyId) {
   return linked || fallbackPropertyId || null;
 }
 
+// Rating flow: the guest's Session State carries no booking reference, so the
+// booking a AWAITING_RATING/AWAITING_RATING_FEEDBACK reply belongs to is
+// resolved the same way extendStay resolves "the active booking" — most
+// recent by Check Out, but scoped to Checked Out + not yet rated, since a
+// returning guest may have older, already-rated Checked Out bookings.
+async function findBookingAwaitingRating(guestId) {
+  const bookings = await airtableGetBookingsByGuestId(guestId, 'Checked Out');
+  const unrated = bookings.filter(b => b.fields['Rating'] === undefined);
+  unrated.sort((a, b) => Date.parse(b.fields['Check Out'] || 0) - Date.parse(a.fields['Check Out'] || 0));
+  return unrated[0] || null;
+}
+
+// AWAITING_RATING_FEEDBACK counterpart: by this point Rating is already
+// written on the booking the guest is replying about, so "unrated" no longer
+// identifies it — "rated but no feedback yet" does.
+async function findBookingAwaitingRatingFeedback(guestId) {
+  const bookings = await airtableGetBookingsByGuestId(guestId, 'Checked Out');
+  const unfed = bookings.filter(b => b.fields['Rating'] !== undefined && b.fields['Rating Feedback'] === undefined);
+  unfed.sort((a, b) => Date.parse(b.fields['Check Out'] || 0) - Date.parse(a.fields['Check Out'] || 0));
+  return unfed[0] || null;
+}
+
 async function activeCleanersForProperty(propertyId) {
   // F4: was {Active} = 1 — Airtable checkbox requires TRUE()
   const activeCleaners = await airtableGet('WS_Cleaners', `{Active} = TRUE()`);
@@ -3377,6 +3399,92 @@ const actions = {
     await updateGuestState(ctx.guest.id, { 'Session State': ctx.next });
     logToAxiom('info', 'state_transition', { phone: ctx.phone, guestId: ctx.guest.id, from: 'CHECKED_IN', to: ctx.next, reason: 'checkout', roomName });
     await sendWhatsApp(ctx.phone, msg('checkoutThanks', { propertyName: ctx.property.fields['Property Name'] }));
+    await sendWhatsApp(ctx.phone, msg('ratingPrompt', { propertyName: ctx.property.fields['Property Name'] }));
+  },
+
+  // AWAITING_RATING + unrecognized reply: reprompt, stay in state (mirrors
+  // AWAITING_STAY_TYPE / AWAITING_DETAILS convention — required input, no
+  // auto-advance to NEW, so a stray reply doesn't silently drop the rating).
+  async ratingReprompt(ctx) {
+    await sendWhatsApp(ctx.phone, msg('ratingReprompt'));
+  },
+
+  // AWAITING_RATING + "1".."5": write Rating on the most recent unrated
+  // Checked Out booking, then branch:
+  //  <=2  → optional free-text follow-up (AWAITING_RATING_FEEDBACK, skippable)
+  //  ==3  → thanks, back to NEW
+  //  >=4  → thanks + review-link prompt IF the property has one set, else
+  //         same as ==3. No placeholder link is ever invented (CEO to confirm
+  //         WS_Properties field); if the property record has no 'Review Link'
+  //         field or it's blank, this step is skipped silently.
+  async recordRating(ctx) {
+    const rating = parseInt(ctx.text, 10);
+    const booking = await findBookingAwaitingRating(ctx.guest.id);
+    if (booking) {
+      const ratingWrite = await airtableUpdate('WS_Bookings', booking.id, { 'Rating': rating });
+      if (ratingWrite && ratingWrite.error) {
+        logToAxiom('error', 'rating_write_failed', {
+          phone: ctx.phone, bookingId: booking.id, rating, error: JSON.stringify(ratingWrite.error)
+        });
+        await updateGuestState(ctx.guest.id, { 'Session State': 'NEW' });
+        await sendWhatsApp(ctx.phone, msg('ratingWriteFailed'));
+        return;
+      }
+    } else {
+      logToAxiom('error', 'rating_no_booking_found', { phone: ctx.phone, guestId: ctx.guest.id, rating });
+    }
+
+    if (rating <= 2) {
+      await updateGuestState(ctx.guest.id, { 'Session State': 'AWAITING_RATING_FEEDBACK' });
+      logToAxiom('info', 'state_transition', { phone: ctx.phone, guestId: ctx.guest.id, from: 'AWAITING_RATING', to: 'AWAITING_RATING_FEEDBACK', rating });
+      await sendWhatsApp(ctx.phone, msg('ratingLowFollowup'));
+      return;
+    }
+
+    await updateGuestState(ctx.guest.id, { 'Session State': 'NEW' });
+    logToAxiom('info', 'state_transition', { phone: ctx.phone, guestId: ctx.guest.id, from: 'AWAITING_RATING', to: 'NEW', rating });
+
+    if (rating >= 4) {
+      const propertyId = bookingPropertyId(booking, ctx.property.id);
+      const propertyRecord = propertyId === ctx.property.id
+        ? ctx.property
+        : (await airtableGet('WS_Properties', `RECORD_ID() = '${propertyId}'`))[0];
+      const reviewLink = propertyRecord && propertyRecord.fields['Review Link'];
+      if (reviewLink) {
+        if (booking) await airtableUpdate('WS_Bookings', booking.id, { 'Review Prompted': true });
+        await sendWhatsApp(ctx.phone, msg('ratingHighReviewPrompt', { reviewLink }));
+      } else {
+        // No Review Link set on WS_Properties for this property — skip silently.
+        await sendWhatsApp(ctx.phone, msg('ratingHighThanks'));
+      }
+      return;
+    }
+
+    await sendWhatsApp(ctx.phone, msg('ratingMidThanks'));
+  },
+
+  // AWAITING_RATING_FEEDBACK + "skip"/"no"/"none": guest declines the optional follow-up.
+  async skipRatingFeedback(ctx) {
+    await updateGuestState(ctx.guest.id, { 'Session State': ctx.next });
+    logToAxiom('info', 'state_transition', { phone: ctx.phone, guestId: ctx.guest.id, from: 'AWAITING_RATING_FEEDBACK', to: ctx.next, reason: 'skipped' });
+  },
+
+  // AWAITING_RATING_FEEDBACK + free text: optional follow-up for a <=2 rating.
+  async recordRatingFeedback(ctx) {
+    const booking = await findBookingAwaitingRatingFeedback(ctx.guest.id);
+    if (booking) {
+      const feedbackWrite = await airtableUpdate('WS_Bookings', booking.id, { 'Rating Feedback': ctx.messageText });
+      if (feedbackWrite && feedbackWrite.error) {
+        logToAxiom('error', 'rating_feedback_write_failed', {
+          phone: ctx.phone, bookingId: booking.id, error: JSON.stringify(feedbackWrite.error)
+        });
+      }
+    } else {
+      logToAxiom('error', 'rating_feedback_no_booking_found', { phone: ctx.phone, guestId: ctx.guest.id });
+    }
+    await updateGuestState(ctx.guest.id, { 'Session State': ctx.next });
+    logToAxiom('info', 'state_transition', { phone: ctx.phone, guestId: ctx.guest.id, from: 'AWAITING_RATING_FEEDBACK', to: ctx.next });
+    await sendWhatsApp(ctx.phone, msg('ratingFeedbackThanks'));
   },
 
   // CHECKED_IN + "extend": B12. Push the checkout window out (uncapped, per the
@@ -3617,11 +3725,12 @@ async function settleAutoCheckout(booking, room, guest, propertyName, propertyId
   });
 
   if (guest) {
-    await updateGuestState(guest.id, { 'Session State': 'NEW' });
+    await updateGuestState(guest.id, { 'Session State': 'AWAITING_RATING' });
   }
   const guestPhone = guest && formatPhone(String(guest.fields['Phone Number'] || ''));
   if (guestPhone) {
     await sendWhatsApp(guestPhone, msg('autoCheckoutThanks', { propertyName }));
+    await sendWhatsApp(guestPhone, msg('ratingPrompt', { propertyName }));
   }
 }
 

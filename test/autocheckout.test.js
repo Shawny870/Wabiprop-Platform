@@ -84,13 +84,15 @@ test('B12: warned ≥15 min ago, no guest response → auto-checkout fires (same
   assert.strictEqual(ctx.airtable.log[0].fields['Status'], 'Checked Out');
   assert.strictEqual(ctx.airtable.log[0].fields['Checkout Confirmed'], true);
   assert.strictEqual(ctx.airtable.log[1].fields['Status'], 'Cleaning');
-  assert.strictEqual(ctx.airtable.log[3].fields['Session State'], 'NEW');
-  // Cleaner dispatched, then guest thanked.
-  assert.strictEqual(ctx.sends.length, 2);
+  assert.strictEqual(ctx.airtable.log[3].fields['Session State'], 'AWAITING_RATING');
+  // Cleaner dispatched, guest thanked, then prompted to rate the stay.
+  assert.strictEqual(ctx.sends.length, 3);
   assert.strictEqual(ctx.sends[0].to, '27821110000');
   assert.match(ctx.sends[0].body, /Room 1 has just been vacated/);
   assert.strictEqual(ctx.sends[1].to, '27821234567');
   assert.match(ctx.sends[1].body, /checked you out automatically/);
+  assert.strictEqual(ctx.sends[2].to, '27821234567');
+  assert.match(ctx.sends[2].body, /rate your stay/);
 });
 
 test('B12: boundary — warned exactly 15 min ago fires (>= grace)', async () => {
@@ -135,9 +137,9 @@ test('B10.5 Bug 2: auto-checkout dispatches ONLY the cleaner at the booking WS_P
   const summary = await wh.runAutoCheckout(NOW);
   assert.deepStrictEqual(summary, { warnings: 0, autoCheckouts: 1 });
 
-  // Exactly two sends: property A's cleaner, then the guest. Unscoped dispatch
-  // would make this four.
-  assert.strictEqual(ctx.sends.length, 2,
+  // Exactly three sends: property A's cleaner, then the guest thanks + rating
+  // prompt. Unscoped dispatch would add property B's cleaner too.
+  assert.strictEqual(ctx.sends.length, 3,
     `send count — actual: ${JSON.stringify(ctx.sends.map(s => s.to))}`);
   assert.strictEqual(ctx.sends[0].to, '27821110000');
   assert.match(ctx.sends[0].body, /Hi Thandi/);
@@ -167,9 +169,10 @@ test('B10.5 Bug 2: auto-checkout fails CLOSED — a booking with no resolvable p
   });
   const summary = await wh.runAutoCheckout(NOW);
   assert.deepStrictEqual(summary, { warnings: 0, autoCheckouts: 1 });
-  // The guest is still checked out and thanked; no cleaner is dispatched.
-  assert.strictEqual(ctx.sends.length, 1);
+  // The guest is still checked out, thanked, and prompted to rate; no cleaner is dispatched.
+  assert.strictEqual(ctx.sends.length, 2);
   assert.strictEqual(ctx.sends[0].to, '27821234567');
+  assert.strictEqual(ctx.sends[1].to, '27821234567');
 });
 
 test('B12: a date-less legacy Checked In row is ignored by the cron', async () => {
