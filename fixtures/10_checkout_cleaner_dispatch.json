@@ -1,5 +1,5 @@
 {
-  "name": "checkout: '1' in CHECKED_IN checks out booking, room to Cleaning, dispatches active cleaners, guest to NEW",
+  "name": "checkout: '1' in CHECKED_IN checks out booking, room to Cleaning, dispatches active cleaners, guest to AWAITING_RATING",
   "seed": {
     "WS_Properties": [
       { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222" } }
@@ -25,11 +25,12 @@
       { "op": "update", "table": "WS_Bookings", "id": "recB1", "fields": { "Status": "Checked Out", "Checkout Confirmed": true } },
       { "op": "update", "table": "WS_Rooms", "id": "recR1", "fields": { "Status": "Cleaning" } },
       { "op": "update", "table": "WS_Rooms", "id": "recR1", "fields": { "Cleaning Started At": "re:^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}" } },
-      { "op": "update", "table": "WS_Guests", "id": "recG1", "fields": { "Session State": "NEW" } }
+      { "op": "update", "table": "WS_Guests", "id": "recG1", "fields": { "Session State": "AWAITING_RATING" } }
     ],
     "sends": [
       { "to": "27821110000", "includes": ["Hi Thandi", "Room 1 has just been vacated", "Reply *DONE* when complete"] },
-      { "to": "27821234567", "includes": ["Thank you for staying with us at Test Lodge"] }
+      { "to": "27821234567", "includes": ["Thank you for staying with us at Test Lodge"] },
+      { "to": "27821234567", "includes": ["rate your stay"] }
     ]
   }
 }

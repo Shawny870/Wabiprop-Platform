@@ -332,7 +332,7 @@ test('checkout: a successful checkout is unaffected by the new checks', async ()
 
   assert.strictEqual(bookingRow(ctx, 'recBook1')['Status'], 'Checked Out');
   assert.strictEqual(roomRow(ctx, 'recR1')['Status'], 'Cleaning');
-  assert.strictEqual(guestRow(ctx, GUEST_PHONE).fields['Session State'], 'NEW');
+  assert.strictEqual(guestRow(ctx, GUEST_PHONE).fields['Session State'], 'AWAITING_RATING');
 });
 
 // ── extendStay (FATAL) ───────────────────────────────────────────────────
