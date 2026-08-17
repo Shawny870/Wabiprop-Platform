@@ -32,12 +32,29 @@ test('dailySummaryTemplateParams: returns exactly the 5 fields, in the locked or
     tomorrowsArrivals: [{ bookingId: 'a' }, { bookingId: 'b' }]
   });
   const params = wh.dailySummaryTemplateParams(summary);
-  assert.deepStrictEqual(params, ['Thandiwe Nkosi', 'Villa Liza Guest Lodge', '2026-08-20', '350.50', 2]);
+  assert.deepStrictEqual(params, ['Thandiwe Nkosi', 'Villa Liza Guest Lodge', '20 August 2026', '350.50', 2]);
 });
 
-test('dailySummaryTemplateParams: {{3}} date is passed through exactly as-is (ISO, unmodified)', () => {
+test('dailySummaryTemplateParams: {{3}} date is reformatted to human-readable, per CEO confirmation', () => {
   const params = wh.dailySummaryTemplateParams(baseSummary({ date: '2026-01-05' }));
-  assert.strictEqual(params[2], '2026-01-05');
+  assert.strictEqual(params[2], '5 January 2026');
+});
+
+test('dailySummaryTemplateParams: does NOT mutate summary.date — other consumers depend on the ISO string', () => {
+  const summary = baseSummary({ date: '2026-03-09' });
+  wh.dailySummaryTemplateParams(summary);
+  assert.strictEqual(summary.date, '2026-03-09');
+});
+
+test('formatHumanDate: renders D Month YYYY from an ISO YYYY-MM-DD date', () => {
+  assert.strictEqual(wh.formatHumanDate('2026-08-20'), '20 August 2026');
+  assert.strictEqual(wh.formatHumanDate('2026-01-05'), '5 January 2026');
+  assert.strictEqual(wh.formatHumanDate('2026-12-31'), '31 December 2026');
+});
+
+test('formatHumanDate: throws on a non-YYYY-MM-DD input rather than producing garbage', () => {
+  assert.throws(() => wh.formatHumanDate('20 August 2026'), /expected YYYY-MM-DD/);
+  assert.throws(() => wh.formatHumanDate(''), /expected YYYY-MM-DD/);
 });
 
 test('dailySummaryTemplateParams: {{5}} is tomorrowsArrivals.length, not the raw array', () => {

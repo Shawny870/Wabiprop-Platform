@@ -4004,6 +4004,26 @@ async function resolveOwnerName(property) {
   return (owners[0] && owners[0].fields['Owner Name']) || null;
 }
 
+const MONTH_FULL = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+
+// CEO-confirmed: the daily-summary template needs a human-readable date
+// (e.g. "20 August 2026"), not the raw ISO YYYY-MM-DD aggregateDailySummary
+// produces (~webhook.js:3979). Reformats ONLY for this template's output —
+// deliberately does NOT touch `summary.date` itself, since other consumers
+// of aggregateDailySummary's output (the daily_summary_payload Axiom log,
+// the manual report-trigger endpoint) may depend on the ISO string staying
+// intact. Parses the Y-M-D components directly rather than routing through
+// formatSastDateTime, which formats a UTC *instant* with a SAST time-of-day
+// — not what a bare calendar date needs — but reuses this file's existing
+// month-name-array convention (MONTH_ABBR, above) rather than inventing an
+// unrelated approach.
+function formatHumanDate(isoYmd) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(isoYmd);
+  if (!m) throw new Error(`formatHumanDate: expected YYYY-MM-DD, got '${isoYmd}'`);
+  const [, y, mo, d] = m;
+  return `${Number(d)} ${MONTH_FULL[Number(mo) - 1]} ${y}`;
+}
+
 // paymentDeltaTotal, unlike Reception's amountDue (always >= 0, so
 // notifyReceptionOfPayment's params never need a sign), CAN be negative — an
 // overpayment. formatAmount() alone (two decimals, no symbol, no sign) would
@@ -4030,10 +4050,10 @@ function formatSignedAmount(value) {
 // itself is left untouched (sync, already tested, already reused by the
 // manual report-trigger endpoint) rather than made async to fetch it inline.
 //
-// {{3}} date is passed through exactly as aggregateDailySummary produces it
-// today — ISO YYYY-MM-DD (webhook.js ~3979). Whether that's acceptable for the
-// approved template, or whether it needs human-readable reformatting, is a
-// CEO call not made here — see PR body.
+// {{3}} date: CEO-confirmed the template needs human-readable output (e.g.
+// "20 August 2026"), not the raw ISO YYYY-MM-DD aggregateDailySummary
+// produces — reformatted here via formatHumanDate, above. summary.date
+// itself is left untouched.
 //
 // Throws rather than silently defaulting if ownerName is missing: sending
 // "undefined" or a guessed placeholder into a live WhatsApp template to a
@@ -4048,7 +4068,7 @@ function dailySummaryTemplateParams(summary) {
   return [
     summary.ownerName,
     summary.propertyName,
-    summary.date,
+    formatHumanDate(summary.date),
     formatSignedAmount(summary.outstandingPayments.paymentDeltaTotal),
     summary.tomorrowsArrivals.length
   ];
@@ -4475,4 +4495,5 @@ module.exports.sendOwnerSummary = sendOwnerSummary;
 // unit testing per the TODO at sendDailySummary; NOT wired to a live send.
 module.exports.resolveOwnerName = resolveOwnerName;
 module.exports.formatSignedAmount = formatSignedAmount;
+module.exports.formatHumanDate = formatHumanDate;
 module.exports.dailySummaryTemplateParams = dailySummaryTemplateParams;
