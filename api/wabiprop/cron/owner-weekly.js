@@ -37,8 +37,9 @@
 //      the exact same phone string as WP_Owner."Landlord Whatsapp" for the same
 //      person -- known fragility, logged, no fix scheduled. Same class of risk as
 //      the Property Name string-match dependency from the dashboard build.
-//   4. This endpoint is unauthenticated -- logged, add a CRON_SECRET gate before
-//      real launch, not required for pilot testing.
+//   4. CRON_SECRET gate added below (this comment predates it and is now
+//      historical, not current — left as-is since it documents the prior
+//      known gap rather than current behaviour).
 
 const { airtableGet, sendWhatsApp, logToAxiom, alertShawn } = require('../_lib/cronHelpers');
 
@@ -54,6 +55,16 @@ function getPriorMonthRange(now) {
 }
 
 module.exports = async function handler(req, res) {
+  // CRON_SECRET gate — same fail-closed Authorization: Bearer check as
+  // api/wabistay/cron/daily-summary.js, inlined (no wrapper/webhook.js
+  // split in this file to house it separately). See agent-morning-summary.js
+  // for the same note.
+  const secret = process.env.CRON_SECRET;
+  const auth = req.headers.authorization || '';
+  if (!secret || auth !== `Bearer ${secret}`) {
+    return res.status(401).json({ ok: false, error: 'unauthorized' });
+  }
+
   console.log('[Cron: owner-weekly] Starting run');
   const { monthName, isoDateOnly } = getPriorMonthRange(new Date());
   const results = [];

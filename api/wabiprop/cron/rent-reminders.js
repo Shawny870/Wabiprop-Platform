@@ -68,6 +68,16 @@ const REMINDER_COPY = {
 };
 
 module.exports = async function handler(req, res) {
+  // CRON_SECRET gate — same fail-closed Authorization: Bearer check as
+  // api/wabistay/cron/daily-summary.js, inlined (no wrapper/webhook.js
+  // split in this file to house it separately). See agent-morning-summary.js
+  // for the same note.
+  const secret = process.env.CRON_SECRET;
+  const auth = req.headers.authorization || '';
+  if (!secret || auth !== `Bearer ${secret}`) {
+    return res.status(401).json({ ok: false, error: 'unauthorized' });
+  }
+
   console.log('[Cron: rent-reminders] Starting run');
   const today = getTodaySAST();
   const results = [];
