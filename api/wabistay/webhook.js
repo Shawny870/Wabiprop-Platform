@@ -1409,6 +1409,43 @@ const guards = {
     ctx.cleaner = cleanerRecords[0];
     ctx.matchedCleaningRoom = match;
     return true;
+  },
+
+  // Universal escape hatch for the guest-side AWAITING_* limbo states
+  // (AWAITING_STAY_TYPE / AWAITING_DETAILS / AWAITING_OCCUPANCY /
+  // AWAITING_HOURLY_DETAILS / AWAITING_HOURLY_DURATION / AWAITING_ETA). Found
+  // via live testing: a guest in one of these states whose input never
+  // satisfies that state's own free-text parser (wrong format, or a reply
+  // meant for a different flow entirely) gets the same reprompt forever —
+  // states.json gives each of them exactly one "*" row pointing at a parser
+  // that only advances state on a successful parse, so a guest who can't
+  // produce parseable input has no way out short of a manual Airtable edit.
+  // No keyword anywhere in any of these states' own input arrays offers an
+  // exit, and the abandonment sweep (runEnquiryAbandonment, ENQUIRY LOGGING
+  // section below) only ever WROTE a report row, never reset the guest —
+  // see the fix alongside it.
+  //
+  // Registered in the GLOBAL array (states.json), so this is evaluated for
+  // EVERY inbound message before any per-state routing happens at all — the
+  // exact "checked before the state's own parsing logic" requirement, for
+  // free, from the existing global-then-per-state dispatch order. inputs is
+  // an explicit ["cancel","menu","hi"] list (not "*"), matched by
+  // handleMessage's own pre-filter before this guard even runs — the guard's
+  // only job is to confirm the sender is actually IN one of these limbo
+  // states, so a CONFIRMED/CHECKED_IN guest's "cancel"/"hi" (which already
+  // mean something real there — an active booking, not a stuck draft) is
+  // untouched and keeps going through its own state's row as before.
+  //
+  // Exact whole-message match only (ctx.text is already trim+lowercased by
+  // handleMessage) — not a substring/\b test — specifically so a guest whose
+  // real name or arrival note merely CONTAINS one of these words (unlikely
+  // but flagged: a guest named "Candace" does not collide since "candace"
+  // does not contain "cancel" as a substring; a guest typing an arrival note
+  // that IS literally the word "cancel"/"menu"/"hi" and nothing else would,
+  // but that reads as them wanting out anyway, same intent this exists for).
+  async senderStuckInAwaitingState(ctx) {
+    const state = ctx.guest && ctx.guest.fields['Session State'];
+    return !!state && state.startsWith('AWAITING_');
   }
 };
 
@@ -3670,6 +3707,19 @@ async function runEnquiryAbandonment(now = new Date()) {
       bookingType: pending && pending.fields['Booking Type']
     });
     logToAxiom('info', 'enquiry_abandoned', { phone, guestId: guest.id, sessionState: guest.fields['Session State'] });
+
+    // Found via live testing (recDAQmhoe4aFHvFy stuck in AWAITING_HOURLY_DETAILS
+    // with no escape): this used to only LOG Abandoned, never reset the guest —
+    // the sweep reported the problem forever without ever fixing it. Reset here
+    // so their next inbound message (whenever it comes) hits the normal NEW-guest
+    // greeting instead of the same stale per-state parser they went silent on.
+    // No proactive WhatsApp send from here — same 24h/template-window reasoning
+    // used elsewhere in this file (a guest silent for 24h+ is outside Meta's
+    // free-form service window; a template would be needed to reach them
+    // unprompted, and none exists for this). updateGuestState logs its own
+    // guest_state_write_failed on error — non-fatal, matches this sweep's
+    // existing best-effort posture throughout.
+    await updateGuestState(guest.id, { 'Session State': 'NEW' });
     summary.abandoned++;
   }
   return summary;

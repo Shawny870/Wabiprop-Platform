@@ -155,3 +155,72 @@ test('B19: the sweep leaves a still-active (recent) draft guest alone', async ()
   const summary = await runEnquiryAbandonment(now);
   assert.strictEqual(summary.abandoned, 0);
 });
+
+// ── the sweep must actually RESET the guest, not just log it ────────────────
+// Found alongside the AWAITING_HOURLY_DETAILS stuck-state bug (recDAQmhoe4aFHvFy):
+// runEnquiryAbandonment logged 'Abandoned' but never wrote Session State back,
+// so even the 3 states it already covers (AWAITING_OCCUPANCY, AWAITING_ETA,
+// AWAITING_HOURLY_DURATION) left the guest stuck forever — the sweep only ever
+// reported the problem, never fixed it.
+
+test('B19 fix: the sweep resets a stale AWAITING_ETA guest to NEW, not just logs Abandoned', async () => {
+  const now = new Date('2026-07-22T12:00:00.000Z');
+  const stale = new Date(now.getTime() - 25 * 60 * 60 * 1000).toISOString();
+  const ctx = makeCtx({
+    WS_Properties: [property], WS_Rooms: [room],
+    WS_Guests: [{ id: 'recG1', fields: { 'Guest Name': 'John Smith', 'Phone Number': FROM, 'Session State': 'AWAITING_ETA', 'Last Inbound At': stale } }],
+    WS_Bookings: [{ id: 'recB1', fields: { 'Guest': ['recG1'], 'Status': 'Enquiry', 'Booking Type': 'Overnight', 'Room': ['recR1'], 'Check In': '2026-12-01T12:00:00.000Z', 'Check Out': '2026-12-03T08:00:00.000Z' } }],
+    WS_Enquiries: [], WS_Cleaners: []
+  });
+  const summary = await runEnquiryAbandonment(now);
+  assert.strictEqual(summary.abandoned, 1);
+  const guest = ctx.airtable.tables['WS_Guests'].find(g => g.id === 'recG1');
+  assert.strictEqual(guest.fields['Session State'], 'NEW');
+  // No proactive WhatsApp send — the guest is 24h+ silent, outside Meta's
+  // free-form service window; reset only takes effect on THEIR next message.
+  assert.strictEqual(ctx.sends.length, 0);
+});
+
+test('B19 fix: the sweep resets a stale AWAITING_OCCUPANCY guest to NEW', async () => {
+  const now = new Date('2026-07-22T12:00:00.000Z');
+  const stale = new Date(now.getTime() - 25 * 60 * 60 * 1000).toISOString();
+  const ctx = makeCtx({
+    WS_Properties: [property], WS_Rooms: [room],
+    WS_Guests: [{ id: 'recG1', fields: { 'Guest Name': 'John Smith', 'Phone Number': FROM, 'Session State': 'AWAITING_OCCUPANCY', 'Last Inbound At': stale } }],
+    WS_Bookings: [{ id: 'recB1', fields: { 'Guest': ['recG1'], 'Status': 'Enquiry', 'Booking Type': 'Overnight', 'Room': ['recR1'], 'Check In': '2026-12-01T12:00:00.000Z', 'Check Out': '2026-12-03T08:00:00.000Z' } }],
+    WS_Enquiries: [], WS_Cleaners: []
+  });
+  const summary = await runEnquiryAbandonment(now);
+  assert.strictEqual(summary.abandoned, 1);
+  const guest = ctx.airtable.tables['WS_Guests'].find(g => g.id === 'recG1');
+  assert.strictEqual(guest.fields['Session State'], 'NEW');
+});
+
+test('B19 fix: the sweep resets a stale AWAITING_HOURLY_DURATION guest to NEW', async () => {
+  const now = new Date('2026-07-22T12:00:00.000Z');
+  const stale = new Date(now.getTime() - 25 * 60 * 60 * 1000).toISOString();
+  const ctx = makeCtx({
+    WS_Properties: [property], WS_Rooms: [room],
+    WS_Guests: [{ id: 'recG1', fields: { 'Guest Name': 'John Smith', 'Phone Number': FROM, 'Session State': 'AWAITING_HOURLY_DURATION', 'Last Inbound At': stale } }],
+    WS_Bookings: [{ id: 'recB1', fields: { 'Guest': ['recG1'], 'Status': 'Enquiry', 'Booking Type': 'Hourly', 'Room': ['recR1'], 'Check In': '2026-12-01T12:00:00.000Z' } }],
+    WS_Enquiries: [], WS_Cleaners: []
+  });
+  const summary = await runEnquiryAbandonment(now);
+  assert.strictEqual(summary.abandoned, 1);
+  const guest = ctx.airtable.tables['WS_Guests'].find(g => g.id === 'recG1');
+  assert.strictEqual(guest.fields['Session State'], 'NEW');
+});
+
+test('B19 fix: a guest the sweep correctly skips (recent activity) is NOT reset', async () => {
+  const now = new Date('2026-07-22T12:00:00.000Z');
+  const recent = new Date(now.getTime() - 60 * 60 * 1000).toISOString();
+  const ctx = makeCtx({
+    WS_Properties: [property], WS_Rooms: [room],
+    WS_Guests: [{ id: 'recG1', fields: { 'Guest Name': 'John Smith', 'Phone Number': FROM, 'Session State': 'AWAITING_ETA', 'Last Inbound At': recent } }],
+    WS_Bookings: [{ id: 'recB1', fields: { 'Guest': ['recG1'], 'Status': 'Enquiry', 'Booking Type': 'Overnight', 'Room': ['recR1'], 'Check In': '2026-12-01T12:00:00.000Z', 'Check Out': '2026-12-03T08:00:00.000Z' } }],
+    WS_Enquiries: [], WS_Cleaners: []
+  });
+  await runEnquiryAbandonment(now);
+  const guest = ctx.airtable.tables['WS_Guests'].find(g => g.id === 'recG1');
+  assert.strictEqual(guest.fields['Session State'], 'AWAITING_ETA', 'untouched — sweep correctly held off, so no reset either');
+});

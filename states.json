@@ -6,7 +6,8 @@
     { "inputs": "*", "guard": "senderIsAuthorizedPaid", "action": "paidBooking" },
     { "inputs": ["done"], "guard": "senderIsCleaner", "action": "cleanerDone" },
     { "inputs": "*", "guard": "senderIsCleanerStartingRoom", "action": "startCleaningJob" },
-    { "inputs": "*", "guard": "senderIsCleanerNamingRoom", "action": "cleanerRoomReply" }
+    { "inputs": "*", "guard": "senderIsCleanerNamingRoom", "action": "cleanerRoomReply" },
+    { "inputs": ["cancel", "menu", "hi"], "guard": "senderStuckInAwaitingState", "action": "greetAndAskStayType", "next": "AWAITING_STAY_TYPE" }
   ],
 
   "states": {
