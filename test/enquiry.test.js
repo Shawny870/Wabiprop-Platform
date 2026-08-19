@@ -95,7 +95,7 @@ test('B19: staleness sweep logs Abandoned for a stale draft-bearing guest, prope
   assert.deepStrictEqual(enquiries(ctx)[0].fields['Property'], ['recP1']);
 });
 
-test('B19: the sweep does NOT double-log a guest who already reached a terminal on their last message', async () => {
+test('B19: the sweep does NOT double-log a guest who already reached a terminal on their last message, but STILL resets them (reset/log are decoupled)', async () => {
   const now = new Date('2026-07-22T12:00:00.000Z');
   const stale = new Date(now.getTime() - 25 * 60 * 60 * 1000).toISOString();
   const ctx = makeCtx({
@@ -107,8 +107,14 @@ test('B19: the sweep does NOT double-log a guest who already reached a terminal 
     WS_Cleaners: []
   });
   const summary = await runEnquiryAbandonment(now);
-  assert.strictEqual(summary.abandoned, 0);       // guard held — no Abandoned added
-  assert.strictEqual(enquiries(ctx).length, 1);   // still just the seeded row
+  // Pre-decoupling this asserted summary.abandoned === 0 here — that conflated
+  // "don't double-log" with "don't reset". They're now separate concerns: the
+  // guest is genuinely stale and still gets reset (summary.abandoned counts
+  // resets), the dedup guard only suppresses the redundant REPORT row.
+  assert.strictEqual(summary.abandoned, 1);
+  assert.strictEqual(enquiries(ctx).length, 1, 'no double-log — still just the seeded row');
+  const guest = ctx.airtable.tables['WS_Guests'].find(g => g.id === 'recG1');
+  assert.strictEqual(guest.fields['Session State'], 'NEW', 'reset still happens even though the log was suppressed');
 });
 
 test('B10.5 BUG 1: with 120+ existing enquiry rows, completing a booking still writes exactly ONE Booked row (pagination)', async () => {
@@ -223,4 +229,88 @@ test('B19 fix: a guest the sweep correctly skips (recent activity) is NOT reset'
   await runEnquiryAbandonment(now);
   const guest = ctx.airtable.tables['WS_Guests'].find(g => g.id === 'recG1');
   assert.strictEqual(guest.fields['Session State'], 'AWAITING_ETA', 'untouched — sweep correctly held off, so no reset either');
+});
+
+// ── sweep coverage extended to AWAITING_DETAILS / AWAITING_HOURLY_DETAILS ───
+// Closing the last gap from the stuck-state investigation. Deliberately
+// modeling the REAL stuck-guest data shape, not the original 3 states' shape:
+// Guest Name still 'Unknown' (never successfully parsed), no WS_Bookings row
+// at all (collectDetails/collectHourlyDetails only create one on a
+// successful parse — the same event that would have moved them past this
+// state), and an existing deduped 'Invalid Input' enquiry row from their
+// first failed attempt. All three would have blocked a naive un-decoupled
+// reset — these tests are what actually prove the fix, not just that the
+// state name is in the array.
+
+test('B19 fix (new coverage): the sweep resets a stale AWAITING_DETAILS guest with NO name and NO booking — the realistic stuck-guest shape', async () => {
+  const now = new Date('2026-07-22T12:00:00.000Z');
+  const stale = new Date(now.getTime() - 25 * 60 * 60 * 1000).toISOString();
+  const ctx = makeCtx({
+    WS_Properties: [property], WS_Rooms: [room],
+    WS_Guests: [{ id: 'recG1', fields: { 'Guest Name': 'Unknown', 'Phone Number': FROM, 'Session State': 'AWAITING_DETAILS', 'Last Inbound At': stale } }],
+    // No WS_Bookings row at all — collectDetails never got far enough to create one.
+    WS_Bookings: [],
+    // The 'Invalid Input' row every failed parse attempt logs, deduped to one,
+    // created at/after the guest's (stamped-at-entry) Last Inbound At — this is
+    // exactly what would trip the old single "already covered" gate forever.
+    WS_Enquiries: [{ id: 'recE0', fields: { 'Phone Number': FROM, 'Property': ['recP1'], 'Outcome': 'Invalid Input', 'Created At': stale } }],
+    WS_Cleaners: []
+  });
+  const summary = await runEnquiryAbandonment(now);
+  assert.strictEqual(summary.abandoned, 1, 'reset still happens despite Unknown name, no booking, and a pre-existing Invalid Input row');
+  const guest = ctx.airtable.tables['WS_Guests'].find(g => g.id === 'recG1');
+  assert.strictEqual(guest.fields['Session State'], 'NEW');
+  // No second enquiry row — the log correctly stayed suppressed (dedup guard
+  // still does its job), only the reset went through.
+  assert.strictEqual(enquiries(ctx).length, 1);
+});
+
+test('B19 fix (new coverage): the sweep resets a stale AWAITING_HOURLY_DETAILS guest with NO name and NO booking — the ORIGINAL bug\'s exact shape (recDAQmhoe4aFHvFy)', async () => {
+  const now = new Date('2026-07-22T12:00:00.000Z');
+  const stale = new Date(now.getTime() - 25 * 60 * 60 * 1000).toISOString();
+  const ctx = makeCtx({
+    WS_Properties: [property], WS_Rooms: [room],
+    WS_Guests: [{ id: 'recG1', fields: { 'Guest Name': 'Unknown', 'Phone Number': FROM, 'Session State': 'AWAITING_HOURLY_DETAILS', 'Last Inbound At': stale } }],
+    WS_Bookings: [],
+    WS_Enquiries: [],
+    WS_Cleaners: []
+  });
+  const summary = await runEnquiryAbandonment(now);
+  assert.strictEqual(summary.abandoned, 1);
+  const guest = ctx.airtable.tables['WS_Guests'].find(g => g.id === 'recG1');
+  assert.strictEqual(guest.fields['Session State'], 'NEW');
+});
+
+test('B19 fix (new coverage): a RECENT (not yet 24h stale) AWAITING_HOURLY_DETAILS guest is left alone — same staleness gate as every other state', async () => {
+  const now = new Date('2026-07-22T12:00:00.000Z');
+  const recent = new Date(now.getTime() - 60 * 60 * 1000).toISOString();
+  const ctx = makeCtx({
+    WS_Properties: [property], WS_Rooms: [room],
+    WS_Guests: [{ id: 'recG1', fields: { 'Guest Name': 'Unknown', 'Phone Number': FROM, 'Session State': 'AWAITING_HOURLY_DETAILS', 'Last Inbound At': recent } }],
+    WS_Bookings: [], WS_Enquiries: [], WS_Cleaners: []
+  });
+  const summary = await runEnquiryAbandonment(now);
+  assert.strictEqual(summary.abandoned, 0);
+  const guest = ctx.airtable.tables['WS_Guests'].find(g => g.id === 'recG1');
+  assert.strictEqual(guest.fields['Session State'], 'AWAITING_HOURLY_DETAILS');
+});
+
+test('B19 fix (new coverage): the sweep does NOT touch CHECKED_IN or any other out-of-scope state, even if stale', async () => {
+  const now = new Date('2026-07-22T12:00:00.000Z');
+  const stale = new Date(now.getTime() - 25 * 60 * 60 * 1000).toISOString();
+  const ctx = makeCtx({
+    WS_Properties: [property], WS_Rooms: [room],
+    WS_Guests: [
+      { id: 'recGCheckedIn', fields: { 'Guest Name': 'Active Guest', 'Phone Number': '27822223333', 'Session State': 'CHECKED_IN', 'Last Inbound At': stale } },
+      { id: 'recGConfirmed', fields: { 'Guest Name': 'Waiting Guest', 'Phone Number': '27822224444', 'Session State': 'CONFIRMED', 'Last Inbound At': stale } },
+      { id: 'recGNew', fields: { 'Guest Name': 'Unknown', 'Phone Number': '27822225555', 'Session State': 'NEW', 'Last Inbound At': stale } }
+    ],
+    WS_Bookings: [], WS_Enquiries: [], WS_Cleaners: []
+  });
+  const summary = await runEnquiryAbandonment(now);
+  assert.strictEqual(summary.abandoned, 0, 'none of these 3 states are in ENQUIRY_ABANDON_STATES — the query itself should never even return them');
+  const guests = ctx.airtable.tables['WS_Guests'];
+  assert.strictEqual(guests.find(g => g.id === 'recGCheckedIn').fields['Session State'], 'CHECKED_IN');
+  assert.strictEqual(guests.find(g => g.id === 'recGConfirmed').fields['Session State'], 'CONFIRMED');
+  assert.strictEqual(guests.find(g => g.id === 'recGNew').fields['Session State'], 'NEW');
 });

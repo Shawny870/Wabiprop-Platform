@@ -2188,14 +2188,14 @@ const actions = {
         // property has not configured short stays. Route to the overnight
         // path rather than dead-ending, zero rate quoted.
         logToAxiom('info', 'hourly_not_configured', { phone: ctx.phone, propertyId: ctx.property.id });
-        await updateGuestState(ctx.guest.id, { 'Session State': 'AWAITING_DETAILS' });
+        await updateGuestState(ctx.guest.id, { 'Session State': 'AWAITING_DETAILS', 'Last Inbound At': new Date().toISOString() });
         await sendWhatsApp(ctx.phone, msg('hourlyUnavailable', {
           propertyName: ctx.property.fields['Property Name']
         }));
         return;
       }
 
-      await updateGuestState(ctx.guest.id, { 'Session State': 'AWAITING_HOURLY_DETAILS' });
+      await updateGuestState(ctx.guest.id, { 'Session State': 'AWAITING_HOURLY_DETAILS', 'Last Inbound At': new Date().toISOString() });
       const hourlyRateText = HOURLY_DURATIONS
         .map(hours => `• ${hours} hour${hours === 1 ? '' : 's'}: R${rates[hours]}`)
         .join('\n');
@@ -2220,7 +2220,7 @@ const actions = {
           ).join('\n')
         : '• Contact us for current rates';
 
-      await updateGuestState(ctx.guest.id, { 'Session State': 'AWAITING_DETAILS' });
+      await updateGuestState(ctx.guest.id, { 'Session State': 'AWAITING_DETAILS', 'Last Inbound At': new Date().toISOString() });
       await sendWhatsApp(ctx.phone, msg('overnightRatesMenu', {
         propertyName: ctx.property.fields['Property Name'],
         rateText
@@ -2388,7 +2388,7 @@ const actions = {
         // to prevent, just reached via the race instead of a create failure —
         // so it is reset here rather than left for PR4, which owns the
         // create-fails-outright case, not this one.
-        await updateGuestState(ctx.guest.id, { 'Session State': 'AWAITING_DETAILS' });
+        await updateGuestState(ctx.guest.id, { 'Session State': 'AWAITING_DETAILS', 'Last Inbound At': new Date().toISOString() });
         logToAxiom('warn', 'booking_race_lost', {
           phone: ctx.phone, bookingId: booking.id, roomId: room.id,
           checkIn: checkInIso, checkOut: checkOutIso,
@@ -2434,7 +2434,7 @@ const actions = {
     // plainly, and skip the owner notify — there is nothing for the owner to
     // action.
     if (!booking.id) {
-      await updateGuestState(ctx.guest.id, { 'Session State': 'AWAITING_DETAILS' });
+      await updateGuestState(ctx.guest.id, { 'Session State': 'AWAITING_DETAILS', 'Last Inbound At': new Date().toISOString() });
       await sendWhatsApp(ctx.phone, msg('bookingCreateFailed', { guestName }));
       return;
     }
@@ -2556,7 +2556,7 @@ const actions = {
       // Property has not configured short stays — fail closed, never quote R0.
       logToAxiom('info', 'hourly_not_configured', { phone: ctx.phone, propertyId: ctx.property.id });
       if (ctx.guest) {
-        await updateGuestState(ctx.guest.id, { 'Session State': 'AWAITING_DETAILS' });
+        await updateGuestState(ctx.guest.id, { 'Session State': 'AWAITING_DETAILS', 'Last Inbound At': new Date().toISOString() });
       } else {
         // Rule 30 step 2, slice 2: same NON-FATAL class, same reasoning as
         // greetAndAskStayType's equivalent first-contact create.
@@ -2565,6 +2565,7 @@ const actions = {
           'Phone Number': ctx.phone,
           'Guest Type': 'WhatsApp',
           'Session State': 'AWAITING_DETAILS',
+          'Last Inbound At': new Date().toISOString(),
           'First Visit': new Date().toISOString().split('T')[0]
         });
         if (guestCreate && guestCreate.error) {
@@ -2580,7 +2581,7 @@ const actions = {
     }
 
     if (ctx.guest) {
-      await updateGuestState(ctx.guest.id, { 'Session State': ctx.next });
+      await updateGuestState(ctx.guest.id, { 'Session State': ctx.next, 'Last Inbound At': new Date().toISOString() });
     } else {
       // Rule 30 step 2, slice 2: same NON-FATAL class, same reasoning as
       // greetAndAskStayType's equivalent first-contact create.
@@ -2589,6 +2590,7 @@ const actions = {
         'Phone Number': ctx.phone,
         'Guest Type': 'WhatsApp',
         'Session State': ctx.next,
+        'Last Inbound At': new Date().toISOString(),
         'First Visit': new Date().toISOString().split('T')[0]
       });
       if (guestCreate && guestCreate.error) {
@@ -2647,7 +2649,7 @@ const actions = {
     const rates = hourlyRates(ctx.property);
     if (!rates) {
       // Rates removed mid-conversation — same fail-closed redirect as entry.
-      await updateGuestState(ctx.guest.id, { 'Session State': 'AWAITING_DETAILS' });
+      await updateGuestState(ctx.guest.id, { 'Session State': 'AWAITING_DETAILS', 'Last Inbound At': new Date().toISOString() });
       await sendWhatsApp(ctx.phone, msg('hourlyUnavailable', { propertyName: ctx.property.fields['Property Name'] }));
       return;
     }
@@ -2690,7 +2692,7 @@ const actions = {
         phone: ctx.phone, guestName,
         error: bookingResult && bookingResult.error ? JSON.stringify(bookingResult.error) : null
       });
-      await updateGuestState(ctx.guest.id, { 'Session State': 'AWAITING_DETAILS' });
+      await updateGuestState(ctx.guest.id, { 'Session State': 'AWAITING_DETAILS', 'Last Inbound At': new Date().toISOString() });
       await sendWhatsApp(ctx.phone, msg('hourlyBookingCreateFailed', { guestName }));
       return;
     }
@@ -2726,7 +2728,7 @@ const actions = {
           });
         }
       }
-      await updateGuestState(ctx.guest.id, { 'Session State': 'AWAITING_DETAILS' });
+      await updateGuestState(ctx.guest.id, { 'Session State': 'AWAITING_DETAILS', 'Last Inbound At': new Date().toISOString() });
       logToAxiom('info', 'hourly_redirect_overnight', { phone: ctx.phone, requestedHours: choice });
       await sendWhatsApp(ctx.phone, msg('hourlyTooLong'));
       return;
@@ -2737,7 +2739,7 @@ const actions = {
       // Unreadable choice, or the flow lost its footing (no pending booking,
       // rates pulled mid-conversation). Re-offer rather than dead-end.
       if (!checkInIso || !rates) {
-        await updateGuestState(ctx.guest.id, { 'Session State': 'AWAITING_DETAILS' });
+        await updateGuestState(ctx.guest.id, { 'Session State': 'AWAITING_DETAILS', 'Last Inbound At': new Date().toISOString() });
         await sendWhatsApp(ctx.phone, msg('hourlyUnavailable', { propertyName: ctx.property.fields['Property Name'] }));
         return;
       }
@@ -2762,7 +2764,7 @@ const actions = {
       });
       // Booking stays pending with Check Out blank — inert, and reused when the
       // guest offers a different time.
-      await updateGuestState(ctx.guest.id, { 'Session State': 'AWAITING_HOURLY_DETAILS' });
+      await updateGuestState(ctx.guest.id, { 'Session State': 'AWAITING_HOURLY_DETAILS', 'Last Inbound At': new Date().toISOString() });
       // B19: B9's hourly availability check refused — turned away, Hourly.
       await logEnquiry(ctx.property, ctx.phone, 'No Availability', {
         checkInIso, checkOutIso, bookingType: 'Hourly'
@@ -2834,7 +2836,7 @@ const actions = {
       // Same re-offer the existing no-availability branch above uses (line
       // ~2139) — the booking stays inert with Check Out cleared conceptually
       // by virtue of being Cancelled, and the guest can offer a different time.
-      await updateGuestState(ctx.guest.id, { 'Session State': 'AWAITING_HOURLY_DETAILS' });
+      await updateGuestState(ctx.guest.id, { 'Session State': 'AWAITING_HOURLY_DETAILS', 'Last Inbound At': new Date().toISOString() });
       logToAxiom('warn', 'booking_race_lost', {
         phone: ctx.phone, bookingId: pending.id, roomId: room.id,
         checkIn: checkInIso, checkOut: checkOutIso,
@@ -3617,11 +3619,19 @@ async function runAutoCheckout(now = new Date()) {
 // silent) that reuses the auto-checkout cron rather than adding a second one.
 
 const ENQUIRY_ABANDON_MS = 24 * 60 * 60 * 1000; // 24h since last inbound with no terminal outcome
-// A guest who produced a valid booking DRAFT (occupancy/eta/duration) but went
-// silent is Abandoned. (A guest still stuck at the details step — the parser kept
-// re-prompting — is logged Invalid Input immediately at that reject, which also
-// keeps ctx.property in hand for scoping; the sweep only handles Abandoned.)
-const ENQUIRY_ABANDON_STATES = ['AWAITING_OCCUPANCY', 'AWAITING_ETA', 'AWAITING_HOURLY_DURATION'];
+// Originally just the 3 "produced a valid booking DRAFT" states. Extended to
+// all 5 AWAITING_* limbo states (closing the last gap from the stuck-state
+// investigation, recDAQmhoe4aFHvFy) — AWAITING_DETAILS/AWAITING_HOURLY_DETAILS
+// added so the sweep also unsticks a guest who never even got past the
+// details-capture step, not just one who has a draft in progress. See
+// runEnquiryAbandonment for why these two needed more than just adding their
+// names here: their data shape differs from the original 3 in ways that
+// would have made the RESET silently never fire if the loop below weren't
+// restructured to stop gating it on those differences.
+const ENQUIRY_ABANDON_STATES = [
+  'AWAITING_OCCUPANCY', 'AWAITING_ETA', 'AWAITING_HOURLY_DURATION',
+  'AWAITING_DETAILS', 'AWAITING_HOURLY_DETAILS'
+];
 
 // Writes exactly one WS_Enquiries row. Property-scoped via property.id (JS-side
 // record-id link, same idiom as B11). Partial rows are allowed — an attempt that
@@ -3670,10 +3680,34 @@ async function logEnquiry(property, phone, outcome, opts = {}) {
   return true;
 }
 
-// Staleness sweep for Abandoned. Runs on the auto-checkout cron. A guest sitting
-// in a draft-bearing enquiry state, who provided a name and whose last inbound is
-// older than the window, with no enquiry row already covering this attempt, is
-// logged Abandoned. Property is recovered from the guest's pending booking's room.
+// Staleness sweep. Runs on the auto-checkout cron. Two DECOUPLED jobs per
+// stale guest, in order:
+//   1. RESET — unconditional beyond staleness. A guest sitting in any of the
+//      5 AWAITING_* states this long has nothing to lose from starting over,
+//      whether or not they ever gave a name or produced a bookable draft.
+//      This is the actual user-facing fix (closing the stuck-state gap,
+//      recDAQmhoe4aFHvFy) and always runs when a guest is stale.
+//   2. LOG — best-effort 'Abandoned' WS_Enquiries report row, same
+//      preconditions as before this change (gave a name, no terminal already
+//      covering this attempt, a property can be recovered). These exist for
+//      REPORTING QUALITY, not for deciding whether to reset, so a guest who
+//      fails them still gets reset — just without a report row.
+//
+// Why AWAITING_DETAILS/AWAITING_HOURLY_DETAILS specifically NEEDED this split
+// (found while extending coverage to them, not assumed): unlike the original
+// 3 states, a guest still stuck at the details-capture step has (a) never
+// successfully parsed a name — Guest Name is still 'Unknown', which would
+// fail gate 1 below; (b) no pending Enquiry booking yet, so no room to walk
+// to a property — always fails the property-recovery gate; and (c) almost
+// always already has a deduped 'Invalid Input' WS_Enquiries row from their
+// first failed parse attempt, whose Created At is >= their state-entry
+// timestamp — which trips the "already covered" dedup guard on every sweep
+// run, forever. Leaving the old single gated code path unchanged and just
+// adding these 2 states to ENQUIRY_ABANDON_STATES would have queried them
+// correctly but then silently skipped every single one at one of these three
+// gates — the guest would never actually get reset. Splitting the reset out
+// from these three (still-correct, still-necessary) log preconditions is
+// what actually closes the gap.
 async function runEnquiryAbandonment(now = new Date()) {
   const nowMs = now.getTime();
   const summary = { abandoned: 0 };
@@ -3681,10 +3715,24 @@ async function runEnquiryAbandonment(now = new Date()) {
   const enquiries = await airtableGet('WS_Enquiries', '');
 
   for (const guest of guests) {
-    const name = guest.fields['Guest Name'];
-    if (!name || name === 'Unknown') continue;                 // "provided at least a name"
     const lastInbound = guest.fields['Last Inbound At'];
     if (!lastInbound || (nowMs - Date.parse(lastInbound)) < ENQUIRY_ABANDON_MS) continue;
+
+    // 1. RESET — see function comment. No proactive WhatsApp send: a guest
+    // silent 24h+ is outside Meta's free-form service window, so this only
+    // takes effect on their own next inbound message. updateGuestState logs
+    // its own guest_state_write_failed on error — non-fatal, best-effort,
+    // matches this sweep's existing posture throughout.
+    await updateGuestState(guest.id, { 'Session State': 'NEW' });
+    logToAxiom('info', 'enquiry_abandoned', { phone: guest.fields['Phone Number'], guestId: guest.id, sessionState: guest.fields['Session State'] });
+    summary.abandoned++;
+
+    // 2. LOG — optional 'Abandoned' report row. Unchanged preconditions from
+    // before this task; for AWAITING_DETAILS/AWAITING_HOURLY_DETAILS these
+    // will usually (not always) skip the log — see function comment — which
+    // is fine: the reset above already happened regardless.
+    const name = guest.fields['Guest Name'];
+    if (!name || name === 'Unknown') continue;                 // "provided at least a name"
 
     const phone = formatPhone(String(guest.fields['Phone Number'] || ''));
     // One-write guard: skip if an enquiry row for this phone already exists for
@@ -3699,28 +3747,13 @@ async function runEnquiryAbandonment(now = new Date()) {
     const room = roomId ? (await airtableGet('WS_Rooms', `RECORD_ID() = '${roomId}'`))[0] : null;
     const propId = room && (room.fields['Property'] || [])[0];
     const property = propId ? (await airtableGet('WS_Properties', `RECORD_ID() = '${propId}'`))[0] : null;
-    if (!property) continue; // cannot scope without a property — leave for a later run
+    if (!property) continue; // cannot scope without a property — leave the log for a later run
 
     await logEnquiry(property, phone, 'Abandoned', {
       checkInIso: pending && pending.fields['Check In'],
       checkOutIso: pending && pending.fields['Check Out'],
       bookingType: pending && pending.fields['Booking Type']
     });
-    logToAxiom('info', 'enquiry_abandoned', { phone, guestId: guest.id, sessionState: guest.fields['Session State'] });
-
-    // Found via live testing (recDAQmhoe4aFHvFy stuck in AWAITING_HOURLY_DETAILS
-    // with no escape): this used to only LOG Abandoned, never reset the guest —
-    // the sweep reported the problem forever without ever fixing it. Reset here
-    // so their next inbound message (whenever it comes) hits the normal NEW-guest
-    // greeting instead of the same stale per-state parser they went silent on.
-    // No proactive WhatsApp send from here — same 24h/template-window reasoning
-    // used elsewhere in this file (a guest silent for 24h+ is outside Meta's
-    // free-form service window; a template would be needed to reach them
-    // unprompted, and none exists for this). updateGuestState logs its own
-    // guest_state_write_failed on error — non-fatal, matches this sweep's
-    // existing best-effort posture throughout.
-    await updateGuestState(guest.id, { 'Session State': 'NEW' });
-    summary.abandoned++;
   }
   return summary;
 }
