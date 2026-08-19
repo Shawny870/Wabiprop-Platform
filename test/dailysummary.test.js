@@ -33,15 +33,25 @@ function setup(seed) {
   return ctx;
 }
 
+// Owner links: sendDailySummary now resolves ownerName (via resolveOwnerName)
+// and throws if it's missing — a property with no linked WS_Owners record is
+// a real misconfiguration, not something these hour-matching tests are meant
+// to exercise. Seeded here so 'fires successfully' tests represent a
+// realistically-configured property; recUnconfigured deliberately has no
+// Daily Summary Hour at all, so it never reaches sendDailySummary regardless.
 const seed = {
   WS_Properties: [
-    { id: 'recVL', fields: { 'Property Name': 'Villa Liza Guest Lodge', 'Notify Phone': '27732273477', 'Daily Summary Hour': 20 } },
-    { id: 'recOther', fields: { 'Property Name': 'Other Lodge', 'Daily Summary Hour': 9 } },
+    { id: 'recVL', fields: { 'Property Name': 'Villa Liza Guest Lodge', 'Notify Phone': '27732273477', 'Daily Summary Hour': 20, 'Owner': ['recOwnerVL'] } },
+    { id: 'recOther', fields: { 'Property Name': 'Other Lodge', 'Daily Summary Hour': 9, 'Owner': ['recOwnerOther'] } },
     { id: 'recUnconfigured', fields: { 'Property Name': 'No Hour Set Lodge' } }
   ],
   WS_Rooms: [],
   WS_Bookings: [],
-  WS_Guests: []
+  WS_Guests: [],
+  WS_Owners: [
+    { id: 'recOwnerVL', fields: { 'Owner Name': 'Villa Liza Owner' } },
+    { id: 'recOwnerOther', fields: { 'Owner Name': 'Other Lodge Owner' } }
+  ]
 };
 
 // ── Route-level auth (api/wabistay/cron/daily-summary.js) ───────────────────
@@ -123,6 +133,43 @@ test('runDailySummary: an hour nobody is configured for fires nothing, not an er
   const result = await wh.runDailySummary({ now: new Date('2026-08-10T01:00:00.000Z') }); // 03:00 SAST
   assert.deepStrictEqual(result.fired, []);
   assert.strictEqual(result.skipped.length, 3);
+});
+
+// ── Per-property isolation: one bad property must not block the rest ────────
+// Before this fix, an uncaught throw anywhere in the per-property loop body
+// (e.g. sendDailySummary's ownerName resolution, on a misconfigured property)
+// propagated straight out of the for-loop and silently skipped every OTHER
+// property still waiting in that same run. Two properties sharing the exact
+// same configured hour is what actually exercises this — recVL and recOther
+// don't share an hour in the base `seed`, so this uses its own seed.
+
+test('runDailySummary: one property throwing (no linked owner) does not block a second property at the same hour', async () => {
+  const ctx = setup({
+    WS_Properties: [
+      { id: 'recBroken', fields: { 'Property Name': 'Broken Lodge', 'Daily Summary Hour': 12 } }, // no Owner -> throws
+      { id: 'recGood', fields: { 'Property Name': 'Good Lodge', 'Daily Summary Hour': 12, 'Owner': ['recOwnGood'] } }
+    ],
+    WS_Owners: [{ id: 'recOwnGood', fields: { 'Owner Name': 'Good Owner' } }],
+    WS_Rooms: [
+      { id: 'rBroken', fields: { 'Room Name': 'B1', Status: 'Available', Property: ['recBroken'] } },
+      { id: 'rGood', fields: { 'Room Name': 'G1', Status: 'Available', Property: ['recGood'] } }
+    ],
+    WS_Bookings: [],
+    WS_Guests: []
+  });
+
+  const now = new Date('2026-08-10T10:00:00.000Z'); // 12:00 SAST — both properties' configured hour
+  const result = await wh.runDailySummary({ now });
+
+  assert.deepStrictEqual(result.fired.map(f => f.propertyId), ['recGood'], 'the good property still fires despite the broken one running first');
+  assert.strictEqual(result.failed.length, 1);
+  assert.strictEqual(result.failed[0].propertyId, 'recBroken');
+  assert.match(result.failed[0].error, /ownerName is missing/);
+
+  const failLog = ctx.axiom.find(a => a.event === 'daily_summary_property_failed' && a.propertyId === 'recBroken');
+  assert.ok(failLog, 'failure logged with enough detail to diagnose');
+  assert.strictEqual(failLog.propertyName, 'Broken Lodge');
+  assert.match(failLog.message, /ownerName is missing/);
 });
 
 // ── Rule 29: interaction surface with runOwnerSummary (Monday weekly cron) ──

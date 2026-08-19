@@ -1,10 +1,17 @@
 // test/dailysummarytemplateparams.test.js
-// Stage 3 part 3 prep — dailySummaryTemplateParams(summary) builds the
-// wabistay_owner_daily_summary template params in the Meta-locked positional
+// Stage 3 part 3 — dailySummaryTemplateParams(summary) builds the
+// wabistay_daily_summary template params in the Meta-locked positional
 // order: [ownerName, propertyName, date, paymentDeltaTotalFormatted,
-// tomorrowsArrivalsCount]. NOT wired to any live send — see the TODO at
-// sendDailySummary in webhook.js. This file tests the params builder and the
-// new resolveOwnerName lookup in isolation.
+// tomorrowsArrivalsCount]. The WhatsApp SEND itself is still stubbed (pending
+// Meta template approval — see the TODO at sendDailySummary in webhook.js),
+// but as of the owner-name wiring fix, resolveOwnerName + this params
+// builder ARE genuinely called on the live runDailySummary path — no longer
+// orphaned, unit-tested-only functions. Most of this file still tests the
+// params builder and resolveOwnerName in isolation (fast, no dispatch
+// overhead); the "END-TO-END" section near the bottom proves the full
+// wiring (runDailySummary -> sendDailySummary -> resolveOwnerName ->
+// dailySummaryTemplateParams) actually connects, which the isolated unit
+// tests alone cannot show.
 
 const { test } = require('node:test');
 const assert = require('node:assert');
@@ -163,4 +170,64 @@ test('resolveOwnerName: takes the first linked owner when Owner has multiple lin
   const property = { id: 'recMulti', fields: { 'Property Name': 'Multi Lodge', 'Owner': ['recOwnA', 'recOwnB'] } };
   const ownerName = await wh.resolveOwnerName(property);
   assert.strictEqual(ownerName, 'First Owner');
+});
+
+// ── END-TO-END: runDailySummary actually resolves ownerName and builds params ──
+// The tests above call resolveOwnerName/dailySummaryTemplateParams directly —
+// they prove the pieces work in isolation, but NOT that runDailySummary
+// actually wires them together on the real cron path. Before the owner-name
+// fix, these two functions were never called from anywhere except their own
+// unit tests above; this section is what actually proves the fix, same
+// standard applied to the stuck-state/sweep fixes in earlier sessions.
+
+test('E2E: runDailySummary resolves a real linked owner and logs correct templateParams in the Axiom payload', async () => {
+  const ctx = setup({
+    WS_Properties: [{ id: 'recVL', fields: { 'Property Name': 'Villa Liza Guest Lodge', 'Notify Phone': '27732273477', 'Daily Summary Hour': 12, 'Owner': ['recOwn1'] } }],
+    WS_Owners: [{ id: 'recOwn1', fields: { 'Owner Name': 'Thandiwe Nkosi' } }],
+    WS_Rooms: [{ id: 'r1', fields: { 'Room Name': 'Room 1', Status: 'Available', Property: ['recVL'] } }],
+    WS_Bookings: [],
+    WS_Guests: []
+  });
+
+  const now = new Date('2026-08-20T10:00:00.000Z'); // 12:00 SAST
+  const result = await wh.runDailySummary({ now });
+
+  assert.strictEqual(result.fired.length, 1);
+  assert.deepStrictEqual(result.failed, []);
+
+  const payloadLog = ctx.axiom.find(a => a.event === 'daily_summary_payload');
+  assert.ok(payloadLog);
+  assert.strictEqual(payloadLog.ownerName, 'Thandiwe Nkosi', 'ownerName is now genuinely resolved and attached, not orphaned');
+  assert.deepStrictEqual(
+    payloadLog.templateParams,
+    ['Thandiwe Nkosi', 'Villa Liza Guest Lodge', '20 August 2026', '0.00', 0],
+    'templateParams is now genuinely built by dailySummaryTemplateParams and included in the logged payload — the actual send is one line away, not a landmine'
+  );
+});
+
+test('E2E: a property with NO linked owner throws inside sendDailySummary, is logged loudly, and is excluded from `fired` — the throw is a feature, not swallowed', async () => {
+  const ctx = setup({
+    WS_Properties: [{ id: 'recNoOwner', fields: { 'Property Name': 'No Owner Lodge', 'Daily Summary Hour': 12 } }], // no Owner field at all
+    WS_Owners: [],
+    WS_Rooms: [{ id: 'r1', fields: { 'Room Name': 'Room 1', Status: 'Available', Property: ['recNoOwner'] } }],
+    WS_Bookings: [],
+    WS_Guests: []
+  });
+
+  const now = new Date('2026-08-20T10:00:00.000Z'); // 12:00 SAST
+  const result = await wh.runDailySummary({ now });
+
+  assert.deepStrictEqual(result.fired, [], 'the misconfigured property never made it into fired');
+  assert.strictEqual(result.failed.length, 1);
+  assert.strictEqual(result.failed[0].propertyId, 'recNoOwner');
+  assert.match(result.failed[0].error, /ownerName is missing/);
+
+  const failLog = ctx.axiom.find(a => a.event === 'daily_summary_property_failed');
+  assert.ok(failLog, 'the failure is logged loudly to Axiom, not silently dropped');
+  assert.strictEqual(failLog.propertyId, 'recNoOwner');
+  assert.match(failLog.message, /ownerName is missing/);
+
+  // And critically: no daily_summary_payload was logged for this property —
+  // the throw happened before anything was sent/logged as if it succeeded.
+  assert.strictEqual(ctx.axiom.filter(a => a.event === 'daily_summary_payload').length, 0);
 });
