@@ -195,6 +195,88 @@ test('B17/Stage1: the weekly payload carries a rendered reconciliation message w
   assert.ok(a.paymentReconciliationMessage.indexOf('Total Delta') < a.paymentReconciliationMessage.indexOf('A1 —'));
 });
 
+// ── Per-property isolation: one bad property must not block the rest ────────
+// Before this fix, an uncaught throw anywhere in the per-property loop body
+// propagated straight out of the for-loop and silently dropped every OTHER
+// property's weekly summary for that run — with no automatic retry until
+// next Monday (unlike daily, which self-heals within the hour).
+//
+// Forcing the throw is trickier here than it looks: allRooms/allBookings are
+// fetched ONCE, shared, and re-`.filter()`ed fresh on EVERY property's own
+// iteration — so a malformed row anywhere in either shared array (e.g. a
+// bookings row with a non-array 'Room' field) throws identically on EVERY
+// property's filter call, not just the "broken" one, since the filter
+// predicate runs over the complete shared array before any property-specific
+// narrowing happens. Confirmed by hand while writing this test — first
+// attempt used exactly that shape and broke BOTH properties, proving the
+// point rather than the intended isolation. To get a throw scoped to only
+// ONE property, this mutates that property's own record directly on the
+// mock store after setup (bypassing MockAirtable's constructor, which
+// otherwise spreads `fields` into `{}` and would silently sanitize away a
+// `fields: null` seed) — `property.fields['Property Name']` inside
+// aggregateOwnerSummary then throws on exactly that one property's own
+// iteration, and only that one.
+
+test('B17 fix: one property with corrupted own data does not block a second, healthy property in the same run', async () => {
+  const ctx = setup({
+    WS_Properties: [
+      { id: 'recBroken', fields: { 'Property Name': 'Broken Lodge (placeholder — corrupted below)' } },
+      { id: 'recGood', fields: { 'Property Name': 'Good Lodge', 'Notify Phone': '27831118888' } }
+    ],
+    WS_Rooms: [
+      { id: 'rBroken', fields: { 'Room Name': 'B1', 'Status': 'Available', 'Property': ['recBroken'] } },
+      { id: 'rGood', fields: { 'Room Name': 'G1', 'Status': 'Available', 'Property': ['recGood'] } }
+    ],
+    WS_Bookings: [
+      { id: 'recGoodBk', fields: { 'Status': 'Confirmed', 'Booking Type': 'Overnight', 'Amount Due': 900, 'Room': ['rGood'], 'Check In': '2026-07-18T12:00:00.000Z', 'Check Out': '2026-07-19T08:00:00.000Z' } }
+    ],
+    WS_Cleaners: []
+  });
+  // Corrupt recBroken's own record directly on the store — aggregateOwnerSummary's
+  // very first field read (`property.fields['Property Name']`) throws on this
+  // property specifically, with recGood's own record completely untouched.
+  ctx.airtable.tables['WS_Properties'].find(p => p.id === 'recBroken').fields = null;
+
+  const result = await wh.runOwnerSummary({ now: NOW });
+
+  assert.deepStrictEqual(result.map(s => s.propertyId), ['recGood'], 'the good property still produced a summary despite the broken one running first');
+  assert.strictEqual(result[0].totalRevenue, 900, 'and its numbers are correct, not affected by the other property\'s failure');
+
+  assert.strictEqual(result.failed.length, 1);
+  assert.strictEqual(result.failed[0].propertyId, 'recBroken');
+  assert.ok(result.failed[0].error, 'error message captured');
+  assert.strictEqual(result.failed[0].propertyName, null, 'a corrupted property record cannot supply a name — logged as null, not a secondary crash');
+
+  const failLog = ctx.axiom.find(a => a.event === 'owner_summary_property_failed' && a.propertyId === 'recBroken');
+  assert.ok(failLog, 'failure logged with enough detail to diagnose');
+  assert.ok(failLog.message, 'error message logged');
+});
+
+test('B17 fix: ownerSummaryHandler surfaces both successful summaries and per-property failures in the JSON response', async () => {
+  const ctx = setup({
+    WS_Properties: [
+      { id: 'recBroken', fields: { 'Property Name': 'placeholder' } },
+      { id: 'recGood', fields: { 'Property Name': 'Good Lodge' } }
+    ],
+    WS_Rooms: [
+      { id: 'rBroken', fields: { 'Room Name': 'B1', 'Status': 'Available', 'Property': ['recBroken'] } },
+      { id: 'rGood', fields: { 'Room Name': 'G1', 'Status': 'Available', 'Property': ['recGood'] } }
+    ],
+    WS_Bookings: [],
+    WS_Cleaners: []
+  });
+  ctx.airtable.tables['WS_Properties'].find(p => p.id === 'recBroken').fields = null;
+
+  const res = { status(code) { this._status = code; return this; }, json(body) { this._json = body; return this; } };
+  await wh.ownerSummaryHandler({}, res);
+
+  assert.strictEqual(res._status, 200, 'a per-property failure is not a fatal HTTP error');
+  assert.strictEqual(res._json.ok, true);
+  assert.strictEqual(res._json.count, 1, 'count reflects only the successful summaries');
+  assert.strictEqual(res._json.failed.length, 1);
+  assert.strictEqual(res._json.failed[0].propertyId, 'recBroken');
+});
+
 test('formatPaymentReconciliationMessage renders an overpayment delta with a minus sign, not a misleading positive figure', () => {
   const summary = {
     propertyName: 'Lodge A',

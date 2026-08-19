@@ -3945,21 +3945,44 @@ async function runOwnerSummary(opts = {}) {
   const guestsById = new Map(allGuests.map(g => [g.id, g.fields['Guest Name'] || null]));
 
   const summaries = [];
+  const failed = [];
   for (const property of properties) {
-    const rooms = allRooms.filter(r => (r.fields['Property'] || []).includes(property.id));
-    const roomIds = new Set(rooms.map(r => r.id));
-    const bookings = allBookings.filter(b => (b.fields['Room'] || []).some(id => roomIds.has(id)));
-    const summary = aggregateOwnerSummary(property, rooms, bookings, w, guestsById);
-    await sendOwnerSummary(property, summary);
-    summaries.push(summary);
+    // Per-property isolation, same reasoning as runDailySummary's own fix: one
+    // property throwing here must not abort the rest of this run — before this
+    // fix, an uncaught throw propagated straight out of the loop and silently
+    // dropped every remaining property's weekly summary for that run, with no
+    // automatic retry until next Monday (unlike daily, which self-heals within
+    // the hour).
+    try {
+      const rooms = allRooms.filter(r => (r.fields['Property'] || []).includes(property.id));
+      const roomIds = new Set(rooms.map(r => r.id));
+      const bookings = allBookings.filter(b => (b.fields['Room'] || []).some(id => roomIds.has(id)));
+      const summary = aggregateOwnerSummary(property, rooms, bookings, w, guestsById);
+      await sendOwnerSummary(property, summary);
+      summaries.push(summary);
+    } catch (err) {
+      logToAxiom('error', 'owner_summary_property_failed', {
+        propertyId: property.id, propertyName: property.fields?.['Property Name'] || null,
+        message: err.message, stack: err.stack
+      });
+      failed.push({ propertyId: property.id, propertyName: property.fields?.['Property Name'] || null, error: err.message });
+    }
   }
+  // Return shape is unchanged (still a plain array of successful summaries —
+  // existing callers index/map/find on it directly) — `failed` is attached as
+  // a non-indexed property so callers who need failure visibility can read
+  // `result.failed` without breaking anyone who only ever treated this as an
+  // array. JSON.stringify silently drops non-indexed array properties, which
+  // is why ownerSummaryHandler below also spreads it into the JSON response
+  // explicitly rather than relying on this alone.
+  summaries.failed = failed;
   return summaries;
 }
 
 async function ownerSummaryHandler(req, res) {
   try {
     const summaries = await runOwnerSummary();
-    res.status(200).json({ ok: true, count: summaries.length, summaries });
+    res.status(200).json({ ok: true, count: summaries.length, summaries, failed: summaries.failed || [] });
   } catch (err) {
     console.error('[OWNER-SUMMARY FATAL]', err.message, err.stack);
     logToAxiom('error', 'owner_summary_fatal', { message: err.message, stack: err.stack });
@@ -4269,16 +4292,36 @@ function dailySummaryTemplateParams(summary) {
 // The send surface. STUBBED until DAILY_SUMMARY_TEMPLATE is approved: logs the
 // full payload to Axiom (so content is verifiable now) and marks exactly where
 // the template send goes — same stub pattern as sendOwnerSummary above.
+//
+// resolveOwnerName + dailySummaryTemplateParams are wired in HERE, not left as
+// orphaned, unit-tested-only functions the way they were before this fix —
+// this is the actual "one-line swap point" the TODO below refers to; before
+// this change that comment was aspirational, since ownerName was never
+// resolved or attached anywhere on the live path. Deliberately NOT
+// try/caught in this function: dailySummaryTemplateParams throwing on a
+// missing ownerName (a property with no linked WS_Owners record, or a
+// linked one with no name set) is a real, loud signal that property is
+// misconfigured — swallowing it here would silently produce a payload
+// that would later crash the actual WhatsApp send once the template is
+// approved, or worse, quietly send "undefined" to a real owner. Isolating
+// ONE property's failure from the rest of a run is the caller's job
+// (runDailySummary's per-property try/catch) — not this function's.
 async function sendDailySummary(property, summary) {
   const notifyPhone = property.fields['Notify Phone']
     ? property.fields['Notify Phone'].replace(/[\s\-\+]/g, '')
     : (OWNER_PHONE || null);
-  const payload = { ...summary, template: DAILY_SUMMARY_TEMPLATE, notifyPhone };
+
+  const ownerName = await resolveOwnerName(property);
+  const summaryWithOwner = { ...summary, ownerName };
+  const templateParams = dailySummaryTemplateParams(summaryWithOwner);
+
+  const payload = { ...summaryWithOwner, template: DAILY_SUMMARY_TEMPLATE, notifyPhone, templateParams };
   logToAxiom('info', 'daily_summary_payload', payload);
 
-  // TODO(Stage 3 part 3): once DAILY_SUMMARY_TEMPLATE is approved by Meta, this
-  // is the one-line swap point:
-  //   await sendWhatsAppTemplate(notifyPhone, DAILY_SUMMARY_TEMPLATE, dailySummaryTemplateParams(summary), { site: 'daily_summary', propertyId: property.id });
+  // TODO(Stage 3 part 3): once DAILY_SUMMARY_TEMPLATE is approved by Meta,
+  // this is now genuinely the one-line swap point — templateParams above is
+  // already the exact array sendWhatsAppTemplate needs:
+  //   await sendWhatsAppTemplate(notifyPhone, DAILY_SUMMARY_TEMPLATE, templateParams, { site: 'daily_summary', propertyId: property.id });
   // Left stubbed here deliberately — enabling it is a separate, CEO-gated change
   // once the template exists, same reasoning as sendOwnerSummary's stub above.
   return payload;
@@ -4294,6 +4337,7 @@ async function runDailySummary(opts = {}) {
   const properties = await airtableGet('WS_Properties', '');
   const fired = [];
   const skipped = [];
+  const failed = [];
 
   // Rooms/bookings/guests are fetched at most once per run, only if at least
   // one property's hour actually matches — most hourly invocations match
@@ -4311,26 +4355,41 @@ async function runDailySummary(opts = {}) {
       continue;
     }
 
-    if (allRooms === null) {
-      // Unfiltered — includes Maintenance, unlike BOOKABLE_ROOM_STATUSES
-      // elsewhere, since the room-state grid counts Maintenance separately
-      // rather than silently dropping those rooms from the report.
-      allRooms = await airtableGet('WS_Rooms', '');
-      allBookings = await airtableGet('WS_Bookings', orFormula('Status', BLOCKING_BOOKING_STATUSES.concat(['Checked Out'])));
-      const allGuests = await airtableGet('WS_Guests', '');
-      guestsById = new Map(allGuests.map(g => [g.id, g.fields['Guest Name'] || null]));
+    // Per-property isolation: one property throwing here (e.g. sendDailySummary's
+    // new ownerName resolution above, on a property with no linked/misconfigured
+    // WS_Owners record) must not abort every OTHER property still waiting in this
+    // same run — before this fix, an uncaught throw here propagated straight out
+    // of the for-loop, silently skipping every remaining property until the outer
+    // handler's catch-all, with no way to tell "genuinely zero activity" apart
+    // from "crashed partway through" without checking Axiom by hand.
+    try {
+      if (allRooms === null) {
+        // Unfiltered — includes Maintenance, unlike BOOKABLE_ROOM_STATUSES
+        // elsewhere, since the room-state grid counts Maintenance separately
+        // rather than silently dropping those rooms from the report.
+        allRooms = await airtableGet('WS_Rooms', '');
+        allBookings = await airtableGet('WS_Bookings', orFormula('Status', BLOCKING_BOOKING_STATUSES.concat(['Checked Out'])));
+        const allGuests = await airtableGet('WS_Guests', '');
+        guestsById = new Map(allGuests.map(g => [g.id, g.fields['Guest Name'] || null]));
+      }
+
+      const rooms = allRooms.filter(r => (r.fields['Property'] || []).includes(property.id));
+      const roomIds = new Set(rooms.map(r => r.id));
+      const bookings = allBookings.filter(b => (b.fields['Room'] || []).some(id => roomIds.has(id)));
+
+      const summary = aggregateDailySummary(property, rooms, bookings, { todayYmd, tomorrowYmd }, guestsById);
+      await sendDailySummary(property, summary);
+
+      fired.push({ propertyId: property.id, propertyName: property.fields['Property Name'], summary });
+    } catch (err) {
+      logToAxiom('error', 'daily_summary_property_failed', {
+        propertyId: property.id, propertyName: property.fields?.['Property Name'] || null,
+        message: err.message, stack: err.stack
+      });
+      failed.push({ propertyId: property.id, propertyName: property.fields?.['Property Name'] || null, error: err.message });
     }
-
-    const rooms = allRooms.filter(r => (r.fields['Property'] || []).includes(property.id));
-    const roomIds = new Set(rooms.map(r => r.id));
-    const bookings = allBookings.filter(b => (b.fields['Room'] || []).some(id => roomIds.has(id)));
-
-    const summary = aggregateDailySummary(property, rooms, bookings, { todayYmd, tomorrowYmd }, guestsById);
-    await sendDailySummary(property, summary);
-
-    fired.push({ propertyId: property.id, propertyName: property.fields['Property Name'], summary });
   }
-  return { currentSastHour, fired, skipped };
+  return { currentSastHour, fired, skipped, failed };
 }
 
 async function dailySummaryHandler(req, res) {

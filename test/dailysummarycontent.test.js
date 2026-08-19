@@ -169,7 +169,11 @@ test('tomorrowsOvernightArrivals: only overnight bookings whose Check In date is
 // ── End-to-end payload shape, via runDailySummary ────────────────────────────
 
 function setupE2E(extraBookings) {
-  const property = { id: 'recVL', fields: { 'Property Name': 'Villa Liza Guest Lodge', 'Notify Phone': '27732273477', 'Daily Summary Hour': 12 } };
+  // Owner link: sendDailySummary now resolves ownerName and throws without
+  // one — a realistically-configured property has an owner, so this fixture
+  // needs one too (see test/dailysummary.test.js's seed for the same fix).
+  const property = { id: 'recVL', fields: { 'Property Name': 'Villa Liza Guest Lodge', 'Notify Phone': '27732273477', 'Daily Summary Hour': 12, 'Owner': ['recOwnerVL'] } };
+  const owner = { id: 'recOwnerVL', fields: { 'Owner Name': 'Villa Liza Owner' } };
   const rooms = [
     { id: 'r1', fields: { 'Room Name': 'Room 1', Status: 'Occupied', Property: ['recVL'] } },
     { id: 'r2', fields: { 'Room Name': 'Room 2', Status: 'Available', Property: ['recVL'] } },
@@ -179,7 +183,7 @@ function setupE2E(extraBookings) {
     { id: 'b1', fields: { 'Booking Type': 'Overnight', Room: ['r1'], Guest: ['g1'], Status: 'Checked In', 'Checked In At': iso(2026, 8, 17, 9), 'Check In': iso(2026, 8, 17, 9), 'Amount Due': 700, 'Amount Paid': 700 } },
     ...extraBookings
   ];
-  const ctx = setup({ WS_Properties: [property], WS_Rooms: rooms, WS_Bookings: bookings, WS_Guests: [guest] });
+  const ctx = setup({ WS_Properties: [property], WS_Rooms: rooms, WS_Bookings: bookings, WS_Guests: [guest], WS_Owners: [owner] });
   return { ctx, property };
 }
 
