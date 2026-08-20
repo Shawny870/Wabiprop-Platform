@@ -4355,16 +4355,39 @@ function aggregateMonthlyReport(property, rooms, bookings, w, guestsById = new M
   const overnightDurationModeInsight = durationModeInsight(overnightCurrent.map(nightsOf), { noun: 'overnight', unit: 'night' });
   const shortStayDurationModeInsight = durationModeInsight(hourlyCurrent.map(hoursOf), { noun: 'short-stay', unit: 'hour' });
 
-  // Repeat-guest rate — see header comment on scope
-  const guestBookingCounts = new Map();
-  for (const b of bookings) {
-    for (const guestId of (b.fields['Guest'] || [])) {
-      guestBookingCounts.set(guestId, (guestBookingCounts.get(guestId) || 0) + 1);
-    }
-  }
+  // Repeat-guest rate — rolling 12-month window, not lifetime-cumulative (a
+  // lifetime count only ever climbs and stops being a useful
+  // current-performance signal after a property has run a few years) and not
+  // within-month (this measures returning-from-a-previous-visit behaviour,
+  // not two bookings landing in the same 30-day window). "Repeat" = a guest
+  // in this month's bookings who has at least one OTHER booking with a Check
+  // In date in the 12 months immediately prior to this period — the window
+  // boundary at periodStartMs means the current stay itself can never be its
+  // own "prior" booking, so no separate exclusion check is needed.
+  //
+  // Identity: the booking's linked 'Guest' record ID, same field every other
+  // repeat-adjacent read in this file uses — NOT a raw phone-number string
+  // comparison. This is deliberate and already reliable: WS_Guests records
+  // are deduped by 'Phone Number' at CREATE time (see the WALKIN guest-
+  // identity block, ~line 1907) before a Guest ID ever gets linked to a
+  // booking, so by the time a report reads booking.fields['Guest'], any
+  // guest reachable by phone already has a single stable ID. A guest with no
+  // phone (e.g. a phone-less walk-in) gets an always-unique record and is
+  // correctly never falsely matched to anyone else — already the documented,
+  // locked behaviour for repeat-guest tracking, not a new gap introduced here.
+  const REPEAT_GUEST_WINDOW_MS = 365 * DAY_MS;
+  const repeatWindowStartMs = w.periodStartMs - REPEAT_GUEST_WINDOW_MS;
+  const priorYearGuestIds = new Set(
+    bookings
+      .filter(b => {
+        const t = checkInMs(b);
+        return Number.isFinite(t) && t >= repeatWindowStartMs && t < w.periodStartMs;
+      })
+      .flatMap(b => b.fields['Guest'] || [])
+  );
   const currentGuestIds = new Set(currentBookings.flatMap(b => b.fields['Guest'] || []));
   const repeatGuestRate = currentGuestIds.size > 0
-    ? [...currentGuestIds].filter(id => (guestBookingCounts.get(id) || 0) > 1).length / currentGuestIds.size
+    ? [...currentGuestIds].filter(id => priorYearGuestIds.has(id)).length / currentGuestIds.size
     : null;
 
   // Cleaning turnaround — job duration proxy, see header comment
@@ -4405,7 +4428,9 @@ function aggregateMonthlyReport(property, rooms, bookings, w, guestsById = new M
     avgRating,
     priorAvgRating,
     insights,
+    overnightBookingsCount: overnightCurrent.length,
     overnightDurationModeInsight,
+    shortStayBookingsCount: hourlyCurrent.length,
     shortStayDurationModeInsight,
     busiestDayInsight: busiestDay.busiestDayInsight,
     // Structured alongside the sentence — not a YoY comparison feature, just
@@ -4415,6 +4440,11 @@ function aggregateMonthlyReport(property, rooms, bookings, w, guestsById = new M
   };
 }
 
+// CEO-confirmed body structure (Option B): duration-mode insights (PR #52)
+// sit directly under their booking-type's plain count line, one pair per
+// booking type. busiestDayInsight (PR #53) is deliberately NOT included here
+// — placement/whether-at-all is still an open CEO decision, not this pass's
+// call to make.
 function monthlyReportTemplateParams(report) {
   return [
     report.propertyName,
@@ -4422,7 +4452,11 @@ function monthlyReportTemplateParams(report) {
     report.insights[1], // revenue
     report.insights[2], // avg length of stay
     report.insights[3], // repeat-guest rate
-    report.insights[5]  // rating (cleaning turnaround, insights[4], omitted from the template body — see sendMonthlyReport comment)
+    report.insights[5], // rating (cleaning turnaround, insights[4], omitted from the template body — see sendMonthlyReport comment)
+    String(report.overnightBookingsCount), // {{7}} Overnight bookings: <count>
+    report.overnightDurationModeInsight,   // {{8}}
+    String(report.shortStayBookingsCount), // {{9}} Short-stay bookings: <count>
+    report.shortStayDurationModeInsight    // {{10}}
   ];
 }
 
