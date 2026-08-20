@@ -116,6 +116,68 @@ test('a property with zero bookings this month and last month produces honest "n
   assert.strictEqual(report.avgRating, null);
 });
 
+// ── Duration-mode insight: most common stay length, per booking type ───────
+
+test('overnight duration mode: a clear mode (one value strictly more frequent) reports "most guests stayed"', () => {
+  const bookings = [
+    // 3x 2-night, 1x 5-night — 2 nights is the clear mode
+    { id: 'recB1', fields: { 'Guest': ['recG1'], 'Room': ['recR1'], 'Booking Type': 'Overnight', 'Amount Due': 400, 'Check In': daysAgo(10), 'Check Out': daysAgo(8) } },
+    { id: 'recB2', fields: { 'Guest': ['recG2'], 'Room': ['recR1'], 'Booking Type': 'Overnight', 'Amount Due': 400, 'Check In': daysAgo(9), 'Check Out': daysAgo(7) } },
+    { id: 'recB3', fields: { 'Guest': ['recG3'], 'Room': ['recR1'], 'Booking Type': 'Overnight', 'Amount Due': 400, 'Check In': daysAgo(6), 'Check Out': daysAgo(4) } },
+    { id: 'recB4', fields: { 'Guest': ['recG4'], 'Room': ['recR2'], 'Booking Type': 'Overnight', 'Amount Due': 400, 'Check In': daysAgo(5), 'Check Out': daysAgo(0) } }
+  ];
+  const report = wh.aggregateMonthlyReport(property, rooms, bookings, windowFor(NOW));
+  assert.strictEqual(report.overnightDurationModeInsight, 'Most overnight guests stayed 2 nights.');
+});
+
+test('overnight duration mode: a tie (two values equally frequent) falls back to average, not a false "most common" claim', () => {
+  const bookings = [
+    // 2x 2-night, 2x 4-night — tied, no single clear mode
+    { id: 'recB1', fields: { 'Guest': ['recG1'], 'Room': ['recR1'], 'Booking Type': 'Overnight', 'Amount Due': 400, 'Check In': daysAgo(10), 'Check Out': daysAgo(8) } },
+    { id: 'recB2', fields: { 'Guest': ['recG2'], 'Room': ['recR1'], 'Booking Type': 'Overnight', 'Amount Due': 400, 'Check In': daysAgo(9), 'Check Out': daysAgo(7) } },
+    { id: 'recB3', fields: { 'Guest': ['recG3'], 'Room': ['recR1'], 'Booking Type': 'Overnight', 'Amount Due': 400, 'Check In': daysAgo(6), 'Check Out': daysAgo(2) } },
+    { id: 'recB4', fields: { 'Guest': ['recG4'], 'Room': ['recR2'], 'Booking Type': 'Overnight', 'Amount Due': 400, 'Check In': daysAgo(5), 'Check Out': daysAgo(1) } }
+  ];
+  const report = wh.aggregateMonthlyReport(property, rooms, bookings, windowFor(NOW));
+  assert.strictEqual(report.overnightDurationModeInsight, 'Overnight guests stayed an average of 3 nights.');
+  assert.ok(!report.overnightDurationModeInsight.includes('Most'), 'a tie must not be presented as a clear mode');
+});
+
+test('overnight duration mode: fewer than the minimum booking count falls back to average even with a technical mode', () => {
+  const bookings = [
+    // Only 2 bookings total — below the 3-booking threshold — even though both are 2 nights
+    { id: 'recB1', fields: { 'Guest': ['recG1'], 'Room': ['recR1'], 'Booking Type': 'Overnight', 'Amount Due': 400, 'Check In': daysAgo(10), 'Check Out': daysAgo(8) } },
+    { id: 'recB2', fields: { 'Guest': ['recG2'], 'Room': ['recR1'], 'Booking Type': 'Overnight', 'Amount Due': 400, 'Check In': daysAgo(9), 'Check Out': daysAgo(7) } }
+  ];
+  const report = wh.aggregateMonthlyReport(property, rooms, bookings, windowFor(NOW));
+  assert.strictEqual(report.overnightDurationModeInsight, 'Overnight guests stayed an average of 2 nights.');
+});
+
+test('overnight duration mode: zero bookings this period reports "no bookings," no crash', () => {
+  const report = wh.aggregateMonthlyReport(property, rooms, [], windowFor(NOW));
+  assert.strictEqual(report.overnightDurationModeInsight, 'No overnight bookings this period.');
+});
+
+test('short-stay (Hourly) duration mode: uses hours, not nights, and ignores Overnight bookings', () => {
+  const bookings = [
+    { id: 'recB1', fields: { 'Guest': ['recG1'], 'Room': ['recR1'], 'Booking Type': 'Hourly', 'Amount Due': 100, 'Check In': daysAgo(10), 'Check Out': new Date(new Date(daysAgo(10)).getTime() + 2 * 3600000).toISOString() } },
+    { id: 'recB2', fields: { 'Guest': ['recG2'], 'Room': ['recR1'], 'Booking Type': 'Hourly', 'Amount Due': 100, 'Check In': daysAgo(9), 'Check Out': new Date(new Date(daysAgo(9)).getTime() + 2 * 3600000).toISOString() } },
+    { id: 'recB3', fields: { 'Guest': ['recG3'], 'Room': ['recR2'], 'Booking Type': 'Hourly', 'Amount Due': 150, 'Check In': daysAgo(6), 'Check Out': new Date(new Date(daysAgo(6)).getTime() + 3 * 3600000).toISOString() } },
+    // Overnight booking present too — must not leak into the short-stay hours calc
+    { id: 'recB4', fields: { 'Guest': ['recG4'], 'Room': ['recR2'], 'Booking Type': 'Overnight', 'Amount Due': 400, 'Check In': daysAgo(5), 'Check Out': daysAgo(0) } }
+  ];
+  const report = wh.aggregateMonthlyReport(property, rooms, bookings, windowFor(NOW));
+  assert.strictEqual(report.shortStayDurationModeInsight, 'Most short-stay guests stayed 2 hours.');
+});
+
+test('short-stay (Hourly) duration mode: zero Hourly bookings reports "no bookings," no crash', () => {
+  const bookings = [
+    { id: 'recB1', fields: { 'Guest': ['recG1'], 'Room': ['recR1'], 'Booking Type': 'Overnight', 'Amount Due': 400, 'Check In': daysAgo(5), 'Check Out': daysAgo(3) } }
+  ];
+  const report = wh.aggregateMonthlyReport(property, rooms, bookings, windowFor(NOW));
+  assert.strictEqual(report.shortStayDurationModeInsight, 'No short-stay bookings this period.');
+});
+
 // ── Cron-level: stubbed send, per-property isolation, alertShawn ───────────
 
 test('runMonthlyReport produces one stubbed payload per property, read-only', async () => {
