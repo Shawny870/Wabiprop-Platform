@@ -31,6 +31,7 @@ function setup(seed = {}) {
 const ROUTES = [
   '../api/wabistay/cron/auto-checkout.js',
   '../api/wabistay/cron/owner-summary.js',
+  '../api/wabistay/cron/weekly-value-nudge.js',
   '../api/wabiprop/cron/agent-morning-summary.js',
   '../api/wabiprop/cron/call-reminder.js',
   '../api/wabiprop/cron/lease-reminders.js',

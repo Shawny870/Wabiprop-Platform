@@ -4434,6 +4434,123 @@ async function sendDailySummary(property, summary) {
   return payload;
 }
 
+// ─── WEEKLY VALUE-NUDGE ──────────────────────────────────────────────────────
+// Deliberately a SEPARATE feature/template from OWNER_SUMMARY_TEMPLATE above,
+// not a rename of it, even though both reuse aggregateOwnerSummary's 7-day
+// window and both currently sit stubbed pending Meta approval. The owner
+// summary is a full P&L reconciliation; this is a short "here's what's
+// happening at your property" nudge whose PRACTICAL side effect is a second
+// weekly touchpoint with the owner — WhatsApp's Coexistence rule disconnects
+// a number after 14 days with no activity, so two independent weekly sends
+// (this one + the owner summary, once both are live) each act as their own
+// buffer even if one of the two fails or is skipped for a property.
+//
+// Scheduled Thursday 06:00 UTC (see vercel.json) — deliberately NOT the same
+// day as owner-summary's Monday 06:00 UTC slot, so the two weekly touchpoints
+// land spread across the week rather than bunched, which better serves the
+// "keep the number active" goal than sending both on the same day would.
+const VALUE_NUDGE_TEMPLATE = 'wabistay_owner_value_nudge';
+
+// KNOWN DATA GAP, inherited and flagged rather than silently reused:
+// aggregateOwnerSummary's occupancyRate is `roomNightsSold / (rooms.length *
+// periodDays)` — it assumes every currently-bookable room was available for
+// the ENTIRE period, with no accounting for a room added mid-period or one
+// that spent part of the period in Maintenance. This value-nudge message
+// inherits that same inaccuracy by reusing aggregateOwnerSummary unchanged
+// (deliberately — building a second, parallel occupancy calculation here
+// would only get the SAME wrong number a second, differently-shaped way).
+// Fixing the denominator is out of scope for this PR.
+function valueNudgeTemplateParams(summary) {
+  const occupancyPct = `${Math.round(summary.occupancyRate * 100)}%`;
+  const attention = summary.paymentDeltaTotal > 0
+    ? `R${summary.paymentDeltaTotal.toFixed(2)} outstanding from this week`
+    : 'all payments settled';
+  return [
+    summary.propertyName,
+    String(summary.totalBookings),
+    occupancyPct,
+    String(summary.upcomingBookings),
+    attention
+  ];
+}
+
+// STUBBED until VALUE_NUDGE_TEMPLATE is approved by Meta — identical pattern
+// to sendOwnerSummary/sendDailySummary above: logs the full payload to Axiom
+// (content verifiable now) and marks the one-line swap point. Deliberately
+// NOT a free-form sendWhatsApp — would 200-and-vanish outside the 24h window,
+// same reasoning as every other business-initiated send in this file.
+async function sendWeeklyValueNudge(property, summary) {
+  const notifyPhone = property.fields['Notify Phone']
+    ? property.fields['Notify Phone'].replace(/[\s\-\+]/g, '')
+    : (OWNER_PHONE || null);
+  const templateParams = valueNudgeTemplateParams(summary);
+  const payload = { ...summary, template: VALUE_NUDGE_TEMPLATE, notifyPhone, templateParams };
+  logToAxiom('info', 'weekly_value_nudge_payload', payload);
+
+  // TODO: once VALUE_NUDGE_TEMPLATE is approved by Meta, this is the one-line
+  // swap point:
+  //   await sendWhatsAppTemplate(notifyPhone, VALUE_NUDGE_TEMPLATE, templateParams, { site: 'weekly_value_nudge', propertyId: property.id });
+  return payload;
+}
+
+async function runWeeklyValueNudge(opts = {}) {
+  const { now = new Date() } = opts;
+  const periodDays = 7;
+  const periodEndMs = now.getTime();
+  const w = {
+    periodDays,
+    periodStartMs: periodEndMs - periodDays * DAY_MS,
+    periodEndMs,
+    upcomingEndMs: periodEndMs + 7 * DAY_MS
+  };
+
+  const properties = await airtableGet('WS_Properties', '');
+  const allRooms = await airtableGet('WS_Rooms', orFormula('Status', BOOKABLE_ROOM_STATUSES));
+  const allBookings = await airtableGet('WS_Bookings', orFormula('Status', BLOCKING_BOOKING_STATUSES.concat(['Checked Out'])));
+  const allGuests = await airtableGet('WS_Guests', '');
+  const guestsById = new Map(allGuests.map(g => [g.id, g.fields['Guest Name'] || null]));
+
+  const sent = [];
+  const failed = [];
+  for (const property of properties) {
+    // Per-property isolation, matching runOwnerSummary/runDailySummary's own
+    // established pattern: one property throwing must not abort the rest of
+    // this run. alertShawn fires per failing property (not once for the
+    // whole run) so the alert itself names which property failed.
+    try {
+      const rooms = allRooms.filter(r => (r.fields['Property'] || []).includes(property.id));
+      const roomIds = new Set(rooms.map(r => r.id));
+      const bookings = allBookings.filter(b => (b.fields['Room'] || []).some(id => roomIds.has(id)));
+      const summary = aggregateOwnerSummary(property, rooms, bookings, w, guestsById);
+      await sendWeeklyValueNudge(property, summary);
+      sent.push(summary);
+    } catch (err) {
+      logToAxiom('error', 'weekly_value_nudge_property_failed', {
+        propertyId: property.id, propertyName: property.fields?.['Property Name'] || null,
+        message: err.message, stack: err.stack
+      });
+      await alertShawn('weekly_value_nudge', err.message, {
+        propertyId: property.id, propertyName: property.fields?.['Property Name'] || null
+      });
+      failed.push({ propertyId: property.id, propertyName: property.fields?.['Property Name'] || null, error: err.message });
+    }
+  }
+  sent.failed = failed;
+  return sent;
+}
+
+async function weeklyValueNudgeHandler(req, res) {
+  try {
+    const sent = await runWeeklyValueNudge();
+    res.status(200).json({ ok: true, count: sent.length, sent, failed: sent.failed || [] });
+  } catch (err) {
+    console.error('[WEEKLY-VALUE-NUDGE FATAL]', err.message, err.stack);
+    logToAxiom('error', 'weekly_value_nudge_fatal', { message: err.message, stack: err.stack });
+    await alertShawn('weekly_value_nudge_fatal', err.message, { scope: 'entire run, not a single property' });
+    res.status(200).json({ ok: false, error: err.message });
+  }
+}
+
 async function runDailySummary(opts = {}) {
   const { now = new Date() } = opts;
   const shifted = new Date(now.getTime() + SAST_OFFSET_MS);
@@ -4835,6 +4952,11 @@ module.exports.autoCheckoutHandler = autoCheckoutHandler;
 // for tests; ownerSummaryHandler is the Vercel HTTP cron entry.
 module.exports.runOwnerSummary = runOwnerSummary;
 module.exports.ownerSummaryHandler = ownerSummaryHandler;
+module.exports.runWeeklyValueNudge = runWeeklyValueNudge;
+module.exports.weeklyValueNudgeHandler = weeklyValueNudgeHandler;
+module.exports.sendWeeklyValueNudge = sendWeeklyValueNudge;
+module.exports.valueNudgeTemplateParams = valueNudgeTemplateParams;
+module.exports.VALUE_NUDGE_TEMPLATE = VALUE_NUDGE_TEMPLATE;
 module.exports.runDailySummary = runDailySummary;
 module.exports.dailySummaryHandler = dailySummaryHandler;
 // Stage 3 part 2: daily summary content sections, exported individually so
