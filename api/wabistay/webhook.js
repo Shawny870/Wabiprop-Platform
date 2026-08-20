@@ -3974,6 +3974,239 @@ async function sendOwnerSummary(property, summary) {
   return payload;
 }
 
+// ─── MONTHLY BI ROLLUP ───────────────────────────────────────────────────────
+// NOT a bigger daily/weekly summary at a monthly cadence — a distinct
+// analytics feature: this month vs last month, presented as insight
+// ("occupancy up 12%") rather than side-by-side raw numbers where possible.
+// No monthly cron existed before this (manual-report.js's "monthly" option
+// reuses aggregateOwnerSummary with a 30-day window purely as a preview
+// stand-in — see its own header comment — this is the real thing).
+//
+// Per metric, computability against TODAY's schema:
+//   · Occupancy trend      — COMPUTABLE, but inherits aggregateOwnerSummary's
+//     existing roomNightsAvailable gap (rooms.length * periodDays assumes
+//     every currently-bookable room was available the WHOLE period — no
+//     accounting for a room added mid-period or one that spent part of the
+//     period in Maintenance). Flagged in the payload itself
+//     (occupancy.denominatorCaveat), not silently shipped as exact.
+//   · Revenue trend        — COMPUTABLE. Uses 'Amount Due' (same field
+//     aggregateOwnerSummary's totalRevenue uses), not 'Amount Paid' — so
+//     this is billed revenue, not collected cash. Same definition as the
+//     existing weekly report, deliberately, so the two reports never
+//     disagree about what "revenue" means for the same booking.
+//   · Average length of stay — COMPUTABLE, overnight bookings only (a
+//     "length of stay" in nights is not a meaningful concept for Hourly
+//     bookings, which are a different product on the same booking table).
+//   · Repeat-guest rate    — COMPUTABLE, but scoped: "repeat" means the
+//     guest has more than one booking within the `bookings` array this
+//     function is given (already filtered to BLOCKING_BOOKING_STATUSES +
+//     Checked Out, scoped to this property, unbounded by date) — not
+//     lifetime history if older bookings were ever purged from Airtable.
+//   · Cleaning turnaround  — NOT the true vacant-to-ready number (see
+//     BACKLOG-01 in CLAUDE.md and jobDurationMs's own comment above): that
+//     baseline is overwritten every checkout cycle and never persisted.
+//     Reports jobDurationMs (cleaner dispatch → DONE) instead, explicitly
+//     labeled as a proxy, not silently presented as the real thing.
+//   · Rating trend         — COMPUTABLE. WS_Bookings.Rating, already
+//     captured by the existing Stage 3 Phase 3 rating flow.
+const MONTHLY_REPORT_TEMPLATE = 'wabistay_monthly_bi_report';
+
+function avgOrNull(values) {
+  const nums = values.filter(v => typeof v === 'number' && Number.isFinite(v));
+  if (nums.length === 0) return null;
+  return nums.reduce((s, v) => s + v, 0) / nums.length;
+}
+
+function pctDeltaInsight(label, current, prior, unit = '%') {
+  if (prior === null || prior === 0) {
+    return current === null ? `${label}: no data` : `${label}: ${current}${unit} (no prior-month baseline to compare)`;
+  }
+  if (current === null) return `${label}: no data this month`;
+  const deltaPct = Math.round(((current - prior) / Math.abs(prior)) * 100);
+  const direction = deltaPct > 0 ? 'up' : deltaPct < 0 ? 'down' : 'flat vs';
+  return deltaPct === 0
+    ? `${label}: flat vs last month (${current}${unit})`
+    : `${label} ${direction} ${Math.abs(deltaPct)}% vs last month (${current}${unit})`;
+}
+
+// `bookings` is already property-scoped and status-filtered (same contract
+// as aggregateOwnerSummary) but NOT period-filtered — this function does its
+// own current/prior windowing internally so callers fetch Airtable data once
+// and this and aggregateOwnerSummary can share it if ever called together.
+function aggregateMonthlyReport(property, rooms, bookings, w, guestsById = new Map()) {
+  const checkInMs = b => (b.fields['Check In'] ? Date.parse(b.fields['Check In']) : NaN);
+  const inRange = (b, startMs, endMs) => {
+    const t = checkInMs(b);
+    return Number.isFinite(t) && t >= startMs && t < endMs;
+  };
+
+  const currentBookings = bookings.filter(b => inRange(b, w.periodStartMs, w.periodEndMs));
+  const priorBookings = bookings.filter(b => inRange(b, w.priorPeriodStartMs, w.periodStartMs));
+
+  // Occupancy
+  const roomNightsSold = currentBookings.reduce((s, b) => s + bookingRoomNights(b), 0);
+  const roomNightsAvailable = rooms.length * w.periodDays;
+  const occupancyRate = roomNightsAvailable > 0 ? roomNightsSold / roomNightsAvailable : null;
+  const priorRoomNightsSold = priorBookings.reduce((s, b) => s + bookingRoomNights(b), 0);
+  const priorOccupancyRate = roomNightsAvailable > 0 ? priorRoomNightsSold / roomNightsAvailable : null;
+
+  // Revenue (billed, 'Amount Due' — see header comment)
+  const revenue = currentBookings.reduce((s, b) => s + (Number(b.fields['Amount Due']) || 0), 0);
+  const priorRevenue = priorBookings.reduce((s, b) => s + (Number(b.fields['Amount Due']) || 0), 0);
+
+  // Average length of stay — overnight only
+  const nightsOf = b => {
+    const inMs = checkInMs(b);
+    const outMs = b.fields['Check Out'] ? Date.parse(b.fields['Check Out']) : NaN;
+    if (!Number.isFinite(inMs) || !Number.isFinite(outMs) || outMs <= inMs) return null;
+    return (outMs - inMs) / DAY_MS;
+  };
+  const overnightCurrent = currentBookings.filter(b => b.fields['Booking Type'] === 'Overnight');
+  const avgLengthOfStay = avgOrNull(overnightCurrent.map(nightsOf));
+
+  // Repeat-guest rate — see header comment on scope
+  const guestBookingCounts = new Map();
+  for (const b of bookings) {
+    for (const guestId of (b.fields['Guest'] || [])) {
+      guestBookingCounts.set(guestId, (guestBookingCounts.get(guestId) || 0) + 1);
+    }
+  }
+  const currentGuestIds = new Set(currentBookings.flatMap(b => b.fields['Guest'] || []));
+  const repeatGuestRate = currentGuestIds.size > 0
+    ? [...currentGuestIds].filter(id => (guestBookingCounts.get(id) || 0) > 1).length / currentGuestIds.size
+    : null;
+
+  // Cleaning turnaround — job duration proxy, see header comment
+  const avgCleaningJobDurationMs = avgOrNull(currentBookings.map(jobDurationMs));
+  const priorAvgCleaningJobDurationMs = avgOrNull(priorBookings.map(jobDurationMs));
+
+  // Rating trend
+  const ratingOf = b => (typeof b.fields['Rating'] === 'number' ? b.fields['Rating'] : null);
+  const avgRating = avgOrNull(currentBookings.map(ratingOf));
+  const priorAvgRating = avgOrNull(priorBookings.map(ratingOf));
+
+  const occupancyPct = occupancyRate === null ? null : Math.round(occupancyRate * 1000) / 10;
+  const priorOccupancyPct = priorOccupancyRate === null ? null : Math.round(priorOccupancyRate * 1000) / 10;
+
+  const insights = [
+    pctDeltaInsight('Occupancy', occupancyPct, priorOccupancyPct),
+    pctDeltaInsight('Revenue', Math.round(revenue), Math.round(priorRevenue), ''),
+    avgLengthOfStay === null ? 'Average length of stay: no overnight bookings this month' : `Average length of stay: ${avgLengthOfStay.toFixed(1)} nights`,
+    repeatGuestRate === null ? 'Repeat-guest rate: no bookings this month' : `${Math.round(repeatGuestRate * 100)}% of this month's guests were repeat guests`,
+    avgCleaningJobDurationMs === null
+      ? 'Cleaning turnaround: no completed cleaning jobs this month'
+      : `Average cleaning job duration: ${Math.round(avgCleaningJobDurationMs / 60000)} min (dispatch-to-DONE, not vacant-to-ready — see BACKLOG-01)`,
+    avgRating === null ? 'Guest rating: no ratings captured this month' : pctDeltaInsight('Guest rating', Math.round(avgRating * 10) / 10, priorAvgRating === null ? null : Math.round(priorAvgRating * 10) / 10, '/5')
+  ];
+
+  return {
+    propertyId: property.id,
+    propertyName: property.fields['Property Name'],
+    periodDays: w.periodDays,
+    occupancy: { currentPct: occupancyPct, priorPct: priorOccupancyPct, denominatorCaveat: 'assumes every currently-bookable room was available the entire period — see BACKLOG-01-adjacent gap in header comment' },
+    revenue: { current: revenue, prior: priorRevenue },
+    avgLengthOfStayNights: avgLengthOfStay,
+    repeatGuestRate,
+    avgCleaningJobDurationMs,
+    priorAvgCleaningJobDurationMs,
+    avgRating,
+    priorAvgRating,
+    insights,
+    totalBookings: currentBookings.length
+  };
+}
+
+function monthlyReportTemplateParams(report) {
+  return [
+    report.propertyName,
+    report.insights[0], // occupancy
+    report.insights[1], // revenue
+    report.insights[2], // avg length of stay
+    report.insights[3], // repeat-guest rate
+    report.insights[5]  // rating (cleaning turnaround, insights[4], omitted from the template body — see sendMonthlyReport comment)
+  ];
+}
+
+// STUBBED until MONTHLY_REPORT_TEMPLATE is approved — same pattern as every
+// other business-initiated send in this file. Cleaning turnaround
+// (insights[4]) is deliberately left OUT of the WhatsApp template body: it's
+// an internal ops/quality metric the owner has no action to take on, and
+// every template param costs message length — Axiom still gets the full
+// `insights` array including it, for anyone who wants it.
+async function sendMonthlyReport(property, report) {
+  const notifyPhone = property.fields['Notify Phone']
+    ? property.fields['Notify Phone'].replace(/[\s\-\+]/g, '')
+    : (OWNER_PHONE || null);
+  const templateParams = monthlyReportTemplateParams(report);
+  const payload = { ...report, template: MONTHLY_REPORT_TEMPLATE, notifyPhone, templateParams };
+  logToAxiom('info', 'monthly_report_payload', payload);
+
+  // TODO: once MONTHLY_REPORT_TEMPLATE is approved by Meta, this is the
+  // one-line swap point:
+  //   await sendWhatsAppTemplate(notifyPhone, MONTHLY_REPORT_TEMPLATE, templateParams, { site: 'monthly_report', propertyId: property.id });
+  return payload;
+}
+
+async function runMonthlyReport(opts = {}) {
+  const { now = new Date() } = opts;
+  const periodDays = 30;
+  const periodEndMs = now.getTime();
+  const w = {
+    periodDays,
+    periodStartMs: periodEndMs - periodDays * DAY_MS,
+    priorPeriodStartMs: periodEndMs - 2 * periodDays * DAY_MS,
+    periodEndMs
+  };
+
+  // Unbounded by date (unlike aggregateOwnerSummary's periodBookings) so
+  // repeat-guest counting and the prior-month window both see bookings
+  // outside the current 30 days — same status filter as every other report,
+  // just not date-filtered at the query level.
+  const properties = await airtableGet('WS_Properties', '');
+  const allRooms = await airtableGet('WS_Rooms', orFormula('Status', BOOKABLE_ROOM_STATUSES));
+  const allBookings = await airtableGet('WS_Bookings', orFormula('Status', BLOCKING_BOOKING_STATUSES.concat(['Checked Out'])));
+  const allGuests = await airtableGet('WS_Guests', '');
+  const guestsById = new Map(allGuests.map(g => [g.id, g.fields['Guest Name'] || null]));
+
+  const sent = [];
+  const failed = [];
+  for (const property of properties) {
+    // Per-property isolation + alertShawn on failure — same established
+    // pattern as runOwnerSummary/runDailySummary/runWeeklyValueNudge.
+    try {
+      const rooms = allRooms.filter(r => (r.fields['Property'] || []).includes(property.id));
+      const roomIds = new Set(rooms.map(r => r.id));
+      const bookings = allBookings.filter(b => (b.fields['Room'] || []).some(id => roomIds.has(id)));
+      const report = aggregateMonthlyReport(property, rooms, bookings, w, guestsById);
+      await sendMonthlyReport(property, report);
+      sent.push(report);
+    } catch (err) {
+      logToAxiom('error', 'monthly_report_property_failed', {
+        propertyId: property.id, propertyName: property.fields?.['Property Name'] || null,
+        message: err.message, stack: err.stack
+      });
+      await alertShawn('monthly_report', err.message, {
+        propertyId: property.id, propertyName: property.fields?.['Property Name'] || null
+      });
+      failed.push({ propertyId: property.id, propertyName: property.fields?.['Property Name'] || null, error: err.message });
+    }
+  }
+  sent.failed = failed;
+  return sent;
+}
+
+async function monthlyReportHandler(req, res) {
+  try {
+    const sent = await runMonthlyReport();
+    res.status(200).json({ ok: true, count: sent.length, sent, failed: sent.failed || [] });
+  } catch (err) {
+    console.error('[MONTHLY-REPORT FATAL]', err.message, err.stack);
+    logToAxiom('error', 'monthly_report_fatal', { message: err.message, stack: err.stack });
+    await alertShawn('monthly_report_fatal', err.message, { scope: 'entire run, not a single property' });
+    res.status(200).json({ ok: false, error: err.message });
+  }
+}
+
 async function runOwnerSummary(opts = {}) {
   const {
     now = new Date(),
@@ -4791,6 +5024,13 @@ module.exports.cleaningTurnaroundToday = cleaningTurnaroundToday;
 module.exports.revenueToday = revenueToday;
 module.exports.tomorrowsOvernightArrivals = tomorrowsOvernightArrivals;
 module.exports.aggregateOwnerSummary = aggregateOwnerSummary;
+module.exports.aggregateMonthlyReport = aggregateMonthlyReport;
+module.exports.runMonthlyReport = runMonthlyReport;
+module.exports.monthlyReportHandler = monthlyReportHandler;
+module.exports.sendMonthlyReport = sendMonthlyReport;
+module.exports.monthlyReportTemplateParams = monthlyReportTemplateParams;
+module.exports.MONTHLY_REPORT_TEMPLATE = MONTHLY_REPORT_TEMPLATE;
+module.exports.jobDurationMs = jobDurationMs;
 module.exports.paymentReconciliationLines = paymentReconciliationLines;
 module.exports.formatPaymentReconciliationMessage = formatPaymentReconciliationMessage;
 // B19: enquiry-abandonment staleness sweep (injected `now` for timing tests).
