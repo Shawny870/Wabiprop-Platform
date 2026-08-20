@@ -2,25 +2,87 @@
   "name": "rating: '4' with a Review Link set on WS_Properties sends the review prompt and stamps Review Prompted",
   "seed": {
     "WS_Properties": [
-      { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222", "Review Link": "https://g.page/r/test-lodge/review" } }
+      {
+        "id": "recP1",
+        "fields": {
+          "Property Name": "Test Lodge",
+          "Phone Number ID": "111000111000",
+          "City": "Testville",
+          "Notify Phone": "27831112222",
+          "Review Link": "https://g.page/r/test-lodge/review"
+        }
+      }
     ],
     "WS_Guests": [
-      { "id": "recG1", "fields": { "Guest Name": "John Smith", "Phone Number": "27821234567", "Session State": "AWAITING_RATING" } }
+      {
+        "id": "recG1",
+        "fields": {
+          "Guest Name": "John Smith",
+          "Phone Number": "27821234567",
+          "Session State": "AWAITING_RATING"
+        }
+      }
     ],
     "WS_Bookings": [
-      { "id": "recB1", "fields": { "Guest": ["recG1"], "Status": "Checked Out", "Check Out": "2026-07-04T10:00:00.000Z" } }
+      {
+        "id": "recB1",
+        "fields": {
+          "Guest": [
+            "recG1"
+          ],
+          "Status": "Checked Out",
+          "Check Out": "2026-07-04T10:00:00.000Z"
+        }
+      }
     ]
   },
-  "message": { "from": "27821234567", "text": "4" },
+  "message": {
+    "from": "27821234567",
+    "text": "4"
+  },
   "expect": {
     "status": 200,
     "writes": [
-      { "op": "update", "table": "WS_Bookings", "id": "recB1", "fields": { "Rating": 4 } },
-      { "op": "update", "table": "WS_Guests", "id": "recG1", "fields": { "Session State": "NEW" } },
-      { "op": "update", "table": "WS_Bookings", "id": "recB1", "fields": { "Review Prompted": true } }
+      {
+        "op": "update",
+        "table": "WS_Properties",
+        "id": "recP1",
+        "fields": {
+          "Last Message Received": "re:.*"
+        }
+      },
+      {
+        "op": "update",
+        "table": "WS_Bookings",
+        "id": "recB1",
+        "fields": {
+          "Rating": 4
+        }
+      },
+      {
+        "op": "update",
+        "table": "WS_Guests",
+        "id": "recG1",
+        "fields": {
+          "Session State": "NEW"
+        }
+      },
+      {
+        "op": "update",
+        "table": "WS_Bookings",
+        "id": "recB1",
+        "fields": {
+          "Review Prompted": true
+        }
+      }
     ],
     "sends": [
-      { "to": "27821234567", "includes": ["https://g.page/r/test-lodge/review"] }
+      {
+        "to": "27821234567",
+        "includes": [
+          "https://g.page/r/test-lodge/review"
+        ]
+      }
     ]
   }
 }

@@ -2,19 +2,53 @@
   "name": "CONFIRMED fallback: unrecognised input re-shows the numbered menu (F9), no writes",
   "seed": {
     "WS_Properties": [
-      { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222" } }
+      {
+        "id": "recP1",
+        "fields": {
+          "Property Name": "Test Lodge",
+          "Phone Number ID": "111000111000",
+          "City": "Testville",
+          "Notify Phone": "27831112222"
+        }
+      }
     ],
     "WS_Guests": [
-      { "id": "recG1", "fields": { "Guest Name": "John Smith", "Phone Number": "27821234567", "Session State": "CONFIRMED" } }
+      {
+        "id": "recG1",
+        "fields": {
+          "Guest Name": "John Smith",
+          "Phone Number": "27821234567",
+          "Session State": "CONFIRMED"
+        }
+      }
     ],
     "WS_Cleaners": []
   },
-  "message": { "from": "27821234567", "text": "what time is breakfast?" },
+  "message": {
+    "from": "27821234567",
+    "text": "what time is breakfast?"
+  },
   "expect": {
     "status": 200,
-    "writes": [],
+    "writes": [
+      {
+        "op": "update",
+        "table": "WS_Properties",
+        "id": "recP1",
+        "fields": {
+          "Last Message Received": "re:.*"
+        }
+      }
+    ],
     "sends": [
-      { "to": "27821234567", "includes": ["Hi John Smith", "1 - I'm at the gate", "2 - Cancel my booking"] }
+      {
+        "to": "27821234567",
+        "includes": [
+          "Hi John Smith",
+          "1 - I'm at the gate",
+          "2 - Cancel my booking"
+        ]
+      }
     ]
   }
 }

@@ -148,7 +148,10 @@ test('AWAITING_STAY_TYPE: an unreadable answer re-prompts in place, zero writes'
   await send(GUEST_PHONE, 'banana');
 
   assert.strictEqual(guestRow(ctx).fields['Session State'], 'AWAITING_STAY_TYPE', 'still in the same state');
-  assert.strictEqual(ctx.airtable.log.length, writesBefore, 'no writes on an invalid answer');
+  // +1: every inbound message bumps WS_Properties.'Last Message Received'
+  // (bumpPropertyActivity) regardless of business outcome — see
+  // feat/wabistay-property-activity-tracker.
+  assert.strictEqual(ctx.airtable.log.length, writesBefore + 1, 'no business writes on an invalid answer');
   assert.match(lastText(ctx), /1 - Short stay/);
 });
 

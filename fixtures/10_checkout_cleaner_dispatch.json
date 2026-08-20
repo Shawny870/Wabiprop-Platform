@@ -2,35 +2,145 @@
   "name": "checkout: '1' in CHECKED_IN checks out booking, room to Cleaning, dispatches active cleaners, guest to AWAITING_RATING",
   "seed": {
     "WS_Properties": [
-      { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222" } }
+      {
+        "id": "recP1",
+        "fields": {
+          "Property Name": "Test Lodge",
+          "Phone Number ID": "111000111000",
+          "City": "Testville",
+          "Notify Phone": "27831112222"
+        }
+      }
     ],
     "WS_Guests": [
-      { "id": "recG1", "fields": { "Guest Name": "John Smith", "Phone Number": "27821234567", "Session State": "CHECKED_IN" } }
+      {
+        "id": "recG1",
+        "fields": {
+          "Guest Name": "John Smith",
+          "Phone Number": "27821234567",
+          "Session State": "CHECKED_IN"
+        }
+      }
     ],
     "WS_Bookings": [
-      { "id": "recB1", "fields": { "Guest": ["recG1"], "Status": "Checked In", "Checked In At": "2026-07-04T10:00:00.000Z", "Room": ["recR1"] } }
+      {
+        "id": "recB1",
+        "fields": {
+          "Guest": [
+            "recG1"
+          ],
+          "Status": "Checked In",
+          "Checked In At": "2026-07-04T10:00:00.000Z",
+          "Room": [
+            "recR1"
+          ]
+        }
+      }
     ],
     "WS_Rooms": [
-      { "id": "recR1", "fields": { "Room Name": "Room 1", "Status": "Occupied" } }
+      {
+        "id": "recR1",
+        "fields": {
+          "Room Name": "Room 1",
+          "Status": "Occupied"
+        }
+      }
     ],
     "WS_Cleaners": [
-      { "id": "recC1", "fields": { "Cleaner Name": "Thandi", "Phone Number": "0821110000", "Active": true, "Assigned Property": ["recP1"] } },
-      { "id": "recC2", "fields": { "Cleaner Name": "Retired Cleaner", "Phone Number": "0829999999", "Active": false, "Assigned Property": ["recP1"] } }
+      {
+        "id": "recC1",
+        "fields": {
+          "Cleaner Name": "Thandi",
+          "Phone Number": "0821110000",
+          "Active": true,
+          "Assigned Property": [
+            "recP1"
+          ]
+        }
+      },
+      {
+        "id": "recC2",
+        "fields": {
+          "Cleaner Name": "Retired Cleaner",
+          "Phone Number": "0829999999",
+          "Active": false,
+          "Assigned Property": [
+            "recP1"
+          ]
+        }
+      }
     ]
   },
-  "message": { "from": "27821234567", "text": "1" },
+  "message": {
+    "from": "27821234567",
+    "text": "1"
+  },
   "expect": {
     "status": 200,
     "writes": [
-      { "op": "update", "table": "WS_Bookings", "id": "recB1", "fields": { "Status": "Checked Out", "Checkout Confirmed": true } },
-      { "op": "update", "table": "WS_Rooms", "id": "recR1", "fields": { "Status": "Cleaning" } },
-      { "op": "update", "table": "WS_Rooms", "id": "recR1", "fields": { "Cleaning Started At": "re:^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}" } },
-      { "op": "update", "table": "WS_Guests", "id": "recG1", "fields": { "Session State": "AWAITING_RATING" } }
+      {
+        "op": "update",
+        "table": "WS_Properties",
+        "id": "recP1",
+        "fields": {
+          "Last Message Received": "re:.*"
+        }
+      },
+      {
+        "op": "update",
+        "table": "WS_Bookings",
+        "id": "recB1",
+        "fields": {
+          "Status": "Checked Out",
+          "Checkout Confirmed": true
+        }
+      },
+      {
+        "op": "update",
+        "table": "WS_Rooms",
+        "id": "recR1",
+        "fields": {
+          "Status": "Cleaning"
+        }
+      },
+      {
+        "op": "update",
+        "table": "WS_Rooms",
+        "id": "recR1",
+        "fields": {
+          "Cleaning Started At": "re:^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}"
+        }
+      },
+      {
+        "op": "update",
+        "table": "WS_Guests",
+        "id": "recG1",
+        "fields": {
+          "Session State": "AWAITING_RATING"
+        }
+      }
     ],
     "sends": [
-      { "to": "27821110000", "includes": ["Hi Thandi", "Room 1 has just been vacated", "Reply *DONE* when complete"] },
-      { "to": "27821234567", "includes": ["Thank you for staying with us at Test Lodge"] },
-      { "to": "27821234567", "includes": ["rate your stay"] }
+      {
+        "to": "27821110000",
+        "includes": [
+          "Hi Thandi",
+          "Room 1 has just been vacated",
+          "Reply *DONE* when complete"
+        ]
+      },
+      {
+        "to": "27821234567",
+        "includes": [
+          "Thank you for staying with us at Test Lodge"
+        ]
+      },
+      {
+        "to": "27821234567",
+        "includes": [
+          "rate your stay"
+        ]
+      }
     ]
   }
 }
