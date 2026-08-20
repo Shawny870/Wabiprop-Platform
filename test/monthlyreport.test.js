@@ -178,6 +178,52 @@ test('short-stay (Hourly) duration mode: zero Hourly bookings reports "no bookin
   assert.strictEqual(report.shortStayDurationModeInsight, 'No short-stay bookings this period.');
 });
 
+// ── Busiest-day insight: single calendar day with the most rooms occupied ──
+
+test('busiest day: identifies the single calendar day with the highest distinct-room occupancy', () => {
+  const bookings = [
+    // recR1: Fri 21 Aug -> Sun 23 Aug (2 nights: occupies Fri 21 and Sat 22)
+    { id: 'recB1', fields: { 'Guest': ['recG1'], 'Room': ['recR1'], 'Booking Type': 'Overnight', 'Amount Due': 400, 'Check In': daysAgo(10), 'Check Out': daysAgo(8) } },
+    // recR2: Sat 22 Aug -> Sun 23 Aug (1 night: occupies Sat 22)
+    { id: 'recB2', fields: { 'Guest': ['recG2'], 'Room': ['recR2'], 'Booking Type': 'Overnight', 'Amount Due': 400, 'Check In': daysAgo(9), 'Check Out': daysAgo(8) } },
+    // recR3: Sat 22 Aug -> Sun 23 Aug (1 night: occupies Sat 22)
+    { id: 'recB3', fields: { 'Guest': ['recG3'], 'Room': ['recR3'], 'Booking Type': 'Overnight', 'Amount Due': 400, 'Check In': daysAgo(9), 'Check Out': daysAgo(8) } }
+  ];
+  const report = wh.aggregateMonthlyReport(property, rooms, bookings, windowFor(NOW));
+  // Sat 22 Aug: recR1 + recR2 + recR3 = 3 rooms. Fri 21 Aug: recR1 only = 1 room.
+  assert.strictEqual(report.busiestDayInsight, 'Your busiest day this month was Saturday, 22 August, with 3 rooms occupied.');
+  assert.strictEqual(report.busiestDay.roomsOccupied, 3);
+  assert.strictEqual(report.busiestDay.dates.length, 1);
+});
+
+test('busiest day: a tie between two days states both explicitly rather than picking a winner', () => {
+  const bookings = [
+    { id: 'recB1', fields: { 'Guest': ['recG1'], 'Room': ['recR1'], 'Booking Type': 'Overnight', 'Amount Due': 400, 'Check In': daysAgo(9), 'Check Out': daysAgo(8) } },  // Sat 22 Aug
+    { id: 'recB2', fields: { 'Guest': ['recG2'], 'Room': ['recR2'], 'Booking Type': 'Overnight', 'Amount Due': 400, 'Check In': daysAgo(9), 'Check Out': daysAgo(8) } },  // Sat 22 Aug
+    { id: 'recB3', fields: { 'Guest': ['recG3'], 'Room': ['recR1'], 'Booking Type': 'Overnight', 'Amount Due': 400, 'Check In': daysAgo(15), 'Check Out': daysAgo(14) } }, // Sun 16 Aug
+    { id: 'recB4', fields: { 'Guest': ['recG4'], 'Room': ['recR2'], 'Booking Type': 'Overnight', 'Amount Due': 400, 'Check In': daysAgo(15), 'Check Out': daysAgo(14) } }  // Sun 16 Aug
+  ];
+  const report = wh.aggregateMonthlyReport(property, rooms, bookings, windowFor(NOW));
+  assert.strictEqual(report.busiestDayInsight, 'Your busiest days this month were Sunday 16 August and Saturday 22 August.');
+  assert.strictEqual(report.busiestDay.roomsOccupied, 2);
+  assert.deepStrictEqual(report.busiestDay.dates, ['2026-08-16', '2026-08-22']);
+});
+
+test('busiest day: zero bookings this month reports "no bookings," no crash or false claim', () => {
+  const report = wh.aggregateMonthlyReport(property, rooms, [], windowFor(NOW));
+  assert.strictEqual(report.busiestDayInsight, 'No bookings this month.');
+  assert.strictEqual(report.busiestDay.roomsOccupied, 0);
+  assert.deepStrictEqual(report.busiestDay.dates, []);
+});
+
+test('busiest day: a single booking is a true (not misleading) busiest-day claim, singular "room"', () => {
+  const bookings = [
+    { id: 'recB1', fields: { 'Guest': ['recG1'], 'Room': ['recR1'], 'Booking Type': 'Overnight', 'Amount Due': 400, 'Check In': daysAgo(9), 'Check Out': daysAgo(8) } }
+  ];
+  const report = wh.aggregateMonthlyReport(property, rooms, bookings, windowFor(NOW));
+  assert.strictEqual(report.busiestDayInsight, 'Your busiest day this month was Saturday, 22 August, with 1 room occupied.');
+});
+
 // ── Cron-level: stubbed send, per-property isolation, alertShawn ───────────
 
 test('runMonthlyReport produces one stubbed payload per property, read-only', async () => {
