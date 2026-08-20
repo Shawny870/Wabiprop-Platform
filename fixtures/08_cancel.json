@@ -2,25 +2,78 @@
   "name": "cancel: '2' in CONFIRMED cancels the booking and resets guest to NEW",
   "seed": {
     "WS_Properties": [
-      { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222" } }
+      {
+        "id": "recP1",
+        "fields": {
+          "Property Name": "Test Lodge",
+          "Phone Number ID": "111000111000",
+          "City": "Testville",
+          "Notify Phone": "27831112222"
+        }
+      }
     ],
     "WS_Guests": [
-      { "id": "recG1", "fields": { "Guest Name": "John Smith", "Phone Number": "27821234567", "Session State": "CONFIRMED" } }
+      {
+        "id": "recG1",
+        "fields": {
+          "Guest Name": "John Smith",
+          "Phone Number": "27821234567",
+          "Session State": "CONFIRMED"
+        }
+      }
     ],
     "WS_Bookings": [
-      { "id": "recB1", "fields": { "Guest": ["recG1"], "Status": "Confirmed" } }
+      {
+        "id": "recB1",
+        "fields": {
+          "Guest": [
+            "recG1"
+          ],
+          "Status": "Confirmed"
+        }
+      }
     ],
     "WS_Cleaners": []
   },
-  "message": { "from": "27821234567", "text": "2" },
+  "message": {
+    "from": "27821234567",
+    "text": "2"
+  },
   "expect": {
     "status": 200,
     "writes": [
-      { "op": "update", "table": "WS_Bookings", "id": "recB1", "fields": { "Status": "Cancelled" } },
-      { "op": "update", "table": "WS_Guests", "id": "recG1", "fields": { "Session State": "NEW" } }
+      {
+        "op": "update",
+        "table": "WS_Properties",
+        "id": "recP1",
+        "fields": {
+          "Last Message Received": "re:.*"
+        }
+      },
+      {
+        "op": "update",
+        "table": "WS_Bookings",
+        "id": "recB1",
+        "fields": {
+          "Status": "Cancelled"
+        }
+      },
+      {
+        "op": "update",
+        "table": "WS_Guests",
+        "id": "recG1",
+        "fields": {
+          "Session State": "NEW"
+        }
+      }
     ],
     "sends": [
-      { "to": "27821234567", "includes": ["Your booking has been cancelled"] }
+      {
+        "to": "27821234567",
+        "includes": [
+          "Your booking has been cancelled"
+        ]
+      }
     ]
   }
 }

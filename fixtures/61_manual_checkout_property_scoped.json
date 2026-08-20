@@ -3,37 +3,165 @@
   "comment": "Two properties, each with one Active cleaner, plus an Active-but-unassigned cleaner. All three are Active, so the {Active} filter cannot be what excludes anyone — only property scoping can. Scope comes from the booking's own WS_Property (recP1), not from a Room->Property walk: recR1 is deliberately left WITHOUT a Property link, so a room-walk-based implementation would resolve nothing and this fixture would fail. Correct behaviour is exactly two sends: Thandi (property A) then the guest. Under the old unscoped `{Active} = TRUE()` dispatch, Bongani (property B) and Sipho (unassigned) are messaged too and the send count goes 2 -> 4, failing the harness's exact-count assertion. That count check is what proves EXCLUSION, not just inclusion.",
   "seed": {
     "WS_Properties": [
-      { "id": "recP1", "fields": { "Property Name": "Villa Liza Guest Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222" } },
-      { "id": "recP2", "fields": { "Property Name": "Second Lodge", "Phone Number ID": "222000222000", "City": "Othertown", "Notify Phone": "27834445555" } }
+      {
+        "id": "recP1",
+        "fields": {
+          "Property Name": "Villa Liza Guest Lodge",
+          "Phone Number ID": "111000111000",
+          "City": "Testville",
+          "Notify Phone": "27831112222"
+        }
+      },
+      {
+        "id": "recP2",
+        "fields": {
+          "Property Name": "Second Lodge",
+          "Phone Number ID": "222000222000",
+          "City": "Othertown",
+          "Notify Phone": "27834445555"
+        }
+      }
     ],
     "WS_Guests": [
-      { "id": "recG1", "fields": { "Guest Name": "John Smith", "Phone Number": "27821234567", "Session State": "CHECKED_IN" } }
+      {
+        "id": "recG1",
+        "fields": {
+          "Guest Name": "John Smith",
+          "Phone Number": "27821234567",
+          "Session State": "CHECKED_IN"
+        }
+      }
     ],
     "WS_Bookings": [
-      { "id": "recB1", "fields": { "Guest": ["recG1"], "Status": "Checked In", "Checked In At": "2026-07-04T10:00:00.000Z", "Room": ["recR1"], "WS_Property": ["recP1"] } }
+      {
+        "id": "recB1",
+        "fields": {
+          "Guest": [
+            "recG1"
+          ],
+          "Status": "Checked In",
+          "Checked In At": "2026-07-04T10:00:00.000Z",
+          "Room": [
+            "recR1"
+          ],
+          "WS_Property": [
+            "recP1"
+          ]
+        }
+      }
     ],
     "WS_Rooms": [
-      { "id": "recR1", "fields": { "Room Name": "Room 1", "Status": "Occupied" } }
+      {
+        "id": "recR1",
+        "fields": {
+          "Room Name": "Room 1",
+          "Status": "Occupied"
+        }
+      }
     ],
     "WS_Cleaners": [
-      { "id": "recC1", "fields": { "Cleaner Name": "Thandi", "Phone Number": "0821110000", "Active": true, "Assigned Property": ["recP1"] } },
-      { "id": "recC2", "fields": { "Cleaner Name": "Bongani", "Phone Number": "0822220000", "Active": true, "Assigned Property": ["recP2"] } },
-      { "id": "recC3", "fields": { "Cleaner Name": "Sipho", "Phone Number": "0823330000", "Active": true } }
+      {
+        "id": "recC1",
+        "fields": {
+          "Cleaner Name": "Thandi",
+          "Phone Number": "0821110000",
+          "Active": true,
+          "Assigned Property": [
+            "recP1"
+          ]
+        }
+      },
+      {
+        "id": "recC2",
+        "fields": {
+          "Cleaner Name": "Bongani",
+          "Phone Number": "0822220000",
+          "Active": true,
+          "Assigned Property": [
+            "recP2"
+          ]
+        }
+      },
+      {
+        "id": "recC3",
+        "fields": {
+          "Cleaner Name": "Sipho",
+          "Phone Number": "0823330000",
+          "Active": true
+        }
+      }
     ]
   },
-  "message": { "from": "27821234567", "text": "1" },
+  "message": {
+    "from": "27821234567",
+    "text": "1"
+  },
   "expect": {
     "status": 200,
     "writes": [
-      { "op": "update", "table": "WS_Bookings", "id": "recB1", "fields": { "Status": "Checked Out", "Checkout Confirmed": true } },
-      { "op": "update", "table": "WS_Rooms", "id": "recR1", "fields": { "Status": "Cleaning" } },
-      { "op": "update", "table": "WS_Rooms", "id": "recR1", "fields": { "Cleaning Started At": "re:^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}" } },
-      { "op": "update", "table": "WS_Guests", "id": "recG1", "fields": { "Session State": "AWAITING_RATING" } }
+      {
+        "op": "update",
+        "table": "WS_Properties",
+        "id": "recP1",
+        "fields": {
+          "Last Message Received": "re:.*"
+        }
+      },
+      {
+        "op": "update",
+        "table": "WS_Bookings",
+        "id": "recB1",
+        "fields": {
+          "Status": "Checked Out",
+          "Checkout Confirmed": true
+        }
+      },
+      {
+        "op": "update",
+        "table": "WS_Rooms",
+        "id": "recR1",
+        "fields": {
+          "Status": "Cleaning"
+        }
+      },
+      {
+        "op": "update",
+        "table": "WS_Rooms",
+        "id": "recR1",
+        "fields": {
+          "Cleaning Started At": "re:^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}"
+        }
+      },
+      {
+        "op": "update",
+        "table": "WS_Guests",
+        "id": "recG1",
+        "fields": {
+          "Session State": "AWAITING_RATING"
+        }
+      }
     ],
     "sends": [
-      { "to": "27821110000", "includes": ["Hi Thandi", "Room 1 has just been vacated", "Reply *DONE* when complete"] },
-      { "to": "27821234567", "includes": ["Thank you for staying with us at Villa Liza Guest Lodge"] },
-      { "to": "27821234567", "includes": ["rate your stay"] }
+      {
+        "to": "27821110000",
+        "includes": [
+          "Hi Thandi",
+          "Room 1 has just been vacated",
+          "Reply *DONE* when complete"
+        ]
+      },
+      {
+        "to": "27821234567",
+        "includes": [
+          "Thank you for staying with us at Villa Liza Guest Lodge"
+        ]
+      },
+      {
+        "to": "27821234567",
+        "includes": [
+          "rate your stay"
+        ]
+      }
     ]
   }
 }

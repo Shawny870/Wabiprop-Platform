@@ -46,6 +46,14 @@
     "status": 200,
     "writes": [
       {
+        "op": "update",
+        "table": "WS_Properties",
+        "id": "recP1",
+        "fields": {
+          "Last Message Received": "re:.*"
+        }
+      },
+      {
         "op": "create",
         "table": "WS_Enquiries",
         "fields": {

@@ -248,6 +248,9 @@ async function notifyCleanerOfArrival({ propertyId, bookingId, propertyName, gue
     // Fails LOUD, not closed: unlike dispatch-to-everybody (Bug 2), notifying
     // nobody at the gate is itself the bug being fixed, so it must be visible.
     logToAxiom('warn', 'cleaner_gate_notify_no_cleaner', { ...correlation, reason: 'no active cleaner assigned to property' });
+    await alertShawn('gate_arrival', 'no active cleaner assigned to property', {
+      propertyId, propertyName, bookingId
+    });
     return;
   }
 
@@ -453,6 +456,67 @@ function formatPhone(raw) {
   let clean = raw.replace(/[\s\-\+]/g, '');
   if (clean.startsWith('0')) clean = '27' + clean.slice(1);
   return clean;
+}
+
+// ─── ALERT SHAWN (Airtable-backed) ──────────────────────────────────────────
+// Ported from api/wabiprop/_lib/cronHelpers.js:100-105. Unlike that copy, which
+// hardcodes the destination number, this one reads it from WS_Config (single
+// row, "Alert Phone" field) so the number can be changed without a redeploy.
+// Free-form sendWhatsApp, not a template — same choice the Wabiprop original
+// makes; the ops number is expected to already be inside the 24h session
+// window from prior bot interaction, so this carries no new re-engagement
+// risk beyond what alertShawn already has there.
+
+let _alertPhoneCache = { value: null, fetchedAt: 0 };
+// 5 min: long enough that a burst of failures in one run doesn't hammer
+// Airtable once per failure, short enough that changing the number in
+// Airtable takes effect within roughly one cron cycle rather than hours.
+const ALERT_PHONE_CACHE_TTL_MS = 5 * 60 * 1000;
+
+async function getAlertPhone() {
+  const now = Date.now();
+  if (_alertPhoneCache.value && (now - _alertPhoneCache.fetchedAt) < ALERT_PHONE_CACHE_TTL_MS) {
+    return _alertPhoneCache.value;
+  }
+  try {
+    // WS_Config is meant to be a single-row table by convention, but the
+    // live base has been observed with extra blank rows (e.g. created via
+    // Airtable's own "+" row button) — rows[0] is Airtable's return order,
+    // NOT a guarantee the populated row comes first. Find the first row
+    // that actually HAS a value instead of blindly trusting index 0, so a
+    // reordered or newly-added blank row can't silently break alerting.
+    const rows = await airtableGet('WS_Config', '');
+    const populated = rows.find(r => r.fields['Alert Phone']);
+    if (rows.length > 1) {
+      logToAxiom('warn', 'alert_phone_multiple_rows', { rowCount: rows.length, usedRowId: populated ? populated.id : null });
+    }
+    const phone = populated && populated.fields['Alert Phone'];
+    if (!phone) throw new Error('WS_Config has no row with an Alert Phone value');
+    _alertPhoneCache = { value: String(phone), fetchedAt: now };
+    return _alertPhoneCache.value;
+  } catch (err) {
+    // Airtable outage or a missing/misconfigured WS_Config row must not leave
+    // zero alerting — fall back to the env var, but log every time this
+    // happens so silent reliance on the fallback stays visible in Axiom
+    // rather than persisting unnoticed for weeks.
+    logToAxiom('warn', 'alert_phone_fallback_used', { reason: err.message });
+    const fallback = process.env.ALERT_PHONE_FALLBACK;
+    if (!fallback) {
+      logToAxiom('error', 'alert_phone_unavailable', { reason: 'no WS_Config row and no ALERT_PHONE_FALLBACK set' });
+    }
+    return fallback || null;
+  }
+}
+
+async function alertShawn(cronName, errorMessage, context = {}) {
+  const to = await getAlertPhone();
+  if (!to) {
+    logToAxiom('error', 'alert_shawn_no_destination', { cronName, errorMessage });
+    return;
+  }
+  const extra = Object.keys(context).length ? `\n${JSON.stringify(context)}` : '';
+  const msg = `WABISTAY CRON ERROR — ${cronName} failed.\nError: ${errorMessage}${extra}`;
+  await sendWhatsApp(to, msg).catch(e => console.error('[alertShawn failed]', e.message));
 }
 
 // ─── SAST DATES (B7) ─────────────────────────────────────────────────────────
@@ -752,6 +816,41 @@ async function resolveProperty(phoneNumberId) {
     return null;
   }
   return properties[0];
+}
+
+// ─── PROPERTY ACTIVITY TRACKER ──────────────────────────────────────────────
+// Three WS_Properties timestamp fields, populated best-effort so a write
+// failure here never blocks the guest/owner-facing flow it's attached to:
+//   · Last Message Received — any inbound webhook message resolved to this
+//     property (set in handleMessage, right after resolveProperty).
+//   · Last Report Sent — deliberately NOT a WS_Properties write. runOwnerSummary/
+//     runDailySummary are a documented, tested read-only invariant (Rule 29,
+//     test/dailysummary.test.js: "both crons are read-only reporting — zero
+//     writes from either"), so this is surfaced instead from the existing
+//     owner_summary_payload / daily_summary_payload Axiom events, which
+//     already carry propertyId and a timestamp per run — no new write, no
+//     invariant break, satisfies "surface from existing cron logs" literally.
+//   · Last Owner App Open — NOT a real Meta webhook event. Meta's Cloud API
+//     has no "user opened WhatsApp" callback; account_offboarded/
+//     account_reconnected (the events the original ask named) are
+//     Coexistence WABA-connection events, not per-owner app-open signals, and
+//     this codebase doesn't subscribe to them. The best available proxy is a
+//     `read` delivery-status callback on a message sent to that owner's
+//     Notify Phone — you cannot mark a WhatsApp message read without having
+//     opened the app around that time. This only advances when Meta sends us
+//     something to read a status on, so it under-reports app opens with no
+//     Wabistay message in flight — flagged, not silently presented as ground
+//     truth.
+async function bumpPropertyActivity(propertyId, field) {
+  if (!propertyId) return;
+  try {
+    const result = await airtableUpdate('WS_Properties', propertyId, { [field]: new Date().toISOString() });
+    if (result && result.error) {
+      logToAxiom('warn', 'property_activity_write_failed', { propertyId, field, error: JSON.stringify(result.error) });
+    }
+  } catch (err) {
+    logToAxiom('warn', 'property_activity_write_failed', { propertyId, field, error: err.message });
+  }
 }
 
 function propertyCityLine(property) {
@@ -3904,6 +4003,13 @@ async function sendOwnerSummary(property, summary) {
     : (OWNER_PHONE || null);
   const paymentReconciliationMessage = formatPaymentReconciliationMessage(summary);
   const payload = { ...summary, template: OWNER_SUMMARY_TEMPLATE, notifyPhone, paymentReconciliationMessage };
+  // Last Report Sent is deliberately NOT written back to WS_Properties here —
+  // runOwnerSummary/runDailySummary are documented and tested (Rule 29,
+  // test/dailysummary.test.js) as read-only reporting with zero Airtable
+  // writes from either cron; adding one would silently break that invariant.
+  // "Last Report Sent" is surfaced from this same owner_summary_payload
+  // Axiom event instead (it already carries propertyId + the event's own
+  // _time) — see the property-activity-tracker PR body for the query.
   logToAxiom('info', 'owner_summary_payload', payload);
 
   // TODO(B17): `sendWhatsAppTemplate` now EXISTS (see the WhatsApp template helper
@@ -3965,6 +4071,11 @@ async function runOwnerSummary(opts = {}) {
         propertyId: property.id, propertyName: property.fields?.['Property Name'] || null,
         message: err.message, stack: err.stack
       });
+      // Fires per property, not once for the whole run, so the alert itself
+      // says which property failed rather than just "owner summary failed".
+      await alertShawn('owner_summary', err.message, {
+        propertyId: property.id, propertyName: property.fields?.['Property Name'] || null
+      });
       failed.push({ propertyId: property.id, propertyName: property.fields?.['Property Name'] || null, error: err.message });
     }
   }
@@ -3986,6 +4097,7 @@ async function ownerSummaryHandler(req, res) {
   } catch (err) {
     console.error('[OWNER-SUMMARY FATAL]', err.message, err.stack);
     logToAxiom('error', 'owner_summary_fatal', { message: err.message, stack: err.stack });
+    await alertShawn('owner_summary_fatal', err.message, { scope: 'entire run, not a single property' });
     res.status(200).json({ ok: false, error: err.message });
   }
 }
@@ -4316,6 +4428,8 @@ async function sendDailySummary(property, summary) {
   const templateParams = dailySummaryTemplateParams(summaryWithOwner);
 
   const payload = { ...summaryWithOwner, template: DAILY_SUMMARY_TEMPLATE, notifyPhone, templateParams };
+  // See the matching comment in sendOwnerSummary — deliberately no Airtable
+  // write here either, for the same read-only-cron reason.
   logToAxiom('info', 'daily_summary_payload', payload);
 
   // TODO(Stage 3 part 3): once DAILY_SUMMARY_TEMPLATE is approved by Meta,
@@ -4386,6 +4500,11 @@ async function runDailySummary(opts = {}) {
         propertyId: property.id, propertyName: property.fields?.['Property Name'] || null,
         message: err.message, stack: err.stack
       });
+      // Fires per property, not once for the whole run, so the alert itself
+      // says which property failed rather than just "daily summary failed".
+      await alertShawn('daily_summary', err.message, {
+        propertyId: property.id, propertyName: property.fields?.['Property Name'] || null
+      });
       failed.push({ propertyId: property.id, propertyName: property.fields?.['Property Name'] || null, error: err.message });
     }
   }
@@ -4399,6 +4518,7 @@ async function dailySummaryHandler(req, res) {
   } catch (err) {
     console.error('[DAILY-SUMMARY FATAL]', err.message, err.stack);
     logToAxiom('error', 'daily_summary_fatal', { message: err.message, stack: err.stack });
+    await alertShawn('daily_summary_fatal', err.message, { scope: 'entire run, not a single property' });
     res.status(200).json({ ok: false, error: err.message });
   }
 }
@@ -4425,6 +4545,8 @@ async function handleMessage(from, messageText, phoneNumberId, wamid) {
     await sendWhatsApp(phone, msg('numberNotConfigured'));
     return;
   }
+  // Best-effort, non-blocking — see bumpPropertyActivity's own comment.
+  await bumpPropertyActivity(property.id, 'Last Message Received');
 
   const guestRecords = await airtableGet('WS_Guests', `{Phone Number} = '${phone}'`);
   const guest = guestRecords[0] || null;
@@ -4627,6 +4749,17 @@ module.exports = async function handler(req, res) {
         const detail = { wamid: s.id, status: s.status, timestamp: s.timestamp, recipient: s.recipient_id };
         if (s.status === 'failed' && s.errors) detail.errors = s.errors;
         logToAxiom('info', 'whatsapp_status_callback', detail);
+
+        // Proxy for "owner opened WhatsApp" — see bumpPropertyActivity's
+        // comment for why this is a proxy, not a real Meta app-open event.
+        if (s.status === 'read' && s.recipient_id) {
+          const recipient = formatPhone(String(s.recipient_id));
+          airtableGet('WS_Properties', `{Notify Phone} = '${recipient}'`)
+            .then(matches => {
+              if (matches[0]) return bumpPropertyActivity(matches[0].id, 'Last Owner App Open');
+            })
+            .catch(err => logToAxiom('warn', 'owner_app_open_lookup_failed', { recipient, error: err.message }));
+        }
       }
       res.status(200).send('OK');
       return;
@@ -4733,6 +4866,9 @@ module.exports.runEnquiryAbandonment = runEnquiryAbandonment;
 module.exports.airtableCreate = airtableCreate;
 module.exports.airtableUpdate = airtableUpdate;
 module.exports.sendWhatsApp = sendWhatsApp;
+module.exports.alertShawn = alertShawn;
+module.exports.getAlertPhone = getAlertPhone;
+module.exports.bumpPropertyActivity = bumpPropertyActivity;
 // CEO manual report-trigger (api/wabistay/cron/manual-report.js) needs these
 // to build the SAME live-data fetch + stubbed-send pipeline the real crons
 // use, without duplicating the Airtable query/pagination logic here.

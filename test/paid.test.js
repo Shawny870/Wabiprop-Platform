@@ -212,7 +212,11 @@ test('an amount that is not the amount owed is refused, and NOTHING is written',
   const b = bookingRow(ctx);
   assert.strictEqual(b['Payment Status'], 'Unpaid', 'still unpaid');
   assert.strictEqual(b['Amount Paid'], undefined, 'no figure recorded');
-  assert.strictEqual(ctx.airtable.log.length, writesBefore, 'zero writes');
+  // +1: every inbound message bumps WS_Properties.'Last Message Received'
+  // (bumpPropertyActivity) regardless of business outcome — see
+  // feat/wabistay-property-activity-tracker. "Zero writes" here means zero
+  // business writes.
+  assert.strictEqual(ctx.airtable.log.length, writesBefore + 1, 'zero business writes');
   assert.match(texts(ctx), /doesn't match what's owed/);
   assert.match(texts(ctx), /R400\.00/, 'the reply states the correct figure to re-send');
   assert.ok(axiomEvents(ctx).includes('payment_amount_mismatch'));
@@ -282,7 +286,8 @@ test('re-sending PAID on a settled booking reports it and writes nothing', async
 
   await send(RECEPTION_PHONE, 'PAID ROOM 2 400');
 
-  assert.strictEqual(ctx.airtable.log.length, writesAfterFirst, 'no second write of any kind');
+  // +1: the property-activity bump (see comment above), not a business write.
+  assert.strictEqual(ctx.airtable.log.length, writesAfterFirst + 1, 'no second business write of any kind');
   assert.match(texts(ctx), /Already recorded/);
   assert.ok(axiomEvents(ctx).includes('paid_already_recorded'));
 });
@@ -513,7 +518,8 @@ test('COLLECTED hits the identical mismatch-refusal path — same rule, cannot d
   const b = bookingRow(ctx);
   assert.strictEqual(b['Payment Status'], 'Unpaid', 'still unpaid');
   assert.strictEqual(b['Amount Paid'], undefined, 'no figure recorded');
-  assert.strictEqual(ctx.airtable.log.length, writesBefore, 'zero writes — same refusal rule as PAID');
+  // +1: property-activity bump, not a business write — see comment above.
+  assert.strictEqual(ctx.airtable.log.length, writesBefore + 1, 'zero business writes — same refusal rule as PAID');
   assert.match(texts(ctx), /doesn't match what's owed/);
   assert.ok(axiomEvents(ctx).includes('payment_amount_mismatch'));
 });
@@ -525,7 +531,8 @@ test('COLLECTED hits the identical idempotency guard as PAID — a second COLLEC
 
   await send(RECEPTION_PHONE, 'COLLECTED ROOM 2 400');
 
-  assert.strictEqual(ctx.airtable.log.length, writesAfterFirst, 'the already-Paid guard fires identically');
+  // +1: property-activity bump, not a business write — see comment above.
+  assert.strictEqual(ctx.airtable.log.length, writesAfterFirst + 1, 'the already-Paid guard fires identically');
   assert.strictEqual(bookingRow(ctx)['Amount Paid'], 400);
 });
 
