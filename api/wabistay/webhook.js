@@ -4440,23 +4440,64 @@ function aggregateMonthlyReport(property, rooms, bookings, w, guestsById = new M
   };
 }
 
-// CEO-confirmed body structure (Option B): duration-mode insights (PR #52)
-// sit directly under their booking-type's plain count line, one pair per
-// booking type. busiestDayInsight (PR #53) is deliberately NOT included here
-// — placement/whether-at-all is still an open CEO decision, not this pass's
-// call to make.
+// wabistay_owner_monthly_recap was ALREADY SUBMITTED to Meta built around 13
+// separate {{n}} slots — split this-month/last-month values for occupancy,
+// revenue, and rating, NOT the combined "up X% vs last month" delta
+// sentences report.insights[] holds (those stay in `insights` for Axiom/
+// internal use; this function reads the raw split fields instead).
+//
+// FLAG FOR CEO: this order is what was specified for this rebuild — double
+// check it against the ACTUAL submitted template body's {{n}} sequence
+// before merging. A silent mismatch here sends data into the wrong slot
+// with no error.
+//   {{1}} ownerName · {{2}} propertyName · {{3}} occupancy this-month ·
+//   {{4}} occupancy last-month · {{5}} revenue this-month · {{6}} revenue
+//   last-month · {{7}} overnight booking count · {{8}} overnight
+//   duration-mode sentence (PR #52) · {{9}} short-stay booking count ·
+//   {{10}} short-stay duration-mode sentence (PR #52) · {{11}} repeat-guest
+//   % (12-month rolling window) · {{12}} rating this-month · {{13}} rating
+//   last-month.
+// busiestDayInsight (PR #53) is deliberately NOT included — placement/
+// whether-at-all is still an open CEO decision, not this pass's call to make.
+//
+// Deliberately synchronous and pure, same reasoning as
+// dailySummaryTemplateParams: expects report.ownerName to already be
+// resolved and attached by the caller (via resolveOwnerName) before this
+// runs, and throws rather than silently defaulting if it's missing —
+// sending "undefined" into a live WhatsApp template to a real owner is
+// worse than a loud failure during wiring.
+//
+// Revenue params are the plain formatted currency figure only (e.g.
+// "R12400") — the "earned" wording lives in the template's static text, not
+// baked into the param, per instructions. Matches this file's existing
+// R-prefix + Math.round currency convention (same as pctDeltaInsight's
+// revenue formatting) rather than inventing a new comma-grouped format that
+// doesn't exist anywhere else in this codebase.
 function monthlyReportTemplateParams(report) {
+  if (report.ownerName === undefined || report.ownerName === null) {
+    throw new Error(
+      'monthlyReportTemplateParams: report.ownerName is missing — resolve it with ' +
+      'resolveOwnerName(property) and attach it to the report before calling this function.'
+    );
+  }
+
+  const pctOrNA = v => (v === null ? 'N/A' : `${v}%`);
+  const ratingOrNA = v => (v === null ? 'N/A' : `${Math.round(v * 10) / 10}`);
+
   return [
+    report.ownerName,
     report.propertyName,
-    report.insights[0], // occupancy
-    report.insights[1], // revenue
-    report.insights[2], // avg length of stay
-    report.insights[3], // repeat-guest rate
-    report.insights[5], // rating (cleaning turnaround, insights[4], omitted from the template body — see sendMonthlyReport comment)
-    String(report.overnightBookingsCount), // {{7}} Overnight bookings: <count>
-    report.overnightDurationModeInsight,   // {{8}}
-    String(report.shortStayBookingsCount), // {{9}} Short-stay bookings: <count>
-    report.shortStayDurationModeInsight    // {{10}}
+    pctOrNA(report.occupancy.currentPct),
+    pctOrNA(report.occupancy.priorPct),
+    `R${Math.round(report.revenue.current)}`,
+    `R${Math.round(report.revenue.prior)}`,
+    String(report.overnightBookingsCount),
+    report.overnightDurationModeInsight,
+    String(report.shortStayBookingsCount),
+    report.shortStayDurationModeInsight,
+    report.repeatGuestRate === null ? 'N/A' : `${Math.round(report.repeatGuestRate * 100)}%`,
+    ratingOrNA(report.avgRating),
+    ratingOrNA(report.priorAvgRating)
   ];
 }
 
@@ -4470,8 +4511,10 @@ async function sendMonthlyReport(property, report) {
   const notifyPhone = property.fields['Notify Phone']
     ? property.fields['Notify Phone'].replace(/[\s\-\+]/g, '')
     : (OWNER_PHONE || null);
-  const templateParams = monthlyReportTemplateParams(report);
-  const payload = { ...report, template: MONTHLY_REPORT_TEMPLATE, notifyPhone, templateParams };
+  const ownerName = await resolveOwnerName(property);
+  const reportWithOwner = { ...report, ownerName };
+  const templateParams = monthlyReportTemplateParams(reportWithOwner);
+  const payload = { ...reportWithOwner, template: MONTHLY_REPORT_TEMPLATE, notifyPhone, templateParams };
   logToAxiom('info', 'monthly_report_payload', payload);
 
   // TODO: once MONTHLY_REPORT_TEMPLATE is approved by Meta, this is the

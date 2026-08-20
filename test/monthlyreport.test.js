@@ -36,7 +36,8 @@ const rooms = [
   { id: 'recR1', fields: { 'Room Name': 'Room 01', 'Status': 'Available', 'Property': ['recP1'] } },
   { id: 'recR2', fields: { 'Room Name': 'Room 02', 'Status': 'Available', 'Property': ['recP1'] } }
 ];
-const property = { id: 'recP1', fields: { 'Property Name': 'Villa Liza Guest Lodge', 'Notify Phone': '27732273477' } };
+const property = { id: 'recP1', fields: { 'Property Name': 'Villa Liza Guest Lodge', 'Notify Phone': '27732273477', 'Owner': ['recOwnerVL'] } };
+const ownerRecord = { id: 'recOwnerVL', fields: { 'Owner Name': 'Villa Liza Owner' } };
 
 test('occupancy, revenue, and rating trends compare this month vs last month correctly', () => {
   const bookings = [
@@ -249,6 +250,7 @@ test('busiest day: a single booking is a true (not misleading) busiest-day claim
 test('runMonthlyReport produces one stubbed payload per property, read-only', async () => {
   const ctx = setup({
     WS_Properties: [property],
+    WS_Owners: [ownerRecord],
     WS_Rooms: rooms,
     WS_Bookings: [{ id: 'recB1', fields: { 'Guest': ['recG1'], 'Room': ['recR1'], 'Booking Type': 'Overnight', 'Amount Due': 400, 'Check In': daysAgo(5), 'Check Out': daysAgo(3) } }],
     WS_Guests: []
@@ -262,29 +264,166 @@ test('runMonthlyReport produces one stubbed payload per property, read-only', as
   const payloadEvent = ctx.axiom.find(e => e.event === 'monthly_report_payload');
   assert.ok(payloadEvent);
   assert.strictEqual(payloadEvent.template, wh.MONTHLY_REPORT_TEMPLATE);
+  assert.strictEqual(payloadEvent.ownerName, 'Villa Liza Owner', 'ownerName is resolved and attached, not orphaned');
 });
 
-test('monthlyReportTemplateParams omits the cleaning-turnaround insight from the WhatsApp body', () => {
-  const report = wh.aggregateMonthlyReport(property, rooms, [], windowFor(NOW));
+// ── monthlyReportTemplateParams: wabistay_owner_monthly_recap, 13 split slots ──
+// Submitted-to-Meta shape: NO combined "up X% vs last month" delta sentences —
+// occupancy/revenue/rating are each two independent this-month/last-month
+// params. Mirrors dailySummaryTemplateParams's pattern exactly: pure,
+// synchronous, expects report.ownerName pre-resolved and attached, throws
+// loudly rather than silently defaulting if it's missing.
+
+function withOwner(report, ownerName = 'Villa Liza Owner') {
+  return { ...report, ownerName };
+}
+
+test('monthlyReportTemplateParams: returns exactly 13 params in the locked order, correctly sourced', () => {
+  const bookings = [
+    // This month: 1 overnight (2 nights, R400, rating 5), 1 hourly (2h)
+    { id: 'recB1', fields: { 'Guest': ['recG1'], 'Room': ['recR1'], 'Booking Type': 'Overnight', 'Amount Due': 400, 'Rating': 5, 'Check In': daysAgo(10), 'Check Out': daysAgo(8) } },
+    { id: 'recB2', fields: { 'Guest': ['recG2'], 'Room': ['recR2'], 'Booking Type': 'Hourly', 'Amount Due': 100, 'Check In': daysAgo(5), 'Check Out': new Date(new Date(daysAgo(5)).getTime() + 2 * 3600000).toISOString() } },
+    // Last month: 1 overnight (1 night, R200, rating 3)
+    { id: 'recB3', fields: { 'Guest': ['recG3'], 'Room': ['recR1'], 'Booking Type': 'Overnight', 'Amount Due': 200, 'Rating': 3, 'Check In': daysAgo(40), 'Check Out': daysAgo(39) } }
+  ];
+  const report = withOwner(wh.aggregateMonthlyReport(property, rooms, bookings, windowFor(NOW)));
   const params = wh.monthlyReportTemplateParams(report);
-  assert.strictEqual(params.length, 10);
-  assert.ok(!params.includes(report.insights[4]), 'cleaning-turnaround insight (internal ops metric) is not sent to the owner');
+
+  assert.strictEqual(params.length, 13);
+  assert.deepStrictEqual(params, [
+    'Villa Liza Owner',                              // {{1}} owner name
+    'Villa Liza Guest Lodge',                        // {{2}} property name
+    `${report.occupancy.currentPct}%`,                // {{3}} occupancy this-month
+    `${report.occupancy.priorPct}%`,                  // {{4}} occupancy last-month
+    'R500',                                            // {{5}} revenue this-month (billed) — R400 overnight + R100 hourly
+    'R200',                                           // {{6}} revenue last-month (billed)
+    '1',                                               // {{7}} overnight booking count
+    report.overnightDurationModeInsight,              // {{8}} overnight duration-mode sentence
+    '1',                                               // {{9}} short-stay booking count
+    report.shortStayDurationModeInsight,              // {{10}} short-stay duration-mode sentence
+    '0%',                                              // {{11}} repeat-guest % (no repeats in this dataset)
+    '5',                                               // {{12}} rating this-month
+    '3'                                                // {{13}} rating last-month
+  ]);
 });
 
-test('monthlyReportTemplateParams wires the duration-mode insights in after their booking-type count, per {{7}}-{{10}}', () => {
+test('monthlyReportTemplateParams: occupancy/revenue/rating are split this/last values, not combined delta sentences', () => {
+  const report = withOwner(wh.aggregateMonthlyReport(property, rooms, [], windowFor(NOW)));
+  const params = wh.monthlyReportTemplateParams(report);
+  for (const p of [params[2], params[3], params[4], params[5], params[11], params[12]]) {
+    assert.ok(!String(p).includes('vs last month'), `expected a split raw value, got a combined delta sentence: ${p}`);
+  }
+});
+
+test('monthlyReportTemplateParams: revenue param is the plain currency figure only — "earned" wording is NOT baked in', () => {
+  const bookings = [
+    { id: 'recB1', fields: { 'Guest': ['recG1'], 'Room': ['recR1'], 'Booking Type': 'Overnight', 'Amount Due': 12400, 'Check In': daysAgo(5), 'Check Out': daysAgo(3) } }
+  ];
+  const report = withOwner(wh.aggregateMonthlyReport(property, rooms, bookings, windowFor(NOW)));
+  const params = wh.monthlyReportTemplateParams(report);
+  assert.strictEqual(params[4], 'R12400');
+  assert.ok(!params[4].toLowerCase().includes('earned'), 'the word "earned" belongs in the template\'s static text, not the param value');
+});
+
+test('monthlyReportTemplateParams: null occupancy/revenue/rating/repeat-guest values render as "N/A", not "null" or NaN', () => {
+  const report = withOwner(wh.aggregateMonthlyReport(property, rooms, [], windowFor(NOW)));
+  const params = wh.monthlyReportTemplateParams(report);
+  assert.strictEqual(params[10], 'N/A', 'repeat-guest % with zero current-month guests');
+  assert.strictEqual(params[11], 'N/A', 'rating this-month with no ratings captured');
+  assert.strictEqual(params[12], 'N/A', 'rating last-month with no ratings captured');
+});
+
+test('monthlyReportTemplateParams: preserves the duration-mode insights and booking-type counts, unchanged from the prior wiring pass', () => {
   const bookings = [
     { id: 'recB1', fields: { 'Guest': ['recG1'], 'Room': ['recR1'], 'Booking Type': 'Overnight', 'Amount Due': 400, 'Check In': daysAgo(10), 'Check Out': daysAgo(8) } },
     { id: 'recB2', fields: { 'Guest': ['recG2'], 'Room': ['recR2'], 'Booking Type': 'Hourly', 'Amount Due': 100, 'Check In': daysAgo(5), 'Check Out': new Date(new Date(daysAgo(5)).getTime() + 2 * 3600000).toISOString() } }
   ];
-  const report = wh.aggregateMonthlyReport(property, rooms, bookings, windowFor(NOW));
+  const report = withOwner(wh.aggregateMonthlyReport(property, rooms, bookings, windowFor(NOW)));
   const params = wh.monthlyReportTemplateParams(report);
+  assert.strictEqual(params[6], String(report.overnightBookingsCount));
+  assert.strictEqual(params[7], report.overnightDurationModeInsight);
+  assert.strictEqual(params[8], String(report.shortStayBookingsCount));
+  assert.strictEqual(params[9], report.shortStayDurationModeInsight);
+});
 
-  assert.strictEqual(params.length, 10);
-  assert.strictEqual(params[6], String(report.overnightBookingsCount)); // {{7}}
-  assert.strictEqual(params[7], report.overnightDurationModeInsight);   // {{8}}
-  assert.strictEqual(params[8], String(report.shortStayBookingsCount)); // {{9}}
-  assert.strictEqual(params[9], report.shortStayDurationModeInsight);   // {{10}}
-  assert.ok(!params.includes(report.busiestDayInsight), 'busiestDayInsight (PR #53) is not part of this template wiring pass');
+test('monthlyReportTemplateParams: preserves the 12-month repeat-guest window, unchanged from the prior wiring pass', () => {
+  const bookings = [
+    // recG1: repeat, within the 12-month window
+    { id: 'recB1', fields: { 'Guest': ['recG1'], 'Room': ['recR1'], 'Booking Type': 'Overnight', 'Amount Due': 400, 'Check In': daysAgo(45), 'Check Out': daysAgo(44) } },
+    { id: 'recB2', fields: { 'Guest': ['recG1'], 'Room': ['recR1'], 'Booking Type': 'Overnight', 'Amount Due': 400, 'Check In': daysAgo(5), 'Check Out': daysAgo(4) } },
+    // recG2: not a repeat
+    { id: 'recB3', fields: { 'Guest': ['recG2'], 'Room': ['recR2'], 'Booking Type': 'Overnight', 'Amount Due': 400, 'Check In': daysAgo(3), 'Check Out': daysAgo(2) } }
+  ];
+  const report = withOwner(wh.aggregateMonthlyReport(property, rooms, bookings, windowFor(NOW)));
+  const params = wh.monthlyReportTemplateParams(report);
+  assert.strictEqual(params[10], '50%');
+});
+
+test('monthlyReportTemplateParams: does NOT include busiestDayInsight (PR #53) — still an open CEO decision', () => {
+  const report = withOwner(wh.aggregateMonthlyReport(property, rooms, [], windowFor(NOW)));
+  const params = wh.monthlyReportTemplateParams(report);
+  assert.ok(!params.includes(report.busiestDayInsight));
+});
+
+test('monthlyReportTemplateParams: does NOT include the cleaning-turnaround insight — internal ops metric, not owner-facing', () => {
+  const report = withOwner(wh.aggregateMonthlyReport(property, rooms, [], windowFor(NOW)));
+  const params = wh.monthlyReportTemplateParams(report);
+  assert.ok(!params.includes(report.insights[4]));
+});
+
+test('monthlyReportTemplateParams: throws if ownerName is missing (undefined) — no silent placeholder', () => {
+  const report = wh.aggregateMonthlyReport(property, rooms, [], windowFor(NOW));
+  assert.throws(() => wh.monthlyReportTemplateParams(report), /ownerName is missing/);
+});
+
+test('monthlyReportTemplateParams: throws if ownerName is null (property has no linked owner)', () => {
+  const report = withOwner(wh.aggregateMonthlyReport(property, rooms, [], windowFor(NOW)), null);
+  assert.throws(() => wh.monthlyReportTemplateParams(report), /ownerName is missing/);
+});
+
+// ── END-TO-END: runMonthlyReport actually resolves ownerName and builds 13 params ──
+
+test('E2E: runMonthlyReport resolves a real linked owner and logs correct 13-param templateParams in the Axiom payload', async () => {
+  const ctx = setup({
+    WS_Properties: [property],
+    WS_Owners: [ownerRecord],
+    WS_Rooms: rooms,
+    WS_Bookings: [{ id: 'recB1', fields: { 'Guest': ['recG1'], 'Room': ['recR1'], 'Booking Type': 'Overnight', 'Amount Due': 400, 'Rating': 5, 'Check In': daysAgo(5), 'Check Out': daysAgo(3) } }],
+    WS_Guests: []
+  });
+
+  const sent = await wh.runMonthlyReport({ now: NOW });
+  assert.strictEqual(sent.length, 1);
+  assert.strictEqual(sent.failed.length, 0);
+
+  const payloadEvent = ctx.axiom.find(e => e.event === 'monthly_report_payload');
+  assert.ok(payloadEvent);
+  assert.strictEqual(payloadEvent.templateParams.length, 13);
+  assert.strictEqual(payloadEvent.templateParams[0], 'Villa Liza Owner');
+  assert.strictEqual(payloadEvent.templateParams[1], 'Villa Liza Guest Lodge');
+});
+
+test('E2E: a property with NO linked owner throws inside sendMonthlyReport, is logged loudly, and is excluded from `sent`', async () => {
+  const ctx = setup({
+    WS_Config: [{ id: 'recCFG1', fields: { 'Alert Phone': '27811110000' } }],
+    WS_Properties: [{ id: 'recNoOwner', fields: { 'Property Name': 'No Owner Lodge', 'Notify Phone': '27700000003' } }], // no Owner field at all
+    WS_Owners: [],
+    WS_Rooms: [{ id: 'recR9', fields: { 'Room Name': 'Room A', 'Status': 'Available', 'Property': ['recNoOwner'] } }],
+    WS_Bookings: [],
+    WS_Guests: []
+  });
+
+  const sent = await wh.runMonthlyReport({ now: NOW });
+
+  assert.strictEqual(sent.length, 0, 'the misconfigured property never made it into sent');
+  assert.strictEqual(sent.failed.length, 1);
+  assert.strictEqual(sent.failed[0].propertyId, 'recNoOwner');
+
+  const failLog = ctx.axiom.find(a => a.event === 'monthly_report_property_failed');
+  assert.ok(failLog, 'the failure is logged loudly to Axiom, not silently dropped');
+  assert.match(failLog.message, /ownerName is missing/);
+
+  assert.strictEqual(ctx.axiom.filter(a => a.event === 'monthly_report_payload').length, 0, 'no payload logged for a property that threw');
 });
 
 test('a property that throws mid-run does not abort the others, and alertShawn fires for it', async () => {
@@ -292,8 +431,9 @@ test('a property that throws mid-run does not abort the others, and alertShawn f
     WS_Config: [{ id: 'recCFG1', fields: { 'Alert Phone': '27811110000' } }],
     WS_Properties: [
       { id: 'recBad', fields: { 'Property Name': 'Broken Lodge', 'Notify Phone': 12345 } }, // non-string — .replace() throws
-      { id: 'recGood', fields: { 'Property Name': 'Good Lodge', 'Notify Phone': '27700000002' } }
+      { id: 'recGood', fields: { 'Property Name': 'Good Lodge', 'Notify Phone': '27700000002', 'Owner': ['recOwnerGood'] } }
     ],
+    WS_Owners: [{ id: 'recOwnerGood', fields: { 'Owner Name': 'Good Owner' } }],
     WS_Rooms: [{ id: 'recR3', fields: { 'Room Name': 'Room A', 'Status': 'Available', 'Property': ['recGood'] } }],
     WS_Bookings: [],
     WS_Guests: []
