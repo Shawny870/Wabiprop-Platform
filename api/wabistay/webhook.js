@@ -55,7 +55,53 @@ function receptionPaymentTemplate() {
 // the difference is a fail-open double-booking. `findAvailableRoom` is the
 // one caller (PR1 / P1b) that opts in, specifically for that query, and
 // treats the throw as fail-CLOSED. No other call site is touched.
+// ─── AIRTABLE CALL-COUNT INSTRUMENTATION ────────────────────────────────────
+// Airtable enforces 5 req/sec per base. The Postgres/queue migration trigger
+// (~100-150 properties, ~250-300 calls/run) was an ESTIMATE — this counts
+// real airtableGet/airtableCreate/airtableUpdate calls made during one
+// runOwnerSummary/runDailySummary invocation, so that trigger becomes
+// measured, not guessed. Logging only, no Airtable write of its own (would
+// break Rule 29's read-only-cron invariant — test/dailysummary.test.js).
+//
+// A single module-level "active counter" rather than threading a counter
+// object through every call site: Vercel serverless functions are one
+// invocation per request, and even where that's not guaranteed, runOwnerSummary/
+// runDailySummary already run their per-property work sequentially in a
+// single `for` loop with no concurrent Airtable calls in flight, so there is
+// never more than one counter active at a time in practice. Save/restore
+// around each run (rather than a bare set/clear) so a call to one from
+// inside a test harness that nests calls still attributes correctly, and so
+// nothing throws if this is ever called without a wrapping run at all.
+let _activeAirtableCallCounter = null;
+
+function _countAirtableCall(kind) {
+  if (_activeAirtableCallCounter) {
+    _activeAirtableCallCounter[kind] = (_activeAirtableCallCounter[kind] || 0) + 1;
+  }
+}
+
+async function withAirtableCallCount(cronName, propertyCountRef, fn) {
+  const counter = { get: 0, create: 0, update: 0 };
+  const previous = _activeAirtableCallCounter;
+  _activeAirtableCallCounter = counter;
+  try {
+    return await fn();
+  } finally {
+    _activeAirtableCallCounter = previous;
+    const totalCalls = counter.get + counter.create + counter.update;
+    const propertyCount = propertyCountRef.value;
+    logToAxiom('info', 'airtable_call_count', {
+      cronName,
+      propertyCount,
+      totalCalls,
+      callsPerProperty: propertyCount > 0 ? Math.round((totalCalls / propertyCount) * 100) / 100 : null,
+      breakdown: counter
+    });
+  }
+}
+
 async function airtableGet(table, filterFormula, opts = {}) {
+  _countAirtableCall('get');
   const { throwOnError = false } = opts;
   // B10.5 BUG 1: Airtable's list API returns at most 100 records per response and
   // signals "there is more" with an `offset` token in the body. A single fetch
@@ -91,6 +137,7 @@ async function airtableGet(table, filterFormula, opts = {}) {
 }
 
 async function airtableCreate(table, fields) {
+  _countAirtableCall('create');
   console.log(`[Airtable CREATE] ${table}`, JSON.stringify(fields));
   const res = await fetch(`https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(table)}`, {
     method: 'POST',
@@ -118,6 +165,7 @@ async function airtableCreate(table, fields) {
 }
 
 async function airtableUpdate(table, recordId, fields) {
+  _countAirtableCall('update');
   console.log(`[Airtable UPDATE] ${table} ${recordId}`, JSON.stringify(fields));
   const res = await fetch(`https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(table)}/${recordId}`, {
     method: 'PATCH',
@@ -4023,71 +4071,308 @@ async function sendOwnerSummary(property, summary) {
   return payload;
 }
 
+// ─── MONTHLY BI ROLLUP ───────────────────────────────────────────────────────
+// NOT a bigger daily/weekly summary at a monthly cadence — a distinct
+// analytics feature: this month vs last month, presented as insight
+// ("occupancy up 12%") rather than side-by-side raw numbers where possible.
+// No monthly cron existed before this (manual-report.js's "monthly" option
+// reuses aggregateOwnerSummary with a 30-day window purely as a preview
+// stand-in — see its own header comment — this is the real thing).
+//
+// Per metric, computability against TODAY's schema:
+//   · Occupancy trend      — COMPUTABLE, but inherits aggregateOwnerSummary's
+//     existing roomNightsAvailable gap (rooms.length * periodDays assumes
+//     every currently-bookable room was available the WHOLE period — no
+//     accounting for a room added mid-period or one that spent part of the
+//     period in Maintenance). Flagged in the payload itself
+//     (occupancy.denominatorCaveat), not silently shipped as exact.
+//   · Revenue trend        — COMPUTABLE. Uses 'Amount Due' (same field
+//     aggregateOwnerSummary's totalRevenue uses), not 'Amount Paid' — so
+//     this is billed revenue, not collected cash. Same definition as the
+//     existing weekly report, deliberately, so the two reports never
+//     disagree about what "revenue" means for the same booking.
+//   · Average length of stay — COMPUTABLE, overnight bookings only (a
+//     "length of stay" in nights is not a meaningful concept for Hourly
+//     bookings, which are a different product on the same booking table).
+//   · Repeat-guest rate    — COMPUTABLE, but scoped: "repeat" means the
+//     guest has more than one booking within the `bookings` array this
+//     function is given (already filtered to BLOCKING_BOOKING_STATUSES +
+//     Checked Out, scoped to this property, unbounded by date) — not
+//     lifetime history if older bookings were ever purged from Airtable.
+//   · Cleaning turnaround  — NOT the true vacant-to-ready number (see
+//     BACKLOG-01 in CLAUDE.md and jobDurationMs's own comment above): that
+//     baseline is overwritten every checkout cycle and never persisted.
+//     Reports jobDurationMs (cleaner dispatch → DONE) instead, explicitly
+//     labeled as a proxy, not silently presented as the real thing.
+//   · Rating trend         — COMPUTABLE. WS_Bookings.Rating, already
+//     captured by the existing Stage 3 Phase 3 rating flow.
+const MONTHLY_REPORT_TEMPLATE = 'wabistay_monthly_bi_report';
+
+function avgOrNull(values) {
+  const nums = values.filter(v => typeof v === 'number' && Number.isFinite(v));
+  if (nums.length === 0) return null;
+  return nums.reduce((s, v) => s + v, 0) / nums.length;
+}
+
+function pctDeltaInsight(label, current, prior, unit = '%') {
+  if (prior === null || prior === 0) {
+    return current === null ? `${label}: no data` : `${label}: ${current}${unit} (no prior-month baseline to compare)`;
+  }
+  if (current === null) return `${label}: no data this month`;
+  const deltaPct = Math.round(((current - prior) / Math.abs(prior)) * 100);
+  const direction = deltaPct > 0 ? 'up' : deltaPct < 0 ? 'down' : 'flat vs';
+  return deltaPct === 0
+    ? `${label}: flat vs last month (${current}${unit})`
+    : `${label} ${direction} ${Math.abs(deltaPct)}% vs last month (${current}${unit})`;
+}
+
+// `bookings` is already property-scoped and status-filtered (same contract
+// as aggregateOwnerSummary) but NOT period-filtered — this function does its
+// own current/prior windowing internally so callers fetch Airtable data once
+// and this and aggregateOwnerSummary can share it if ever called together.
+function aggregateMonthlyReport(property, rooms, bookings, w, guestsById = new Map()) {
+  const checkInMs = b => (b.fields['Check In'] ? Date.parse(b.fields['Check In']) : NaN);
+  const inRange = (b, startMs, endMs) => {
+    const t = checkInMs(b);
+    return Number.isFinite(t) && t >= startMs && t < endMs;
+  };
+
+  const currentBookings = bookings.filter(b => inRange(b, w.periodStartMs, w.periodEndMs));
+  const priorBookings = bookings.filter(b => inRange(b, w.priorPeriodStartMs, w.periodStartMs));
+
+  // Occupancy
+  const roomNightsSold = currentBookings.reduce((s, b) => s + bookingRoomNights(b), 0);
+  const roomNightsAvailable = rooms.length * w.periodDays;
+  const occupancyRate = roomNightsAvailable > 0 ? roomNightsSold / roomNightsAvailable : null;
+  const priorRoomNightsSold = priorBookings.reduce((s, b) => s + bookingRoomNights(b), 0);
+  const priorOccupancyRate = roomNightsAvailable > 0 ? priorRoomNightsSold / roomNightsAvailable : null;
+
+  // Revenue (billed, 'Amount Due' — see header comment)
+  const revenue = currentBookings.reduce((s, b) => s + (Number(b.fields['Amount Due']) || 0), 0);
+  const priorRevenue = priorBookings.reduce((s, b) => s + (Number(b.fields['Amount Due']) || 0), 0);
+
+  // Average length of stay — overnight only
+  const nightsOf = b => {
+    const inMs = checkInMs(b);
+    const outMs = b.fields['Check Out'] ? Date.parse(b.fields['Check Out']) : NaN;
+    if (!Number.isFinite(inMs) || !Number.isFinite(outMs) || outMs <= inMs) return null;
+    return (outMs - inMs) / DAY_MS;
+  };
+  const overnightCurrent = currentBookings.filter(b => b.fields['Booking Type'] === 'Overnight');
+  const avgLengthOfStay = avgOrNull(overnightCurrent.map(nightsOf));
+
+  // Repeat-guest rate — see header comment on scope
+  const guestBookingCounts = new Map();
+  for (const b of bookings) {
+    for (const guestId of (b.fields['Guest'] || [])) {
+      guestBookingCounts.set(guestId, (guestBookingCounts.get(guestId) || 0) + 1);
+    }
+  }
+  const currentGuestIds = new Set(currentBookings.flatMap(b => b.fields['Guest'] || []));
+  const repeatGuestRate = currentGuestIds.size > 0
+    ? [...currentGuestIds].filter(id => (guestBookingCounts.get(id) || 0) > 1).length / currentGuestIds.size
+    : null;
+
+  // Cleaning turnaround — job duration proxy, see header comment
+  const avgCleaningJobDurationMs = avgOrNull(currentBookings.map(jobDurationMs));
+  const priorAvgCleaningJobDurationMs = avgOrNull(priorBookings.map(jobDurationMs));
+
+  // Rating trend
+  const ratingOf = b => (typeof b.fields['Rating'] === 'number' ? b.fields['Rating'] : null);
+  const avgRating = avgOrNull(currentBookings.map(ratingOf));
+  const priorAvgRating = avgOrNull(priorBookings.map(ratingOf));
+
+  const occupancyPct = occupancyRate === null ? null : Math.round(occupancyRate * 1000) / 10;
+  const priorOccupancyPct = priorOccupancyRate === null ? null : Math.round(priorOccupancyRate * 1000) / 10;
+
+  const insights = [
+    pctDeltaInsight('Occupancy', occupancyPct, priorOccupancyPct),
+    pctDeltaInsight('Revenue', Math.round(revenue), Math.round(priorRevenue), ''),
+    avgLengthOfStay === null ? 'Average length of stay: no overnight bookings this month' : `Average length of stay: ${avgLengthOfStay.toFixed(1)} nights`,
+    repeatGuestRate === null ? 'Repeat-guest rate: no bookings this month' : `${Math.round(repeatGuestRate * 100)}% of this month's guests were repeat guests`,
+    avgCleaningJobDurationMs === null
+      ? 'Cleaning turnaround: no completed cleaning jobs this month'
+      : `Average cleaning job duration: ${Math.round(avgCleaningJobDurationMs / 60000)} min (dispatch-to-DONE, not vacant-to-ready — see BACKLOG-01)`,
+    avgRating === null ? 'Guest rating: no ratings captured this month' : pctDeltaInsight('Guest rating', Math.round(avgRating * 10) / 10, priorAvgRating === null ? null : Math.round(priorAvgRating * 10) / 10, '/5')
+  ];
+
+  return {
+    propertyId: property.id,
+    propertyName: property.fields['Property Name'],
+    periodDays: w.periodDays,
+    occupancy: { currentPct: occupancyPct, priorPct: priorOccupancyPct, denominatorCaveat: 'assumes every currently-bookable room was available the entire period — see BACKLOG-01-adjacent gap in header comment' },
+    revenue: { current: revenue, prior: priorRevenue },
+    avgLengthOfStayNights: avgLengthOfStay,
+    repeatGuestRate,
+    avgCleaningJobDurationMs,
+    priorAvgCleaningJobDurationMs,
+    avgRating,
+    priorAvgRating,
+    insights,
+    totalBookings: currentBookings.length
+  };
+}
+
+function monthlyReportTemplateParams(report) {
+  return [
+    report.propertyName,
+    report.insights[0], // occupancy
+    report.insights[1], // revenue
+    report.insights[2], // avg length of stay
+    report.insights[3], // repeat-guest rate
+    report.insights[5]  // rating (cleaning turnaround, insights[4], omitted from the template body — see sendMonthlyReport comment)
+  ];
+}
+
+// STUBBED until MONTHLY_REPORT_TEMPLATE is approved — same pattern as every
+// other business-initiated send in this file. Cleaning turnaround
+// (insights[4]) is deliberately left OUT of the WhatsApp template body: it's
+// an internal ops/quality metric the owner has no action to take on, and
+// every template param costs message length — Axiom still gets the full
+// `insights` array including it, for anyone who wants it.
+async function sendMonthlyReport(property, report) {
+  const notifyPhone = property.fields['Notify Phone']
+    ? property.fields['Notify Phone'].replace(/[\s\-\+]/g, '')
+    : (OWNER_PHONE || null);
+  const templateParams = monthlyReportTemplateParams(report);
+  const payload = { ...report, template: MONTHLY_REPORT_TEMPLATE, notifyPhone, templateParams };
+  logToAxiom('info', 'monthly_report_payload', payload);
+
+  // TODO: once MONTHLY_REPORT_TEMPLATE is approved by Meta, this is the
+  // one-line swap point:
+  //   await sendWhatsAppTemplate(notifyPhone, MONTHLY_REPORT_TEMPLATE, templateParams, { site: 'monthly_report', propertyId: property.id });
+  return payload;
+}
+
+async function runMonthlyReport(opts = {}) {
+  const { now = new Date() } = opts;
+  const periodDays = 30;
+  const periodEndMs = now.getTime();
+  const w = {
+    periodDays,
+    periodStartMs: periodEndMs - periodDays * DAY_MS,
+    priorPeriodStartMs: periodEndMs - 2 * periodDays * DAY_MS,
+    periodEndMs
+  };
+
+  // Unbounded by date (unlike aggregateOwnerSummary's periodBookings) so
+  // repeat-guest counting and the prior-month window both see bookings
+  // outside the current 30 days — same status filter as every other report,
+  // just not date-filtered at the query level.
+  const properties = await airtableGet('WS_Properties', '');
+  const allRooms = await airtableGet('WS_Rooms', orFormula('Status', BOOKABLE_ROOM_STATUSES));
+  const allBookings = await airtableGet('WS_Bookings', orFormula('Status', BLOCKING_BOOKING_STATUSES.concat(['Checked Out'])));
+  const allGuests = await airtableGet('WS_Guests', '');
+  const guestsById = new Map(allGuests.map(g => [g.id, g.fields['Guest Name'] || null]));
+
+  const sent = [];
+  const failed = [];
+  for (const property of properties) {
+    // Per-property isolation + alertShawn on failure — same established
+    // pattern as runOwnerSummary/runDailySummary/runWeeklyValueNudge.
+    try {
+      const rooms = allRooms.filter(r => (r.fields['Property'] || []).includes(property.id));
+      const roomIds = new Set(rooms.map(r => r.id));
+      const bookings = allBookings.filter(b => (b.fields['Room'] || []).some(id => roomIds.has(id)));
+      const report = aggregateMonthlyReport(property, rooms, bookings, w, guestsById);
+      await sendMonthlyReport(property, report);
+      sent.push(report);
+    } catch (err) {
+      logToAxiom('error', 'monthly_report_property_failed', {
+        propertyId: property.id, propertyName: property.fields?.['Property Name'] || null,
+        message: err.message, stack: err.stack
+      });
+      await alertShawn('monthly_report', err.message, {
+        propertyId: property.id, propertyName: property.fields?.['Property Name'] || null
+      });
+      failed.push({ propertyId: property.id, propertyName: property.fields?.['Property Name'] || null, error: err.message });
+    }
+  }
+  sent.failed = failed;
+  return sent;
+}
+
+async function monthlyReportHandler(req, res) {
+  try {
+    const sent = await runMonthlyReport();
+    res.status(200).json({ ok: true, count: sent.length, sent, failed: sent.failed || [] });
+  } catch (err) {
+    console.error('[MONTHLY-REPORT FATAL]', err.message, err.stack);
+    logToAxiom('error', 'monthly_report_fatal', { message: err.message, stack: err.stack });
+    await alertShawn('monthly_report_fatal', err.message, { scope: 'entire run, not a single property' });
+    res.status(200).json({ ok: false, error: err.message });
+  }
+}
+
 async function runOwnerSummary(opts = {}) {
   const {
     now = new Date(),
     daily = process.env.OWNER_SUMMARY_DAILY === 'true'
   } = opts;
 
-  const periodDays = daily ? 1 : 7;
-  const periodEndMs = now.getTime();
-  const w = {
-    periodDays,
-    periodStartMs: periodEndMs - periodDays * DAY_MS,
-    periodEndMs,
-    upcomingEndMs: periodEndMs + 7 * DAY_MS
-  };
+  const propertyCountRef = { value: 0 };
+  return withAirtableCallCount('owner_summary', propertyCountRef, async () => {
+    const periodDays = daily ? 1 : 7;
+    const periodEndMs = now.getTime();
+    const w = {
+      periodDays,
+      periodStartMs: periodEndMs - periodDays * DAY_MS,
+      periodEndMs,
+      upcomingEndMs: periodEndMs + 7 * DAY_MS
+    };
 
-  const properties = await airtableGet('WS_Properties', '');
-  const allRooms = await airtableGet('WS_Rooms', orFormula('Status', BOOKABLE_ROOM_STATUSES));
-  // Non-cancelled bookings only — a cancelled booking is neither revenue nor
-  // occupancy. Scoped to each property below via its room link (WS_Bookings has
-  // no Property field of its own).
-  const allBookings = await airtableGet('WS_Bookings', orFormula('Status', BLOCKING_BOOKING_STATUSES.concat(['Checked Out'])));
-  // Stage 1: guest names for the reconciliation line items. One extra table
-  // read, same shape as allRooms/allBookings above — not a new query per
-  // property, and not a new per-booking lookup either.
-  const allGuests = await airtableGet('WS_Guests', '');
-  const guestsById = new Map(allGuests.map(g => [g.id, g.fields['Guest Name'] || null]));
+    const properties = await airtableGet('WS_Properties', '');
+    propertyCountRef.value = properties.length;
+    const allRooms = await airtableGet('WS_Rooms', orFormula('Status', BOOKABLE_ROOM_STATUSES));
+    // Non-cancelled bookings only — a cancelled booking is neither revenue nor
+    // occupancy. Scoped to each property below via its room link (WS_Bookings has
+    // no Property field of its own).
+    const allBookings = await airtableGet('WS_Bookings', orFormula('Status', BLOCKING_BOOKING_STATUSES.concat(['Checked Out'])));
+    // Stage 1: guest names for the reconciliation line items. One extra table
+    // read, same shape as allRooms/allBookings above — not a new query per
+    // property, and not a new per-booking lookup either.
+    const allGuests = await airtableGet('WS_Guests', '');
+    const guestsById = new Map(allGuests.map(g => [g.id, g.fields['Guest Name'] || null]));
 
-  const summaries = [];
-  const failed = [];
-  for (const property of properties) {
-    // Per-property isolation, same reasoning as runDailySummary's own fix: one
-    // property throwing here must not abort the rest of this run — before this
-    // fix, an uncaught throw propagated straight out of the loop and silently
-    // dropped every remaining property's weekly summary for that run, with no
-    // automatic retry until next Monday (unlike daily, which self-heals within
-    // the hour).
-    try {
-      const rooms = allRooms.filter(r => (r.fields['Property'] || []).includes(property.id));
-      const roomIds = new Set(rooms.map(r => r.id));
-      const bookings = allBookings.filter(b => (b.fields['Room'] || []).some(id => roomIds.has(id)));
-      const summary = aggregateOwnerSummary(property, rooms, bookings, w, guestsById);
-      await sendOwnerSummary(property, summary);
-      summaries.push(summary);
-    } catch (err) {
-      logToAxiom('error', 'owner_summary_property_failed', {
-        propertyId: property.id, propertyName: property.fields?.['Property Name'] || null,
-        message: err.message, stack: err.stack
-      });
-      // Fires per property, not once for the whole run, so the alert itself
-      // says which property failed rather than just "owner summary failed".
-      await alertShawn('owner_summary', err.message, {
-        propertyId: property.id, propertyName: property.fields?.['Property Name'] || null
-      });
-      failed.push({ propertyId: property.id, propertyName: property.fields?.['Property Name'] || null, error: err.message });
+    const summaries = [];
+    const failed = [];
+    for (const property of properties) {
+      // Per-property isolation, same reasoning as runDailySummary's own fix: one
+      // property throwing here must not abort the rest of this run — before this
+      // fix, an uncaught throw propagated straight out of the loop and silently
+      // dropped every remaining property's weekly summary for that run, with no
+      // automatic retry until next Monday (unlike daily, which self-heals within
+      // the hour).
+      try {
+        const rooms = allRooms.filter(r => (r.fields['Property'] || []).includes(property.id));
+        const roomIds = new Set(rooms.map(r => r.id));
+        const bookings = allBookings.filter(b => (b.fields['Room'] || []).some(id => roomIds.has(id)));
+        const summary = aggregateOwnerSummary(property, rooms, bookings, w, guestsById);
+        await sendOwnerSummary(property, summary);
+        summaries.push(summary);
+      } catch (err) {
+        logToAxiom('error', 'owner_summary_property_failed', {
+          propertyId: property.id, propertyName: property.fields?.['Property Name'] || null,
+          message: err.message, stack: err.stack
+        });
+        // Fires per property, not once for the whole run, so the alert itself
+        // says which property failed rather than just "owner summary failed".
+        await alertShawn('owner_summary', err.message, {
+          propertyId: property.id, propertyName: property.fields?.['Property Name'] || null
+        });
+        failed.push({ propertyId: property.id, propertyName: property.fields?.['Property Name'] || null, error: err.message });
+      }
     }
-  }
-  // Return shape is unchanged (still a plain array of successful summaries —
-  // existing callers index/map/find on it directly) — `failed` is attached as
-  // a non-indexed property so callers who need failure visibility can read
-  // `result.failed` without breaking anyone who only ever treated this as an
-  // array. JSON.stringify silently drops non-indexed array properties, which
-  // is why ownerSummaryHandler below also spreads it into the JSON response
-  // explicitly rather than relying on this alone.
-  summaries.failed = failed;
-  return summaries;
+    // Return shape is unchanged (still a plain array of successful summaries —
+    // existing callers index/map/find on it directly) — `failed` is attached as
+    // a non-indexed property so callers who need failure visibility can read
+    // `result.failed` without breaking anyone who only ever treated this as an
+    // array. JSON.stringify silently drops non-indexed array properties, which
+    // is why ownerSummaryHandler below also spreads it into the JSON response
+    // explicitly rather than relying on this alone.
+    summaries.failed = failed;
+    return summaries;
+  });
 }
 
 async function ownerSummaryHandler(req, res) {
@@ -4565,67 +4850,78 @@ async function runDailySummary(opts = {}) {
   const todayYmd = sastCalendarDate(now);
   const tomorrowYmd = addSastDays(todayYmd, 1);
 
-  const properties = await airtableGet('WS_Properties', '');
-  const fired = [];
-  const skipped = [];
-  const failed = [];
+  // propertyCount here is `fired.length`, not the total property count — most
+  // hourly invocations fire for zero or one property (only whichever one's
+  // configured hour matches this SAST hour), so "calls per property scanned"
+  // would be dominated by the single unconditional WS_Properties read and
+  // say little about the actual per-report cost this instrumentation exists
+  // to measure. See runOwnerSummary's own comment for why calls-per-property
+  // matters at all (Airtable's 5 req/sec ceiling, migration trigger).
+  const propertyCountRef = { value: 0 };
+  return withAirtableCallCount('daily_summary', propertyCountRef, async () => {
+    const properties = await airtableGet('WS_Properties', '');
+    const fired = [];
+    const skipped = [];
+    const failed = [];
 
-  // Rooms/bookings/guests are fetched at most once per run, only if at least
-  // one property's hour actually matches — most hourly invocations match
-  // nothing, so this avoids three Airtable calls on 23/24 runs a day.
-  let allRooms = null, allBookings = null, guestsById = null;
+    // Rooms/bookings/guests are fetched at most once per run, only if at least
+    // one property's hour actually matches — most hourly invocations match
+    // nothing, so this avoids three Airtable calls on 23/24 runs a day.
+    let allRooms = null, allBookings = null, guestsById = null;
 
-  for (const property of properties) {
-    const configuredHour = property.fields['Daily Summary Hour'];
-    if (configuredHour === undefined || configuredHour === null) {
-      skipped.push({ propertyId: property.id, reason: 'not_configured' });
-      continue;
-    }
-    if (Number(configuredHour) !== currentSastHour) {
-      skipped.push({ propertyId: property.id, reason: 'hour_not_matched', configuredHour: Number(configuredHour) });
-      continue;
-    }
-
-    // Per-property isolation: one property throwing here (e.g. sendDailySummary's
-    // new ownerName resolution above, on a property with no linked/misconfigured
-    // WS_Owners record) must not abort every OTHER property still waiting in this
-    // same run — before this fix, an uncaught throw here propagated straight out
-    // of the for-loop, silently skipping every remaining property until the outer
-    // handler's catch-all, with no way to tell "genuinely zero activity" apart
-    // from "crashed partway through" without checking Axiom by hand.
-    try {
-      if (allRooms === null) {
-        // Unfiltered — includes Maintenance, unlike BOOKABLE_ROOM_STATUSES
-        // elsewhere, since the room-state grid counts Maintenance separately
-        // rather than silently dropping those rooms from the report.
-        allRooms = await airtableGet('WS_Rooms', '');
-        allBookings = await airtableGet('WS_Bookings', orFormula('Status', BLOCKING_BOOKING_STATUSES.concat(['Checked Out'])));
-        const allGuests = await airtableGet('WS_Guests', '');
-        guestsById = new Map(allGuests.map(g => [g.id, g.fields['Guest Name'] || null]));
+    for (const property of properties) {
+      const configuredHour = property.fields['Daily Summary Hour'];
+      if (configuredHour === undefined || configuredHour === null) {
+        skipped.push({ propertyId: property.id, reason: 'not_configured' });
+        continue;
+      }
+      if (Number(configuredHour) !== currentSastHour) {
+        skipped.push({ propertyId: property.id, reason: 'hour_not_matched', configuredHour: Number(configuredHour) });
+        continue;
       }
 
-      const rooms = allRooms.filter(r => (r.fields['Property'] || []).includes(property.id));
-      const roomIds = new Set(rooms.map(r => r.id));
-      const bookings = allBookings.filter(b => (b.fields['Room'] || []).some(id => roomIds.has(id)));
+      // Per-property isolation: one property throwing here (e.g. sendDailySummary's
+      // new ownerName resolution above, on a property with no linked/misconfigured
+      // WS_Owners record) must not abort every OTHER property still waiting in this
+      // same run — before this fix, an uncaught throw here propagated straight out
+      // of the for-loop, silently skipping every remaining property until the outer
+      // handler's catch-all, with no way to tell "genuinely zero activity" apart
+      // from "crashed partway through" without checking Axiom by hand.
+      try {
+        if (allRooms === null) {
+          // Unfiltered — includes Maintenance, unlike BOOKABLE_ROOM_STATUSES
+          // elsewhere, since the room-state grid counts Maintenance separately
+          // rather than silently dropping those rooms from the report.
+          allRooms = await airtableGet('WS_Rooms', '');
+          allBookings = await airtableGet('WS_Bookings', orFormula('Status', BLOCKING_BOOKING_STATUSES.concat(['Checked Out'])));
+          const allGuests = await airtableGet('WS_Guests', '');
+          guestsById = new Map(allGuests.map(g => [g.id, g.fields['Guest Name'] || null]));
+        }
 
-      const summary = aggregateDailySummary(property, rooms, bookings, { todayYmd, tomorrowYmd }, guestsById);
-      await sendDailySummary(property, summary);
+        const rooms = allRooms.filter(r => (r.fields['Property'] || []).includes(property.id));
+        const roomIds = new Set(rooms.map(r => r.id));
+        const bookings = allBookings.filter(b => (b.fields['Room'] || []).some(id => roomIds.has(id)));
 
-      fired.push({ propertyId: property.id, propertyName: property.fields['Property Name'], summary });
-    } catch (err) {
-      logToAxiom('error', 'daily_summary_property_failed', {
-        propertyId: property.id, propertyName: property.fields?.['Property Name'] || null,
-        message: err.message, stack: err.stack
-      });
-      // Fires per property, not once for the whole run, so the alert itself
-      // says which property failed rather than just "daily summary failed".
-      await alertShawn('daily_summary', err.message, {
-        propertyId: property.id, propertyName: property.fields?.['Property Name'] || null
-      });
-      failed.push({ propertyId: property.id, propertyName: property.fields?.['Property Name'] || null, error: err.message });
+        const summary = aggregateDailySummary(property, rooms, bookings, { todayYmd, tomorrowYmd }, guestsById);
+        await sendDailySummary(property, summary);
+
+        fired.push({ propertyId: property.id, propertyName: property.fields['Property Name'], summary });
+      } catch (err) {
+        logToAxiom('error', 'daily_summary_property_failed', {
+          propertyId: property.id, propertyName: property.fields?.['Property Name'] || null,
+          message: err.message, stack: err.stack
+        });
+        // Fires per property, not once for the whole run, so the alert itself
+        // says which property failed rather than just "daily summary failed".
+        await alertShawn('daily_summary', err.message, {
+          propertyId: property.id, propertyName: property.fields?.['Property Name'] || null
+        });
+        failed.push({ propertyId: property.id, propertyName: property.fields?.['Property Name'] || null, error: err.message });
+      }
     }
-  }
-  return { currentSastHour, fired, skipped, failed };
+    propertyCountRef.value = fired.length;
+    return { currentSastHour, fired, skipped, failed };
+  });
 }
 
 async function dailySummaryHandler(req, res) {
@@ -4977,6 +5273,13 @@ module.exports.cleaningTurnaroundToday = cleaningTurnaroundToday;
 module.exports.revenueToday = revenueToday;
 module.exports.tomorrowsOvernightArrivals = tomorrowsOvernightArrivals;
 module.exports.aggregateOwnerSummary = aggregateOwnerSummary;
+module.exports.aggregateMonthlyReport = aggregateMonthlyReport;
+module.exports.runMonthlyReport = runMonthlyReport;
+module.exports.monthlyReportHandler = monthlyReportHandler;
+module.exports.sendMonthlyReport = sendMonthlyReport;
+module.exports.monthlyReportTemplateParams = monthlyReportTemplateParams;
+module.exports.MONTHLY_REPORT_TEMPLATE = MONTHLY_REPORT_TEMPLATE;
+module.exports.jobDurationMs = jobDurationMs;
 module.exports.paymentReconciliationLines = paymentReconciliationLines;
 module.exports.formatPaymentReconciliationMessage = formatPaymentReconciliationMessage;
 // B19: enquiry-abandonment staleness sweep (injected `now` for timing tests).
