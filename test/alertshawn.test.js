@@ -22,6 +22,38 @@ function freshWebhook() {
   return require('../api/wabistay/webhook.js');
 }
 
+// Discovered against the LIVE base while verifying Item A of the batch: the
+// real WS_Config table has 3 rows (2 blank, 1 populated), not the single row
+// the "convention" comment assumes — Airtable's own "+" row button makes
+// this trivial to end up with by accident. rows[0] happened to be the
+// populated one today, but that's return order, not a guarantee.
+test('getAlertPhone finds the populated row even when it is not first (blank rows before it)', async () => {
+  setup({
+    WS_Config: [
+      { id: 'recBlank1', fields: {} },
+      { id: 'recBlank2', fields: {} },
+      { id: 'recCFG1', fields: { 'Alert Phone': '27811110000' } }
+    ]
+  });
+  delete process.env.ALERT_PHONE_FALLBACK;
+  const wh = freshWebhook();
+  const phone = await wh.getAlertPhone();
+  assert.strictEqual(phone, '27811110000');
+});
+
+test('getAlertPhone logs a warning when WS_Config has more than one row, so drift is visible', async () => {
+  const ctx = setup({
+    WS_Config: [
+      { id: 'recBlank1', fields: {} },
+      { id: 'recCFG1', fields: { 'Alert Phone': '27811110000' } }
+    ]
+  });
+  delete process.env.ALERT_PHONE_FALLBACK;
+  const wh = freshWebhook();
+  await wh.getAlertPhone();
+  assert.ok(ctx.axiom.some(e => e.event === 'alert_phone_multiple_rows' && e.rowCount === 2));
+});
+
 test('getAlertPhone reads the number from WS_Config when a row exists', async () => {
   setup({ WS_Config: [{ id: 'recCFG1', fields: { 'Alert Phone': '27811110000' } }] });
   delete process.env.ALERT_PHONE_FALLBACK;

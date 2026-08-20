@@ -479,12 +479,19 @@ async function getAlertPhone() {
     return _alertPhoneCache.value;
   }
   try {
-    // WS_Config is a single-row table by convention; airtableGet here has no
-    // maxRecords option (unlike Wabiprop's cronHelpers copy), so this reads
-    // whatever rows exist and just uses the first one.
+    // WS_Config is meant to be a single-row table by convention, but the
+    // live base has been observed with extra blank rows (e.g. created via
+    // Airtable's own "+" row button) — rows[0] is Airtable's return order,
+    // NOT a guarantee the populated row comes first. Find the first row
+    // that actually HAS a value instead of blindly trusting index 0, so a
+    // reordered or newly-added blank row can't silently break alerting.
     const rows = await airtableGet('WS_Config', '');
-    const phone = rows[0] && rows[0].fields['Alert Phone'];
-    if (!phone) throw new Error('WS_Config has no Alert Phone value');
+    const populated = rows.find(r => r.fields['Alert Phone']);
+    if (rows.length > 1) {
+      logToAxiom('warn', 'alert_phone_multiple_rows', { rowCount: rows.length, usedRowId: populated ? populated.id : null });
+    }
+    const phone = populated && populated.fields['Alert Phone'];
+    if (!phone) throw new Error('WS_Config has no row with an Alert Phone value');
     _alertPhoneCache = { value: String(phone), fetchedAt: now };
     return _alertPhoneCache.value;
   } catch (err) {
