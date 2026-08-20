@@ -2,20 +2,63 @@
   "name": "rating: 'skip' in AWAITING_RATING_FEEDBACK declines the optional follow-up, no Rating Feedback write, guest returns to NEW",
   "seed": {
     "WS_Properties": [
-      { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222" } }
+      {
+        "id": "recP1",
+        "fields": {
+          "Property Name": "Test Lodge",
+          "Phone Number ID": "111000111000",
+          "City": "Testville",
+          "Notify Phone": "27831112222"
+        }
+      }
     ],
     "WS_Guests": [
-      { "id": "recG1", "fields": { "Guest Name": "John Smith", "Phone Number": "27821234567", "Session State": "AWAITING_RATING_FEEDBACK" } }
+      {
+        "id": "recG1",
+        "fields": {
+          "Guest Name": "John Smith",
+          "Phone Number": "27821234567",
+          "Session State": "AWAITING_RATING_FEEDBACK"
+        }
+      }
     ],
     "WS_Bookings": [
-      { "id": "recB1", "fields": { "Guest": ["recG1"], "Status": "Checked Out", "Check Out": "2026-07-04T10:00:00.000Z", "Rating": 2 } }
+      {
+        "id": "recB1",
+        "fields": {
+          "Guest": [
+            "recG1"
+          ],
+          "Status": "Checked Out",
+          "Check Out": "2026-07-04T10:00:00.000Z",
+          "Rating": 2
+        }
+      }
     ]
   },
-  "message": { "from": "27821234567", "text": "skip" },
+  "message": {
+    "from": "27821234567",
+    "text": "skip"
+  },
   "expect": {
     "status": 200,
     "writes": [
-      { "op": "update", "table": "WS_Guests", "id": "recG1", "fields": { "Session State": "NEW" } }
+      {
+        "op": "update",
+        "table": "WS_Properties",
+        "id": "recP1",
+        "fields": {
+          "Last Message Received": "re:.*"
+        }
+      },
+      {
+        "op": "update",
+        "table": "WS_Guests",
+        "id": "recG1",
+        "fields": {
+          "Session State": "NEW"
+        }
+      }
     ],
     "sends": []
   }

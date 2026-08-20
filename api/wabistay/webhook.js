@@ -811,6 +811,41 @@ async function resolveProperty(phoneNumberId) {
   return properties[0];
 }
 
+// ─── PROPERTY ACTIVITY TRACKER ──────────────────────────────────────────────
+// Three WS_Properties timestamp fields, populated best-effort so a write
+// failure here never blocks the guest/owner-facing flow it's attached to:
+//   · Last Message Received — any inbound webhook message resolved to this
+//     property (set in handleMessage, right after resolveProperty).
+//   · Last Report Sent — deliberately NOT a WS_Properties write. runOwnerSummary/
+//     runDailySummary are a documented, tested read-only invariant (Rule 29,
+//     test/dailysummary.test.js: "both crons are read-only reporting — zero
+//     writes from either"), so this is surfaced instead from the existing
+//     owner_summary_payload / daily_summary_payload Axiom events, which
+//     already carry propertyId and a timestamp per run — no new write, no
+//     invariant break, satisfies "surface from existing cron logs" literally.
+//   · Last Owner App Open — NOT a real Meta webhook event. Meta's Cloud API
+//     has no "user opened WhatsApp" callback; account_offboarded/
+//     account_reconnected (the events the original ask named) are
+//     Coexistence WABA-connection events, not per-owner app-open signals, and
+//     this codebase doesn't subscribe to them. The best available proxy is a
+//     `read` delivery-status callback on a message sent to that owner's
+//     Notify Phone — you cannot mark a WhatsApp message read without having
+//     opened the app around that time. This only advances when Meta sends us
+//     something to read a status on, so it under-reports app opens with no
+//     Wabistay message in flight — flagged, not silently presented as ground
+//     truth.
+async function bumpPropertyActivity(propertyId, field) {
+  if (!propertyId) return;
+  try {
+    const result = await airtableUpdate('WS_Properties', propertyId, { [field]: new Date().toISOString() });
+    if (result && result.error) {
+      logToAxiom('warn', 'property_activity_write_failed', { propertyId, field, error: JSON.stringify(result.error) });
+    }
+  } catch (err) {
+    logToAxiom('warn', 'property_activity_write_failed', { propertyId, field, error: err.message });
+  }
+}
+
 function propertyCityLine(property) {
   const city = property.fields['City'];
   return city ? `, ${city}` : '';
@@ -3961,6 +3996,13 @@ async function sendOwnerSummary(property, summary) {
     : (OWNER_PHONE || null);
   const paymentReconciliationMessage = formatPaymentReconciliationMessage(summary);
   const payload = { ...summary, template: OWNER_SUMMARY_TEMPLATE, notifyPhone, paymentReconciliationMessage };
+  // Last Report Sent is deliberately NOT written back to WS_Properties here —
+  // runOwnerSummary/runDailySummary are documented and tested (Rule 29,
+  // test/dailysummary.test.js) as read-only reporting with zero Airtable
+  // writes from either cron; adding one would silently break that invariant.
+  // "Last Report Sent" is surfaced from this same owner_summary_payload
+  // Axiom event instead (it already carries propertyId + the event's own
+  // _time) — see the property-activity-tracker PR body for the query.
   logToAxiom('info', 'owner_summary_payload', payload);
 
   // TODO(B17): `sendWhatsAppTemplate` now EXISTS (see the WhatsApp template helper
@@ -4379,6 +4421,8 @@ async function sendDailySummary(property, summary) {
   const templateParams = dailySummaryTemplateParams(summaryWithOwner);
 
   const payload = { ...summaryWithOwner, template: DAILY_SUMMARY_TEMPLATE, notifyPhone, templateParams };
+  // See the matching comment in sendOwnerSummary — deliberately no Airtable
+  // write here either, for the same read-only-cron reason.
   logToAxiom('info', 'daily_summary_payload', payload);
 
   // TODO(Stage 3 part 3): once DAILY_SUMMARY_TEMPLATE is approved by Meta,
@@ -4494,6 +4538,8 @@ async function handleMessage(from, messageText, phoneNumberId, wamid) {
     await sendWhatsApp(phone, msg('numberNotConfigured'));
     return;
   }
+  // Best-effort, non-blocking — see bumpPropertyActivity's own comment.
+  await bumpPropertyActivity(property.id, 'Last Message Received');
 
   const guestRecords = await airtableGet('WS_Guests', `{Phone Number} = '${phone}'`);
   const guest = guestRecords[0] || null;
@@ -4696,6 +4742,17 @@ module.exports = async function handler(req, res) {
         const detail = { wamid: s.id, status: s.status, timestamp: s.timestamp, recipient: s.recipient_id };
         if (s.status === 'failed' && s.errors) detail.errors = s.errors;
         logToAxiom('info', 'whatsapp_status_callback', detail);
+
+        // Proxy for "owner opened WhatsApp" — see bumpPropertyActivity's
+        // comment for why this is a proxy, not a real Meta app-open event.
+        if (s.status === 'read' && s.recipient_id) {
+          const recipient = formatPhone(String(s.recipient_id));
+          airtableGet('WS_Properties', `{Notify Phone} = '${recipient}'`)
+            .then(matches => {
+              if (matches[0]) return bumpPropertyActivity(matches[0].id, 'Last Owner App Open');
+            })
+            .catch(err => logToAxiom('warn', 'owner_app_open_lookup_failed', { recipient, error: err.message }));
+        }
       }
       res.status(200).send('OK');
       return;
@@ -4804,6 +4861,7 @@ module.exports.airtableUpdate = airtableUpdate;
 module.exports.sendWhatsApp = sendWhatsApp;
 module.exports.alertShawn = alertShawn;
 module.exports.getAlertPhone = getAlertPhone;
+module.exports.bumpPropertyActivity = bumpPropertyActivity;
 // CEO manual report-trigger (api/wabistay/cron/manual-report.js) needs these
 // to build the SAME live-data fetch + stubbed-send pipeline the real crons
 // use, without duplicating the Airtable query/pagination logic here.
