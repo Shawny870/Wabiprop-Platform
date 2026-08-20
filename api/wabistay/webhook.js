@@ -4243,6 +4243,71 @@ function durationModeInsight(rawDurations, { noun, unit, minCount = DURATION_MOD
   return `${label} guests stayed an average of ${pluralize(avg)}.`;
 }
 
+const WEEKDAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const MONTH_FULL_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+
+// SAST calendar-day key ('YYYY-MM-DD') for a UTC ms instant — same SAST
+// wall-clock convention as sastCalendarDate, just keyed for Map lookups.
+function sastDayKey(ms) {
+  const shifted = new Date(ms + SAST_OFFSET_MS);
+  return `${shifted.getUTCFullYear()}-${String(shifted.getUTCMonth() + 1).padStart(2, '0')}-${String(shifted.getUTCDate()).padStart(2, '0')}`;
+}
+
+function formatBusyDay(dayKey, withComma) {
+  const [y, m, d] = dayKey.split('-').map(Number);
+  const weekday = WEEKDAY_NAMES[new Date(Date.UTC(y, m - 1, d)).getUTCDay()];
+  return withComma ? `${weekday}, ${d} ${MONTH_FULL_NAMES[m - 1]}` : `${weekday} ${d} ${MONTH_FULL_NAMES[m - 1]}`;
+}
+
+function joinWithAnd(items) {
+  return items.length <= 1 ? (items[0] || '') : `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`;
+}
+
+// Busiest single calendar day this period, by distinct rooms occupied — same
+// whole-night convention as bookingRoomNights (a stay occupies each night's
+// SAST calendar date from Check In up to, not including, Check Out; an
+// Hourly booking occupies just its Check In date, consistent with it being a
+// same-day booking). Ties are stated explicitly rather than silently picking
+// a winner — same principle as durationModeInsight. Returns the structured
+// pieces alongside the sentence: low-effort now, in case a future "same
+// period last year" comparison wants the raw date(s)/count without
+// re-parsing the sentence — that comparison itself is NOT built here.
+function busiestDayInsight(currentBookings) {
+  const roomsByDay = new Map(); // dayKey -> Set(roomId)
+
+  for (const b of currentBookings) {
+    const roomIds = b.fields['Room'] || [];
+    if (roomIds.length === 0) continue;
+    const inMs = b.fields['Check In'] ? Date.parse(b.fields['Check In']) : NaN;
+    const outMs = b.fields['Check Out'] ? Date.parse(b.fields['Check Out']) : NaN;
+    if (!Number.isFinite(inMs) || !Number.isFinite(outMs) || outMs <= inMs) continue;
+
+    const nights = b.fields['Booking Type'] === 'Hourly' ? 1 : Math.max(1, Math.round((outMs - inMs) / DAY_MS));
+    for (let n = 0; n < nights; n++) {
+      const dayKey = sastDayKey(inMs + n * DAY_MS);
+      if (!roomsByDay.has(dayKey)) roomsByDay.set(dayKey, new Set());
+      for (const roomId of roomIds) roomsByDay.get(dayKey).add(roomId);
+    }
+  }
+
+  if (roomsByDay.size === 0) {
+    return { busiestDayInsight: 'No bookings this month.', busiestDates: [], roomsOccupied: 0 };
+  }
+
+  let maxCount = 0;
+  for (const set of roomsByDay.values()) maxCount = Math.max(maxCount, set.size);
+  const busiestDates = [...roomsByDay.entries()]
+    .filter(([, set]) => set.size === maxCount)
+    .map(([dayKey]) => dayKey)
+    .sort();
+
+  const insight = busiestDates.length === 1
+    ? `Your busiest day this month was ${formatBusyDay(busiestDates[0], true)}, with ${maxCount} room${maxCount === 1 ? '' : 's'} occupied.`
+    : `Your busiest days this month were ${joinWithAnd(busiestDates.map(d => formatBusyDay(d, false)))}.`;
+
+  return { busiestDayInsight: insight, busiestDates, roomsOccupied: maxCount };
+}
+
 // `bookings` is already property-scoped and status-filtered (same contract
 // as aggregateOwnerSummary) but NOT period-filtered — this function does its
 // own current/prior windowing internally so callers fetch Airtable data once
@@ -4325,6 +4390,8 @@ function aggregateMonthlyReport(property, rooms, bookings, w, guestsById = new M
     avgRating === null ? 'Guest rating: no ratings captured this month' : pctDeltaInsight('Guest rating', Math.round(avgRating * 10) / 10, priorAvgRating === null ? null : Math.round(priorAvgRating * 10) / 10, '/5')
   ];
 
+  const busiestDay = busiestDayInsight(currentBookings);
+
   return {
     propertyId: property.id,
     propertyName: property.fields['Property Name'],
@@ -4340,6 +4407,10 @@ function aggregateMonthlyReport(property, rooms, bookings, w, guestsById = new M
     insights,
     overnightDurationModeInsight,
     shortStayDurationModeInsight,
+    busiestDayInsight: busiestDay.busiestDayInsight,
+    // Structured alongside the sentence — not a YoY comparison feature, just
+    // raw data a future comparison wouldn't have to re-parse out of the text.
+    busiestDay: { dates: busiestDay.busiestDates, roomsOccupied: busiestDay.roomsOccupied },
     totalBookings: currentBookings.length
   };
 }
