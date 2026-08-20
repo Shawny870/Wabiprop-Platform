@@ -4440,23 +4440,20 @@ function aggregateMonthlyReport(property, rooms, bookings, w, guestsById = new M
   };
 }
 
-// wabistay_owner_monthly_recap was ALREADY SUBMITTED to Meta built around 13
-// separate {{n}} slots — split this-month/last-month values for occupancy,
-// revenue, and rating, NOT the combined "up X% vs last month" delta
-// sentences report.insights[] holds (those stay in `insights` for Axiom/
-// internal use; this function reads the raw split fields instead).
-//
-// FLAG FOR CEO: this order is what was specified for this rebuild — double
-// check it against the ACTUAL submitted template body's {{n}} sequence
-// before merging. A silent mismatch here sends data into the wrong slot
-// with no error.
+// Meta APPROVED wabistay_owner_monthly_recap with exactly 11 {{n}} slots —
+// confirmed directly from Meta Business Manager's edit view. An earlier pass
+// built 13 params (split count + duration-mode sentence per booking type);
+// that does not match what was actually approved. Overnight and short-stay
+// each get ONE combined slot instead — see overnightBookingsParam/
+// shortStayBookingsParam below, which reuse durationModeInsight's (PR #52)
+// mode-vs-average-vs-tie decision output as-is, only reformatting the
+// string, not the underlying logic.
 //   {{1}} ownerName · {{2}} propertyName · {{3}} occupancy this-month ·
 //   {{4}} occupancy last-month · {{5}} revenue this-month · {{6}} revenue
-//   last-month · {{7}} overnight booking count · {{8}} overnight
-//   duration-mode sentence (PR #52) · {{9}} short-stay booking count ·
-//   {{10}} short-stay duration-mode sentence (PR #52) · {{11}} repeat-guest
-//   % (12-month rolling window) · {{12}} rating this-month · {{13}} rating
-//   last-month.
+//   last-month · {{7}} overnight bookings (count + duration-mode, one
+//   sentence) · {{8}} short-stay bookings (count + duration-mode, one
+//   sentence) · {{9}} repeat-guest % (12-month rolling window) · {{10}}
+//   rating this-month · {{11}} rating last-month.
 // busiestDayInsight (PR #53) is deliberately NOT included — placement/
 // whether-at-all is still an open CEO decision, not this pass's call to make.
 //
@@ -4473,6 +4470,37 @@ function aggregateMonthlyReport(property, rooms, bookings, w, guestsById = new M
 // R-prefix + Math.round currency convention (same as pctDeltaInsight's
 // revenue formatting) rather than inventing a new comma-grouped format that
 // doesn't exist anywhere else in this codebase.
+
+// Combines {{overnight count}} + durationModeInsight's OUTPUT STRING (PR #52,
+// untouched) into the one approved sentence. The zero-bookings case is
+// decided from `count` (the report's own overnightBookingsCount), not by
+// parsing durationModeInsight's "No overnight bookings this period." text,
+// so this doesn't depend on that string's exact wording staying stable.
+function overnightBookingsParam(count, durationSentence) {
+  if (count === 0) return 'No overnight bookings this month.';
+  const countText = `${count} overnight booking${count === 1 ? '' : 's'} this month`;
+  const modeMatch = durationSentence.match(/^Most overnight guests stayed (.+)\.$/);
+  if (modeMatch) return `${countText} — most guests stayed ${modeMatch[1]}.`;
+  // Average fallback (tie, or below durationModeInsight's minimum booking
+  // count) — reuse its existing average phrasing verbatim, minus the
+  // redundant leading "Overnight ", per instructions: don't change that
+  // underlying logic, just combine its output with the count.
+  return `${countText} — ${durationSentence.replace(/^Overnight /, '')}`;
+}
+
+// Same combination for short-stay, but the approved copy uses a different
+// verb/noun order for the clear-mode case ("booked N-hour stays" vs
+// overnight's "stayed N night(s)") — durationModeInsight's decision logic
+// (mode vs. average vs. tie) is still reused untouched; only the mode-case
+// sentence is reworded to match the approved template text.
+function shortStayBookingsParam(count, durationSentence) {
+  if (count === 0) return 'No short-stay bookings this month.';
+  const countText = `${count} short-stay booking${count === 1 ? '' : 's'} this month`;
+  const modeMatch = durationSentence.match(/^Most short-stay guests stayed (\d+(?:\.\d+)?) hours?\.$/);
+  if (modeMatch) return `${countText} — most guests booked ${modeMatch[1]}-hour stays.`;
+  return `${countText} — ${durationSentence.replace(/^Short-stay /, '')}`;
+}
+
 function monthlyReportTemplateParams(report) {
   if (report.ownerName === undefined || report.ownerName === null) {
     throw new Error(
@@ -4491,10 +4519,8 @@ function monthlyReportTemplateParams(report) {
     pctOrNA(report.occupancy.priorPct),
     `R${Math.round(report.revenue.current)}`,
     `R${Math.round(report.revenue.prior)}`,
-    String(report.overnightBookingsCount),
-    report.overnightDurationModeInsight,
-    String(report.shortStayBookingsCount),
-    report.shortStayDurationModeInsight,
+    overnightBookingsParam(report.overnightBookingsCount, report.overnightDurationModeInsight),
+    shortStayBookingsParam(report.shortStayBookingsCount, report.shortStayDurationModeInsight),
     report.repeatGuestRate === null ? 'N/A' : `${Math.round(report.repeatGuestRate * 100)}%`,
     ratingOrNA(report.avgRating),
     ratingOrNA(report.priorAvgRating)
