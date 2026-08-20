@@ -278,7 +278,7 @@ function withOwner(report, ownerName = 'Villa Liza Owner') {
   return { ...report, ownerName };
 }
 
-test('monthlyReportTemplateParams: returns exactly 13 params in the locked order, correctly sourced', () => {
+test('monthlyReportTemplateParams: returns exactly 11 params in the locked order, correctly sourced', () => {
   const bookings = [
     // This month: 1 overnight (2 nights, R400, rating 5), 1 hourly (2h)
     { id: 'recB1', fields: { 'Guest': ['recG1'], 'Room': ['recR1'], 'Booking Type': 'Overnight', 'Amount Due': 400, 'Rating': 5, 'Check In': daysAgo(10), 'Check Out': daysAgo(8) } },
@@ -289,28 +289,26 @@ test('monthlyReportTemplateParams: returns exactly 13 params in the locked order
   const report = withOwner(wh.aggregateMonthlyReport(property, rooms, bookings, windowFor(NOW)));
   const params = wh.monthlyReportTemplateParams(report);
 
-  assert.strictEqual(params.length, 13);
+  assert.strictEqual(params.length, 11);
   assert.deepStrictEqual(params, [
-    'Villa Liza Owner',                              // {{1}} owner name
-    'Villa Liza Guest Lodge',                        // {{2}} property name
+    'Villa Liza Owner',                               // {{1}} owner name
+    'Villa Liza Guest Lodge',                         // {{2}} property name
     `${report.occupancy.currentPct}%`,                // {{3}} occupancy this-month
     `${report.occupancy.priorPct}%`,                  // {{4}} occupancy last-month
-    'R500',                                            // {{5}} revenue this-month (billed) — R400 overnight + R100 hourly
+    'R500',                                           // {{5}} revenue this-month (billed) — R400 overnight + R100 hourly
     'R200',                                           // {{6}} revenue last-month (billed)
-    '1',                                               // {{7}} overnight booking count
-    report.overnightDurationModeInsight,              // {{8}} overnight duration-mode sentence
-    '1',                                               // {{9}} short-stay booking count
-    report.shortStayDurationModeInsight,              // {{10}} short-stay duration-mode sentence
-    '0%',                                              // {{11}} repeat-guest % (no repeats in this dataset)
-    '5',                                               // {{12}} rating this-month
-    '3'                                                // {{13}} rating last-month
+    '1 overnight booking this month — guests stayed an average of 2 nights.', // {{7}} (1 booking is below durationModeInsight's minimum for a "most common" claim)
+    '1 short-stay booking this month — guests stayed an average of 2 hours.', // {{8}}
+    '0%',                                              // {{9}} repeat-guest % (no repeats in this dataset)
+    '5',                                               // {{10}} rating this-month
+    '3'                                                // {{11}} rating last-month
   ]);
 });
 
 test('monthlyReportTemplateParams: occupancy/revenue/rating are split this/last values, not combined delta sentences', () => {
   const report = withOwner(wh.aggregateMonthlyReport(property, rooms, [], windowFor(NOW)));
   const params = wh.monthlyReportTemplateParams(report);
-  for (const p of [params[2], params[3], params[4], params[5], params[11], params[12]]) {
+  for (const p of [params[2], params[3], params[4], params[5], params[9], params[10]]) {
     assert.ok(!String(p).includes('vs last month'), `expected a split raw value, got a combined delta sentence: ${p}`);
   }
 });
@@ -325,25 +323,95 @@ test('monthlyReportTemplateParams: revenue param is the plain currency figure on
   assert.ok(!params[4].toLowerCase().includes('earned'), 'the word "earned" belongs in the template\'s static text, not the param value');
 });
 
-test('monthlyReportTemplateParams: null occupancy/revenue/rating/repeat-guest values render as "N/A", not "null" or NaN', () => {
+test('monthlyReportTemplateParams: null occupancy/rating/repeat-guest values render as "N/A", not "null" or NaN', () => {
   const report = withOwner(wh.aggregateMonthlyReport(property, rooms, [], windowFor(NOW)));
   const params = wh.monthlyReportTemplateParams(report);
-  assert.strictEqual(params[10], 'N/A', 'repeat-guest % with zero current-month guests');
-  assert.strictEqual(params[11], 'N/A', 'rating this-month with no ratings captured');
-  assert.strictEqual(params[12], 'N/A', 'rating last-month with no ratings captured');
+  assert.strictEqual(params[8], 'N/A', 'repeat-guest % with zero current-month guests');
+  assert.strictEqual(params[9], 'N/A', 'rating this-month with no ratings captured');
+  assert.strictEqual(params[10], 'N/A', 'rating last-month with no ratings captured');
 });
 
-test('monthlyReportTemplateParams: preserves the duration-mode insights and booking-type counts, unchanged from the prior wiring pass', () => {
+// ── {{7}}/{{8}}: overnight/short-stay combined count + duration-mode sentence ──
+// Meta approved ONE slot per booking type, not separate count + mode params.
+// durationModeInsight's mode-vs-average-vs-tie decision (PR #52) is reused
+// completely untouched via report.overnightDurationModeInsight/
+// shortStayDurationModeInsight — these tests only check the new combined
+// string format, reusing the exact PR #52 test scenarios.
+
+test('{{7}} overnight: a clear mode combines the count and "most guests stayed" phrasing into one sentence', () => {
   const bookings = [
+    // Same as PR #52's clear-mode scenario: 3x 2-night, 1x 5-night — 2 nights is the clear mode
     { id: 'recB1', fields: { 'Guest': ['recG1'], 'Room': ['recR1'], 'Booking Type': 'Overnight', 'Amount Due': 400, 'Check In': daysAgo(10), 'Check Out': daysAgo(8) } },
-    { id: 'recB2', fields: { 'Guest': ['recG2'], 'Room': ['recR2'], 'Booking Type': 'Hourly', 'Amount Due': 100, 'Check In': daysAgo(5), 'Check Out': new Date(new Date(daysAgo(5)).getTime() + 2 * 3600000).toISOString() } }
+    { id: 'recB2', fields: { 'Guest': ['recG2'], 'Room': ['recR1'], 'Booking Type': 'Overnight', 'Amount Due': 400, 'Check In': daysAgo(9), 'Check Out': daysAgo(7) } },
+    { id: 'recB3', fields: { 'Guest': ['recG3'], 'Room': ['recR1'], 'Booking Type': 'Overnight', 'Amount Due': 400, 'Check In': daysAgo(6), 'Check Out': daysAgo(4) } },
+    { id: 'recB4', fields: { 'Guest': ['recG4'], 'Room': ['recR2'], 'Booking Type': 'Overnight', 'Amount Due': 400, 'Check In': daysAgo(5), 'Check Out': daysAgo(0) } }
   ];
   const report = withOwner(wh.aggregateMonthlyReport(property, rooms, bookings, windowFor(NOW)));
   const params = wh.monthlyReportTemplateParams(report);
-  assert.strictEqual(params[6], String(report.overnightBookingsCount));
-  assert.strictEqual(params[7], report.overnightDurationModeInsight);
-  assert.strictEqual(params[8], String(report.shortStayBookingsCount));
-  assert.strictEqual(params[9], report.shortStayDurationModeInsight);
+  assert.strictEqual(params[6], '4 overnight bookings this month — most guests stayed 2 nights.');
+});
+
+test('{{7}} overnight: a tie falls back to the existing average phrasing, combined with the count', () => {
+  const bookings = [
+    // Same as PR #52's tie scenario: 2x 2-night, 2x 4-night — tied
+    { id: 'recB1', fields: { 'Guest': ['recG1'], 'Room': ['recR1'], 'Booking Type': 'Overnight', 'Amount Due': 400, 'Check In': daysAgo(10), 'Check Out': daysAgo(8) } },
+    { id: 'recB2', fields: { 'Guest': ['recG2'], 'Room': ['recR1'], 'Booking Type': 'Overnight', 'Amount Due': 400, 'Check In': daysAgo(9), 'Check Out': daysAgo(7) } },
+    { id: 'recB3', fields: { 'Guest': ['recG3'], 'Room': ['recR1'], 'Booking Type': 'Overnight', 'Amount Due': 400, 'Check In': daysAgo(6), 'Check Out': daysAgo(2) } },
+    { id: 'recB4', fields: { 'Guest': ['recG4'], 'Room': ['recR2'], 'Booking Type': 'Overnight', 'Amount Due': 400, 'Check In': daysAgo(5), 'Check Out': daysAgo(1) } }
+  ];
+  const report = withOwner(wh.aggregateMonthlyReport(property, rooms, bookings, windowFor(NOW)));
+  const params = wh.monthlyReportTemplateParams(report);
+  assert.strictEqual(params[6], '4 overnight bookings this month — guests stayed an average of 3 nights.');
+  assert.ok(!params[6].includes('most'), 'a tie must not be presented as a clear mode');
+});
+
+test('{{7}} overnight: zero bookings this period reports "No overnight bookings this month," no crash', () => {
+  const report = withOwner(wh.aggregateMonthlyReport(property, rooms, [], windowFor(NOW)));
+  const params = wh.monthlyReportTemplateParams(report);
+  assert.strictEqual(params[6], 'No overnight bookings this month.');
+});
+
+test('{{7}} overnight: a single booking is singular "booking," not "bookings"', () => {
+  const bookings = [
+    { id: 'recB1', fields: { 'Guest': ['recG1'], 'Room': ['recR1'], 'Booking Type': 'Overnight', 'Amount Due': 400, 'Check In': daysAgo(5), 'Check Out': daysAgo(3) } }
+  ];
+  const report = withOwner(wh.aggregateMonthlyReport(property, rooms, bookings, windowFor(NOW)));
+  const params = wh.monthlyReportTemplateParams(report);
+  assert.match(params[6], /^1 overnight booking this month/);
+});
+
+test('{{8}} short-stay: a clear mode combines the count and "most guests booked N-hour stays" phrasing', () => {
+  const bookings = [
+    // Same as PR #52's clear-mode scenario, adapted for Hourly: 2x 2-hour, 1x 3-hour
+    { id: 'recB1', fields: { 'Guest': ['recG1'], 'Room': ['recR1'], 'Booking Type': 'Hourly', 'Amount Due': 100, 'Check In': daysAgo(10), 'Check Out': new Date(new Date(daysAgo(10)).getTime() + 2 * 3600000).toISOString() } },
+    { id: 'recB2', fields: { 'Guest': ['recG2'], 'Room': ['recR1'], 'Booking Type': 'Hourly', 'Amount Due': 100, 'Check In': daysAgo(9), 'Check Out': new Date(new Date(daysAgo(9)).getTime() + 2 * 3600000).toISOString() } },
+    { id: 'recB3', fields: { 'Guest': ['recG3'], 'Room': ['recR2'], 'Booking Type': 'Hourly', 'Amount Due': 150, 'Check In': daysAgo(6), 'Check Out': new Date(new Date(daysAgo(6)).getTime() + 3 * 3600000).toISOString() } }
+  ];
+  const report = withOwner(wh.aggregateMonthlyReport(property, rooms, bookings, windowFor(NOW)));
+  const params = wh.monthlyReportTemplateParams(report);
+  assert.strictEqual(params[7], '3 short-stay bookings this month — most guests booked 2-hour stays.');
+});
+
+test('{{8}} short-stay: a tie falls back to the existing average phrasing, combined with the count', () => {
+  const bookings = [
+    { id: 'recB1', fields: { 'Guest': ['recG1'], 'Room': ['recR1'], 'Booking Type': 'Hourly', 'Amount Due': 100, 'Check In': daysAgo(10), 'Check Out': new Date(new Date(daysAgo(10)).getTime() + 1 * 3600000).toISOString() } },
+    { id: 'recB2', fields: { 'Guest': ['recG2'], 'Room': ['recR1'], 'Booking Type': 'Hourly', 'Amount Due': 100, 'Check In': daysAgo(9), 'Check Out': new Date(new Date(daysAgo(9)).getTime() + 1 * 3600000).toISOString() } },
+    { id: 'recB3', fields: { 'Guest': ['recG3'], 'Room': ['recR2'], 'Booking Type': 'Hourly', 'Amount Due': 150, 'Check In': daysAgo(6), 'Check Out': new Date(new Date(daysAgo(6)).getTime() + 3 * 3600000).toISOString() } },
+    { id: 'recB4', fields: { 'Guest': ['recG4'], 'Room': ['recR2'], 'Booking Type': 'Hourly', 'Amount Due': 150, 'Check In': daysAgo(5), 'Check Out': new Date(new Date(daysAgo(5)).getTime() + 3 * 3600000).toISOString() } }
+  ];
+  const report = withOwner(wh.aggregateMonthlyReport(property, rooms, bookings, windowFor(NOW)));
+  const params = wh.monthlyReportTemplateParams(report);
+  assert.strictEqual(params[7], '4 short-stay bookings this month — guests stayed an average of 2 hours.');
+  assert.ok(!params[7].includes('most'), 'a tie must not be presented as a clear mode');
+});
+
+test('{{8}} short-stay: zero Hourly bookings reports "No short-stay bookings this month," no crash', () => {
+  const bookings = [
+    { id: 'recB1', fields: { 'Guest': ['recG1'], 'Room': ['recR1'], 'Booking Type': 'Overnight', 'Amount Due': 400, 'Check In': daysAgo(5), 'Check Out': daysAgo(3) } }
+  ];
+  const report = withOwner(wh.aggregateMonthlyReport(property, rooms, bookings, windowFor(NOW)));
+  const params = wh.monthlyReportTemplateParams(report);
+  assert.strictEqual(params[7], 'No short-stay bookings this month.');
 });
 
 test('monthlyReportTemplateParams: preserves the 12-month repeat-guest window, unchanged from the prior wiring pass', () => {
@@ -356,7 +424,7 @@ test('monthlyReportTemplateParams: preserves the 12-month repeat-guest window, u
   ];
   const report = withOwner(wh.aggregateMonthlyReport(property, rooms, bookings, windowFor(NOW)));
   const params = wh.monthlyReportTemplateParams(report);
-  assert.strictEqual(params[10], '50%');
+  assert.strictEqual(params[8], '50%');
 });
 
 test('monthlyReportTemplateParams: does NOT include busiestDayInsight (PR #53) — still an open CEO decision', () => {
@@ -381,9 +449,9 @@ test('monthlyReportTemplateParams: throws if ownerName is null (property has no 
   assert.throws(() => wh.monthlyReportTemplateParams(report), /ownerName is missing/);
 });
 
-// ── END-TO-END: runMonthlyReport actually resolves ownerName and builds 13 params ──
+// ── END-TO-END: runMonthlyReport actually resolves ownerName and builds 11 params ──
 
-test('E2E: runMonthlyReport resolves a real linked owner and logs correct 13-param templateParams in the Axiom payload', async () => {
+test('E2E: runMonthlyReport resolves a real linked owner and logs correct 11-param templateParams in the Axiom payload', async () => {
   const ctx = setup({
     WS_Properties: [property],
     WS_Owners: [ownerRecord],
@@ -398,7 +466,7 @@ test('E2E: runMonthlyReport resolves a real linked owner and logs correct 13-par
 
   const payloadEvent = ctx.axiom.find(e => e.event === 'monthly_report_payload');
   assert.ok(payloadEvent);
-  assert.strictEqual(payloadEvent.templateParams.length, 13);
+  assert.strictEqual(payloadEvent.templateParams.length, 11);
   assert.strictEqual(payloadEvent.templateParams[0], 'Villa Liza Owner');
   assert.strictEqual(payloadEvent.templateParams[1], 'Villa Liza Guest Lodge');
 });
