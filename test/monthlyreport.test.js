@@ -73,9 +73,9 @@ test('average length of stay only counts Overnight bookings, not Hourly', () => 
   assert.strictEqual(report.avgLengthOfStayNights, 3, 'the Hourly booking must not pull the average toward 0/short stays');
 });
 
-test('repeat-guest rate: a guest with a prior booking anywhere in the scoped set counts as repeat', () => {
+test('repeat-guest rate: a guest with a booking in the 12 months prior to this period counts as repeat', () => {
   const bookings = [
-    // recG1 has TWO bookings total (one prior month, one this month) — repeat.
+    // recG1: one booking 45 days ago (within the 12-month prior window) + one this month — repeat.
     { id: 'recB1', fields: { 'Guest': ['recG1'], 'Room': ['recR1'], 'Booking Type': 'Overnight', 'Amount Due': 400, 'Check In': daysAgo(45), 'Check Out': daysAgo(44) } },
     { id: 'recB2', fields: { 'Guest': ['recG1'], 'Room': ['recR1'], 'Booking Type': 'Overnight', 'Amount Due': 400, 'Check In': daysAgo(5), 'Check Out': daysAgo(4) } },
     // recG2 has only this one booking — not a repeat.
@@ -83,6 +83,26 @@ test('repeat-guest rate: a guest with a prior booking anywhere in the scoped set
   ];
   const report = wh.aggregateMonthlyReport(property, rooms, bookings, windowFor(NOW));
   assert.strictEqual(report.repeatGuestRate, 0.5, '1 of 2 distinct guests this month is a repeat');
+});
+
+test('repeat-guest rate: a prior booking OLDER than 12 months does not count — rolling window, not lifetime', () => {
+  const bookings = [
+    // recG1's only prior booking is 400 days ago — outside the 365-day window.
+    { id: 'recB1', fields: { 'Guest': ['recG1'], 'Room': ['recR1'], 'Booking Type': 'Overnight', 'Amount Due': 400, 'Check In': daysAgo(400), 'Check Out': daysAgo(399) } },
+    { id: 'recB2', fields: { 'Guest': ['recG1'], 'Room': ['recR1'], 'Booking Type': 'Overnight', 'Amount Due': 400, 'Check In': daysAgo(5), 'Check Out': daysAgo(4) } }
+  ];
+  const report = wh.aggregateMonthlyReport(property, rooms, bookings, windowFor(NOW));
+  assert.strictEqual(report.repeatGuestRate, 0, 'a 400-day-old booking is outside the 12-month rolling window, unlike a lifetime-cumulative count');
+});
+
+test('repeat-guest rate: two bookings both within the current month do not count as repeat — only a booking BEFORE this period does', () => {
+  const bookings = [
+    // recG1 books twice this month, no earlier history — not a "prior visit" repeat.
+    { id: 'recB1', fields: { 'Guest': ['recG1'], 'Room': ['recR1'], 'Booking Type': 'Overnight', 'Amount Due': 400, 'Check In': daysAgo(20), 'Check Out': daysAgo(19) } },
+    { id: 'recB2', fields: { 'Guest': ['recG1'], 'Room': ['recR1'], 'Booking Type': 'Overnight', 'Amount Due': 400, 'Check In': daysAgo(5), 'Check Out': daysAgo(4) } }
+  ];
+  const report = wh.aggregateMonthlyReport(property, rooms, bookings, windowFor(NOW));
+  assert.strictEqual(report.repeatGuestRate, 0, 'a second same-month booking is not a returning-from-a-previous-visit repeat');
 });
 
 test('cleaning turnaround uses job duration (dispatch-to-DONE) and labels itself explicitly as a proxy', () => {
@@ -247,8 +267,24 @@ test('runMonthlyReport produces one stubbed payload per property, read-only', as
 test('monthlyReportTemplateParams omits the cleaning-turnaround insight from the WhatsApp body', () => {
   const report = wh.aggregateMonthlyReport(property, rooms, [], windowFor(NOW));
   const params = wh.monthlyReportTemplateParams(report);
-  assert.strictEqual(params.length, 6);
+  assert.strictEqual(params.length, 10);
   assert.ok(!params.includes(report.insights[4]), 'cleaning-turnaround insight (internal ops metric) is not sent to the owner');
+});
+
+test('monthlyReportTemplateParams wires the duration-mode insights in after their booking-type count, per {{7}}-{{10}}', () => {
+  const bookings = [
+    { id: 'recB1', fields: { 'Guest': ['recG1'], 'Room': ['recR1'], 'Booking Type': 'Overnight', 'Amount Due': 400, 'Check In': daysAgo(10), 'Check Out': daysAgo(8) } },
+    { id: 'recB2', fields: { 'Guest': ['recG2'], 'Room': ['recR2'], 'Booking Type': 'Hourly', 'Amount Due': 100, 'Check In': daysAgo(5), 'Check Out': new Date(new Date(daysAgo(5)).getTime() + 2 * 3600000).toISOString() } }
+  ];
+  const report = wh.aggregateMonthlyReport(property, rooms, bookings, windowFor(NOW));
+  const params = wh.monthlyReportTemplateParams(report);
+
+  assert.strictEqual(params.length, 10);
+  assert.strictEqual(params[6], String(report.overnightBookingsCount)); // {{7}}
+  assert.strictEqual(params[7], report.overnightDurationModeInsight);   // {{8}}
+  assert.strictEqual(params[8], String(report.shortStayBookingsCount)); // {{9}}
+  assert.strictEqual(params[9], report.shortStayDurationModeInsight);   // {{10}}
+  assert.ok(!params.includes(report.busiestDayInsight), 'busiestDayInsight (PR #53) is not part of this template wiring pass');
 });
 
 test('a property that throws mid-run does not abort the others, and alertShawn fires for it', async () => {
