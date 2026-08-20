@@ -4008,6 +4008,7 @@ async function autoCheckoutHandler(req, res) {
 // aggregation is verifiable end-to-end before the template exists.
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+const HOUR_MS = 60 * 60 * 1000;
 // Meta utility template name for the owner summary. FLAG: pending Meta approval
 // (Shawn submits). When approved, this is the one-line swap point in
 // sendOwnerSummary below.
@@ -4206,6 +4207,42 @@ function pctDeltaInsight(label, current, prior, unit = '%') {
     : `${label} ${direction} ${Math.abs(deltaPct)}% vs last month (${current}${unit})`;
 }
 
+// One-sentence "most common stay duration" per booking type, not a full
+// distribution — a distribution doesn't scale across properties of varying
+// volume (unreadable/absurd at low booking counts). Falls back to an average
+// when there's no single clear mode (a tie) or too few bookings to call one
+// value "most common" with a straight face.
+// DURATION_MODE_MIN_BOOKINGS: suggested default, pending CEO confirmation —
+// see pr-bodies/monthly-bi-duration-mode.md.
+const DURATION_MODE_MIN_BOOKINGS = 3;
+
+function durationModeInsight(rawDurations, { noun, unit, minCount = DURATION_MODE_MIN_BOOKINGS }) {
+  const valid = rawDurations.filter(v => typeof v === 'number' && Number.isFinite(v) && v > 0);
+  const label = noun.charAt(0).toUpperCase() + noun.slice(1);
+  const pluralize = n => `${n} ${unit}${n === 1 ? '' : 's'}`;
+
+  if (valid.length === 0) return `No ${noun} bookings this period.`;
+
+  // Bucket by whole units — a stay is a discrete number of nights/hours even
+  // if the raw checkIn/checkOut span isn't an exact multiple (e.g. a
+  // 14:00→10:00 1-night stay is 20h of clock time).
+  const rounded = valid.map(v => Math.round(v));
+
+  if (valid.length >= minCount) {
+    const counts = new Map();
+    for (const v of rounded) counts.set(v, (counts.get(v) || 0) + 1);
+    const maxCount = Math.max(...counts.values());
+    const modes = [...counts.keys()].filter(k => counts.get(k) === maxCount);
+    if (modes.length === 1) {
+      return `Most ${noun} guests stayed ${pluralize(modes[0])}.`;
+    }
+    // Tie — fall through to average rather than pick an arbitrary winner.
+  }
+
+  const avg = Math.round((valid.reduce((s, v) => s + v, 0) / valid.length) * 10) / 10;
+  return `${label} guests stayed an average of ${pluralize(avg)}.`;
+}
+
 // `bookings` is already property-scoped and status-filtered (same contract
 // as aggregateOwnerSummary) but NOT period-filtered — this function does its
 // own current/prior windowing internally so callers fetch Airtable data once
@@ -4240,6 +4277,18 @@ function aggregateMonthlyReport(property, rooms, bookings, w, guestsById = new M
   };
   const overnightCurrent = currentBookings.filter(b => b.fields['Booking Type'] === 'Overnight');
   const avgLengthOfStay = avgOrNull(overnightCurrent.map(nightsOf));
+
+  // Most common stay duration, one sentence per booking type — see
+  // durationModeInsight's own header comment for the mode-vs-average logic.
+  const hoursOf = b => {
+    const inMs = checkInMs(b);
+    const outMs = b.fields['Check Out'] ? Date.parse(b.fields['Check Out']) : NaN;
+    if (!Number.isFinite(inMs) || !Number.isFinite(outMs) || outMs <= inMs) return null;
+    return (outMs - inMs) / HOUR_MS;
+  };
+  const hourlyCurrent = currentBookings.filter(b => b.fields['Booking Type'] === 'Hourly');
+  const overnightDurationModeInsight = durationModeInsight(overnightCurrent.map(nightsOf), { noun: 'overnight', unit: 'night' });
+  const shortStayDurationModeInsight = durationModeInsight(hourlyCurrent.map(hoursOf), { noun: 'short-stay', unit: 'hour' });
 
   // Repeat-guest rate — see header comment on scope
   const guestBookingCounts = new Map();
@@ -4289,6 +4338,8 @@ function aggregateMonthlyReport(property, rooms, bookings, w, guestsById = new M
     avgRating,
     priorAvgRating,
     insights,
+    overnightDurationModeInsight,
+    shortStayDurationModeInsight,
     totalBookings: currentBookings.length
   };
 }
