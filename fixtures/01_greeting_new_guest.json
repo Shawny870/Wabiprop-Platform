@@ -2,25 +2,83 @@
   "name": "greeting: unknown number gets POPIA consent (B13/F22) then the stay-type question (A1), guest record created (F10)",
   "seed": {
     "WS_Properties": [
-      { "id": "recP1", "fields": { "Property Name": "Test Lodge", "Phone Number ID": "111000111000", "City": "Testville", "Notify Phone": "27831112222" } }
+      {
+        "id": "recP1",
+        "fields": {
+          "Property Name": "Test Lodge",
+          "Phone Number ID": "111000111000",
+          "City": "Testville",
+          "Notify Phone": "27831112222"
+        }
+      }
     ],
     "WS_Rooms": [
-      { "id": "recR1", "fields": { "Room Name": "Room 1", "Status": "Available", "Property": ["recP1"] } },
-      { "id": "recR2", "fields": { "Room Name": "Room 2", "Status": "Available", "Property": ["recP1"] } },
-      { "id": "recR3", "fields": { "Room Name": "Room 3", "Status": "Available", "Property": ["recP1"] } }
+      {
+        "id": "recR1",
+        "fields": {
+          "Room Name": "Room 1",
+          "Status": "Available",
+          "Property": [
+            "recP1"
+          ]
+        }
+      },
+      {
+        "id": "recR2",
+        "fields": {
+          "Room Name": "Room 2",
+          "Status": "Available",
+          "Property": [
+            "recP1"
+          ]
+        }
+      },
+      {
+        "id": "recR3",
+        "fields": {
+          "Room Name": "Room 3",
+          "Status": "Available",
+          "Property": [
+            "recP1"
+          ]
+        }
+      }
     ],
     "WS_Rates": [
-      { "id": "recRATE1", "fields": { "Rate Name": "Standard Overnight", "Rate Type": "Per Night", "Amount": 350, "Active": true, "Property": ["recP1"] } }
+      {
+        "id": "recRATE1",
+        "fields": {
+          "Rate Name": "Standard Overnight",
+          "Rate Type": "Per Night",
+          "Amount": 350,
+          "Active": true,
+          "Property": [
+            "recP1"
+          ]
+        }
+      }
     ],
     "WS_Guests": [],
     "WS_Cleaners": []
   },
-  "message": { "from": "27821234567", "text": "Hi" },
+  "message": {
+    "from": "27821234567",
+    "text": "Hi"
+  },
   "expect": {
     "status": 200,
     "writes": [
       {
-        "op": "create", "table": "WS_Guests",
+        "op": "update",
+        "table": "WS_Properties",
+        "id": "recP1",
+        "fields": {
+          "Last Message Received": "re:.*"
+        }
+      },
+      {
+        "op": "create",
+        "table": "WS_Guests",
         "fields": {
           "Guest Name": "Unknown",
           "Phone Number": "27821234567",
