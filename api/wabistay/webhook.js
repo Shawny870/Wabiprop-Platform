@@ -846,6 +846,59 @@ async function bumpPropertyActivity(propertyId, field) {
   }
 }
 
+// ─── DORMANT-PROPERTY FLAGGING ───────────────────────────────────────────────
+// Uses the two activity fields bumpPropertyActivity writes: 'Last Message
+// Received' and 'Last Owner App Open'. A missing timestamp (never bumped at
+// all) counts as maximally stale, same as any other value older than the
+// threshold — a property that has NEVER received a message or had a read
+// receipt is at least as dormant as one that merely hasn't in N days.
+//
+// JUDGMENT CALL (flagged, not silently decided): the task asked for
+// "Last Message Received OR Last Owner App Open exceeds the threshold" —
+// implemented literally below as EITHER signal being stale flags the
+// property. This over-flags relative to the actual WhatsApp Coexistence
+// 14-day disconnect risk the threshold exists to buffer against, which is
+// really about total silence on the number (both signals stale), not either
+// one alone — a property with guests messaging constantly but whose owner
+// hasn't triggered a read receipt lately would still get flagged under this
+// literal reading, even though the number itself is far from disconnect
+// risk. Implemented as asked; `mode: 'both'` is available for the stricter
+// reading if the CEO wants it instead — see pr-bodies/dormant-property-flagging.md.
+const DORMANT_THRESHOLD_DAYS_DEFAULT = 10;
+
+function isStale(isoTimestamp, thresholdMs, now) {
+  if (!isoTimestamp) return true; // never recorded = maximally stale
+  const ms = Date.parse(isoTimestamp);
+  if (!Number.isFinite(ms)) return true; // unparseable = treat as unknown/stale
+  return (now.getTime() - ms) > thresholdMs;
+}
+
+function dormantProperties(properties, opts = {}) {
+  const {
+    thresholdDays = Number(process.env.DORMANT_THRESHOLD_DAYS) || DORMANT_THRESHOLD_DAYS_DEFAULT,
+    now = new Date(),
+    mode = 'either' // 'either' (as specified) or 'both' (stricter — see comment above)
+  } = opts;
+  const thresholdMs = thresholdDays * DAY_MS;
+
+  return properties
+    .map(p => {
+      const msgStale = isStale(p.fields['Last Message Received'], thresholdMs, now);
+      const openStale = isStale(p.fields['Last Owner App Open'], thresholdMs, now);
+      const dormant = mode === 'both' ? (msgStale && openStale) : (msgStale || openStale);
+      return { property: p, msgStale, openStale, dormant };
+    })
+    .filter(r => r.dormant)
+    .map(r => ({
+      propertyId: r.property.id,
+      propertyName: r.property.fields['Property Name'] || null,
+      lastMessageReceived: r.property.fields['Last Message Received'] || null,
+      lastOwnerAppOpen: r.property.fields['Last Owner App Open'] || null,
+      msgStale: r.msgStale,
+      openStale: r.openStale
+    }));
+}
+
 function propertyCityLine(property) {
   const city = property.fields['City'];
   return city ? `, ${city}` : '';
@@ -4862,6 +4915,8 @@ module.exports.sendWhatsApp = sendWhatsApp;
 module.exports.alertShawn = alertShawn;
 module.exports.getAlertPhone = getAlertPhone;
 module.exports.bumpPropertyActivity = bumpPropertyActivity;
+module.exports.dormantProperties = dormantProperties;
+module.exports.DORMANT_THRESHOLD_DAYS_DEFAULT = DORMANT_THRESHOLD_DAYS_DEFAULT;
 // CEO manual report-trigger (api/wabistay/cron/manual-report.js) needs these
 // to build the SAME live-data fetch + stubbed-send pipeline the real crons
 // use, without duplicating the Airtable query/pagination logic here.
