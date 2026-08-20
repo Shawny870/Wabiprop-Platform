@@ -901,6 +901,86 @@ async function bumpPropertyActivity(propertyId, field) {
   }
 }
 
+// ─── DORMANT-PROPERTY FLAGGING ───────────────────────────────────────────────
+// Uses the two activity fields bumpPropertyActivity writes: 'Last Message
+// Received' and 'Last Owner App Open'. A missing timestamp (never bumped at
+// all) counts as maximally stale, same as any other value older than the
+// threshold.
+//
+// CEO DECISION (superseding the original "either" default this shipped
+// with): 'Last Message Received' (guest activity) and 'Last Owner App Open'
+// (the actual WhatsApp Coexistence 14-day disconnect signal) measure two
+// DIFFERENT risks, and must not be conflated into one flag. A property can
+// have constant guest inquiries while the owner's own app-open has gone
+// stale — that IS real disconnect risk, and a combined/either-signal flag
+// would mask it (a busy guest inbox would keep the property looking
+// "active" even as the owner's number drifts toward disconnection). So:
+//   · dormantProperties() — THE disconnect-risk flag, keyed on
+//     'Last Owner App Open' ALONE by default (mode: 'owner_open_only').
+//   · inactiveByMessageActivity() — a separate, distinct "this property may
+//     be quiet" view keyed on 'Last Message Received' ALONE. Not merged into
+//     the dormancy flag; not deleted; just not conflated. See
+//     dormant-report.js, which now surfaces both as separate response keys.
+// `mode: 'either'`/`'both'` remain available on dormantProperties() for
+// anyone who wants a combined view later, but neither is the default.
+const DORMANT_THRESHOLD_DAYS_DEFAULT = 10;
+
+function isStale(isoTimestamp, thresholdMs, now) {
+  if (!isoTimestamp) return true; // never recorded = maximally stale
+  const ms = Date.parse(isoTimestamp);
+  if (!Number.isFinite(ms)) return true; // unparseable = treat as unknown/stale
+  return (now.getTime() - ms) > thresholdMs;
+}
+
+function dormantProperties(properties, opts = {}) {
+  const {
+    thresholdDays = Number(process.env.DORMANT_THRESHOLD_DAYS) || DORMANT_THRESHOLD_DAYS_DEFAULT,
+    now = new Date(),
+    mode = 'owner_open_only' // 'owner_open_only' (CEO-confirmed default), 'either', or 'both'
+  } = opts;
+  const thresholdMs = thresholdDays * DAY_MS;
+
+  return properties
+    .map(p => {
+      const msgStale = isStale(p.fields['Last Message Received'], thresholdMs, now);
+      const openStale = isStale(p.fields['Last Owner App Open'], thresholdMs, now);
+      const dormant = mode === 'both' ? (msgStale && openStale)
+        : mode === 'either' ? (msgStale || openStale)
+        : openStale; // 'owner_open_only'
+      return { property: p, msgStale, openStale, dormant };
+    })
+    .filter(r => r.dormant)
+    .map(r => ({
+      propertyId: r.property.id,
+      propertyName: r.property.fields['Property Name'] || null,
+      lastMessageReceived: r.property.fields['Last Message Received'] || null,
+      lastOwnerAppOpen: r.property.fields['Last Owner App Open'] || null,
+      msgStale: r.msgStale,
+      openStale: r.openStale
+    }));
+}
+
+// Separate, distinct "property may be inactive" view — 'Last Message
+// Received' ALONE, deliberately NOT combined with the disconnect-risk flag
+// above (see the header comment for why). Same shape/threshold mechanics,
+// different signal, different meaning: this is about whether the property
+// itself is seeing guest traffic, not about the owner's WhatsApp connection.
+function inactiveByMessageActivity(properties, opts = {}) {
+  const {
+    thresholdDays = Number(process.env.DORMANT_THRESHOLD_DAYS) || DORMANT_THRESHOLD_DAYS_DEFAULT,
+    now = new Date()
+  } = opts;
+  const thresholdMs = thresholdDays * DAY_MS;
+
+  return properties
+    .filter(p => isStale(p.fields['Last Message Received'], thresholdMs, now))
+    .map(p => ({
+      propertyId: p.id,
+      propertyName: p.fields['Property Name'] || null,
+      lastMessageReceived: p.fields['Last Message Received'] || null
+    }));
+}
+
 function propertyCityLine(property) {
   const city = property.fields['City'];
   return city ? `, ${city}` : '';
@@ -5294,6 +5374,9 @@ module.exports.sendWhatsApp = sendWhatsApp;
 module.exports.alertShawn = alertShawn;
 module.exports.getAlertPhone = getAlertPhone;
 module.exports.bumpPropertyActivity = bumpPropertyActivity;
+module.exports.dormantProperties = dormantProperties;
+module.exports.inactiveByMessageActivity = inactiveByMessageActivity;
+module.exports.DORMANT_THRESHOLD_DAYS_DEFAULT = DORMANT_THRESHOLD_DAYS_DEFAULT;
 // CEO manual report-trigger (api/wabistay/cron/manual-report.js) needs these
 // to build the SAME live-data fetch + stubbed-send pipeline the real crons
 // use, without duplicating the Airtable query/pagination logic here.
