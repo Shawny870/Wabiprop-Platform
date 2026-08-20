@@ -86,6 +86,7 @@ Until step 2 is done, treat the webhook as unauthenticated.
 | `OWNER_PHONE` | [PER-ENV] | Production: real owner; Preview: CEO test phone. Fallback when a property has no `Notify Phone` |
 | `OWNER_SUMMARY_DAILY` | optional | `'true'` switches the owner summary window from 7 days to 1. Testing aid |
 | `AXIOM_TOKEN` | shared OK | Logging. Absent = logging silently disabled, so a missing token makes the whole observability layer inert — worth checking first when Axiom looks empty. Staging events are distinguishable by deploy environment |
+| `ALERT_PHONE_FALLBACK` | [PER-ENV] | Last-resort destination for `alertShawn()` (ops failure alerts — cron errors, zero-cleaner gate arrivals) when the `WS_Config` → `Alert Phone` Airtable lookup itself fails (outage, missing row/field). Normal operation reads the number from Airtable so it can be changed without a redeploy; this env var only exists to cover an Airtable outage |
 
 ## Dashboard
 
