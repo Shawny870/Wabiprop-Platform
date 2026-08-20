@@ -25,24 +25,54 @@ function props(overrides) {
   ];
 }
 
-test('mode "either" (default): flagged if ANY signal exceeds the threshold', () => {
+// CEO decision (follow-up batch): Last Owner App Open is the actual
+// disconnect-risk signal and must not be diluted by guest message activity —
+// see the header comment above dormantProperties() in webhook.js.
+test('mode "owner_open_only" (CEO-confirmed default): flagged ONLY when Last Owner App Open is stale, guest activity is irrelevant', () => {
   const result = wh.dormantProperties(props(), { now: NOW, thresholdDays: 10 });
+  const ids = result.map(r => r.propertyId).sort();
+  // recStaleMsg has a STALE message signal but a FRESH owner-open signal —
+  // must NOT be flagged under the new default, unlike the old "either" default.
+  assert.deepStrictEqual(ids, ['recBothStale', 'recNever', 'recStaleOpen'].sort());
+  assert.ok(!ids.includes('recStaleMsg'), 'stale guest messaging alone is not disconnect risk');
+});
+
+test('mode "either": flagged if ANY signal exceeds the threshold (available, not default)', () => {
+  const result = wh.dormantProperties(props(), { now: NOW, thresholdDays: 10, mode: 'either' });
   const ids = result.map(r => r.propertyId).sort();
   assert.deepStrictEqual(ids, ['recBothStale', 'recNever', 'recStaleMsg', 'recStaleOpen'].sort());
 });
 
-test('mode "both": flagged only if BOTH signals exceed the threshold', () => {
+test('mode "both": flagged only if BOTH signals exceed the threshold (available, not default)', () => {
   const result = wh.dormantProperties(props(), { now: NOW, thresholdDays: 10, mode: 'both' });
   const ids = result.map(r => r.propertyId).sort();
   assert.deepStrictEqual(ids, ['recBothStale', 'recNever'].sort());
 });
 
-test('a property that never recorded either timestamp is flagged (never seen = maximally dormant)', () => {
+test('a property that never recorded Last Owner App Open is flagged under the default mode (never seen = maximally dormant)', () => {
   const result = wh.dormantProperties(props(), { now: NOW, thresholdDays: 10 });
   const never = result.find(r => r.propertyId === 'recNever');
   assert.ok(never, 'flagged');
   assert.strictEqual(never.lastMessageReceived, null);
   assert.strictEqual(never.lastOwnerAppOpen, null);
+});
+
+// ── The separate, distinct message-activity view (not conflated into dormantProperties) ──
+
+test('inactiveByMessageActivity flags on Last Message Received alone, independent of Last Owner App Open', () => {
+  const result = wh.inactiveByMessageActivity(props(), { now: NOW, thresholdDays: 10 });
+  const ids = result.map(r => r.propertyId).sort();
+  // recStaleMsg (stale message, fresh open) and recBothStale and recNever
+  // should show up here — recStaleOpen (fresh message, stale open) must NOT,
+  // proving the two views are genuinely independent, not just relabeled.
+  assert.deepStrictEqual(ids, ['recBothStale', 'recNever', 'recStaleMsg'].sort());
+  assert.ok(!ids.includes('recStaleOpen'), 'a property with fresh guest activity is not "inactive" just because owner-open is stale');
+});
+
+test('inactiveByMessageActivity result shape carries only the message-activity field, not owner-open data', () => {
+  const result = wh.inactiveByMessageActivity(props(), { now: NOW, thresholdDays: 10 });
+  const entry = result.find(r => r.propertyId === 'recStaleMsg');
+  assert.deepStrictEqual(Object.keys(entry).sort(), ['lastMessageReceived', 'propertyId', 'propertyName'].sort());
 });
 
 test('threshold is configurable — a longer threshold un-flags a borderline property', () => {
@@ -54,13 +84,13 @@ test('defaults to DORMANT_THRESHOLD_DAYS_DEFAULT (10) when no thresholdDays is p
   delete process.env.DORMANT_THRESHOLD_DAYS;
   assert.strictEqual(wh.DORMANT_THRESHOLD_DAYS_DEFAULT, 10);
   const result = wh.dormantProperties(props(), { now: NOW });
-  assert.ok(result.some(r => r.propertyId === 'recStaleMsg'));
+  assert.ok(result.some(r => r.propertyId === 'recStaleOpen'), 'stale Last Owner App Open is what the default mode actually keys on');
 });
 
 test('DORMANT_THRESHOLD_DAYS env var overrides the default when thresholdDays is not explicitly passed', () => {
   process.env.DORMANT_THRESHOLD_DAYS = '20';
   const result = wh.dormantProperties(props(), { now: NOW });
-  assert.ok(!result.some(r => r.propertyId === 'recStaleMsg'), 'env-set 20-day threshold un-flags the 15-day-stale property');
+  assert.ok(!result.some(r => r.propertyId === 'recStaleOpen'), 'env-set 20-day threshold un-flags the 15-day-stale property');
   delete process.env.DORMANT_THRESHOLD_DAYS;
 });
 
@@ -91,7 +121,7 @@ test('dormant-report route: refuses with no MANUAL_REPORT_SECRET configured', as
   assert.strictEqual(res._status, 401);
 });
 
-test('dormant-report route: with a valid secret, returns the dormant list read-only', async () => {
+test('dormant-report route: with a valid secret, returns BOTH distinct views read-only, defaulting to owner_open_only', async () => {
   process.env.MANUAL_REPORT_SECRET = 'test-secret';
   const ctx = setup({ WS_Properties: props() });
   delete require.cache[require.resolve('../api/wabistay/dormant-report.js')];
@@ -101,9 +131,30 @@ test('dormant-report route: with a valid secret, returns the dormant list read-o
 
   assert.strictEqual(res._status, 200);
   assert.strictEqual(res._json.ok, true);
+  assert.strictEqual(res._json.mode, 'owner_open_only', 'defaults to the CEO-confirmed disconnect-risk mode');
   assert.strictEqual(res._json.totalProperties, 5);
-  assert.ok(res._json.dormantCount >= 4);
+  // Default mode excludes recStaleMsg (stale message, fresh open) — 3 flagged, not 4.
+  assert.strictEqual(res._json.dormantCount, 3);
+  assert.ok(!res._json.dormant.some(d => d.propertyId === 'recStaleMsg'));
+  // The separate message-activity view is present and distinct — includes
+  // recStaleMsg, excludes recStaleOpen, proving the two lists don't collapse
+  // into each other.
+  assert.ok(Array.isArray(res._json.messageInactive));
+  assert.strictEqual(res._json.messageInactiveCount, 3);
+  assert.ok(res._json.messageInactive.some(d => d.propertyId === 'recStaleMsg'));
+  assert.ok(!res._json.messageInactive.some(d => d.propertyId === 'recStaleOpen'));
   assert.strictEqual(ctx.airtable.log.length, 0, 'read-only — no writes');
+});
+
+test('dormant-report route: mode=either still works as a non-default option', async () => {
+  process.env.MANUAL_REPORT_SECRET = 'test-secret';
+  setup({ WS_Properties: props() });
+  delete require.cache[require.resolve('../api/wabistay/dormant-report.js')];
+  const route = require('../api/wabistay/dormant-report.js');
+  const res = fakeRes();
+  await route(fakeReq({ thresholdDays: '10', mode: 'either' }, 'Bearer test-secret'), res);
+  assert.strictEqual(res._status, 200);
+  assert.strictEqual(res._json.dormantCount, 4, 'either mode still flags the stale-message property too');
 });
 
 test('dormant-report route: rejects an invalid mode', async () => {

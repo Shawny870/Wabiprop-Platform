@@ -3,34 +3,30 @@
 **Branch:** `feat/wabistay-dormant-property-flagging` → base `feat/wabistay-property-activity-tracker` (depends on its two new WS_Properties fields).
 
 ## What this adds
-Read-only, no new notification channel — matches the original ask ("an Airtable view is sufficient").
+Read-only, no new notification channel — matches the original ask ("an Airtable view is sufficient"). **Two separate, un-conflated views**, per CEO decision (see below):
 
-1. **`dormantProperties(properties, opts)`** — pure helper in `api/wabistay/webhook.js`, flags properties where `Last Message Received` and/or `Last Owner App Open` exceeds a threshold (default 10 days, configurable via `DORMANT_THRESHOLD_DAYS` env var or per-call). A property that never recorded either timestamp is treated as maximally dormant, not skipped.
-2. **`api/wabistay/dormant-report.js`** — CEO-only on-demand JSON endpoint (`GET`, `Authorization: Bearer MANUAL_REPORT_SECRET` — reuses the existing manual-report secret rather than inventing a third one, same trust boundary as `manual-report.js`). Query params: `thresholdDays`, `mode` (`either`/`both`). Purely additive, no schedule, not wired into `vercel.json`.
-3. **Airtable formula field (for a real native view)** — see "Schema dependency" below.
+1. **`dormantProperties(properties, opts)`** — the actual WhatsApp Coexistence disconnect-risk flag, keyed on **`Last Owner App Open` alone** by default (`mode: 'owner_open_only'`). `mode: 'either'`/`'both'` (combining it with `Last Message Received`) remain available but are not the default.
+2. **`inactiveByMessageActivity(properties, opts)`** — a distinct, separate "this property may be quiet" view keyed on **`Last Message Received` alone**. Not merged into the dormancy flag.
+3. **`api/wabistay/dormant-report.js`** — CEO-only on-demand JSON endpoint (`GET`, `Authorization: Bearer MANUAL_REPORT_SECRET`), returns both views as separate response keys (`dormant` / `messageInactive`), never combined into one number.
+4. **Airtable formula field (for a real native view)** — see "Schema dependency" below, updated to match.
 
-## Judgment call — flagged, not silently decided
-The task specified: *"properties where Last Message Received OR Last Owner App Open exceeds a configurable threshold."* Implemented literally (`mode: 'either'`, the default): a property is flagged if **either** signal alone is stale.
+## CEO decision — supersedes this PR's original default (history kept, not deleted)
+Original build defaulted to `mode: 'either'` per a literal reading of the original spec ("Last Message Received OR Last Owner App Open exceeds threshold"), already flagged at the time as over-flagging relative to actual disconnect risk. **CEO decision, follow-up batch**: `Last Message Received` (guest activity) and `Last Owner App Open` (the actual 14-day Coexistence signal) measure different risks and must not be conflated — a property with guests messaging constantly but a stale owner app-open is still real disconnect risk that a combined/either-signal flag would mask (busy guest inbox papering over the actual signal going stale).
 
-This over-flags relative to what the threshold is actually a buffer for — WhatsApp Coexistence's 14-day disconnect risk is about total silence on the number, i.e. **both** signals stale, not either one alone. Under `mode: 'either'`, a property with guests messaging constantly but where the owner hasn't triggered a `read` receipt recently (a sparse signal by nature — see the property-activity-tracker PR's own caveat about `Last Owner App Open` under-reporting) would still get flagged, even though the number itself is nowhere near disconnect risk.
-
-Built both. `mode: 'both'` is available and tested (`test/dormantproperties.test.js`) for the stricter reading if the CEO prefers it — the default stays `either` to match the literal spec. Easy one-line change either way (default in `dormant-report.js` / `dormantProperties`'s own default param).
+Resolved by keying the dormancy flag on `Last Owner App Open` alone (new default), and keeping `Last Message Received` as its own separate, un-deleted view (`inactiveByMessageActivity`/`messageInactive`) rather than folding it into the disconnect-risk number. `mode: 'either'`/`'both'` stay available on `dormantProperties()` for anyone who wants a combined view later — the data and the option aren't gone, just no longer the default.
 
 ## Schema dependency (CEO) — Airtable-native view
-For an actual Airtable view (not just the JSON endpoint above), add a formula field to `WS_Properties`, e.g. named `Dormant`:
+For an actual Airtable view, add a formula field to `WS_Properties`, e.g. named `Dormant`:
 
 ```
-OR(
-  DATETIME_DIFF(NOW(), {Last Message Received}, 'days') > 10,
-  DATETIME_DIFF(NOW(), {Last Owner App Open}, 'days') > 10
-)
+DATETIME_DIFF(NOW(), {Last Owner App Open}, 'days') > 10
 ```
 
-(Swap `OR` for `AND` for the stricter `mode: 'both'` reading.) `DATETIME_DIFF` against a blank field returns a large/error value in Airtable formulas depending on version — verify blank-field behavior when creating this field; it should read as "stale," matching the code's own "never recorded = maximally dormant" rule, but Airtable formula semantics for blank date fields should be confirmed against the live base rather than assumed. Then build a Grid view filtered on `{Dormant} = TRUE()`.
+(A separate `Inactive` field, `DATETIME_DIFF(NOW(), {Last Message Received}, 'days') > 10`, gives the distinct message-activity view as its own Grid view/filter — kept separate on purpose, same reasoning as the code.) `DATETIME_DIFF` against a blank field's behavior should be confirmed against the live base rather than assumed — it should read as "stale," matching the code's own "never recorded = maximally dormant" rule.
 
 This depends on the two `WS_Properties` fields from `feat/wabistay-property-activity-tracker` existing first — same schema-dependency chain, not yet created in the live base.
 
 ## Test coverage
-New `test/dormantproperties.test.js`, 9 tests: both modes, the never-recorded-at-all case, threshold configurability (param and env var), and the on-demand endpoint's auth/validation/read-only-ness.
+`test/dormantproperties.test.js`: all three `dormantProperties` modes (`owner_open_only` default, `either`, `both`), the never-recorded-at-all case, threshold configurability (param and env var), `inactiveByMessageActivity` as its own separate function, and the on-demand endpoint's auth/validation/read-only-ness with both response keys present and independently correct.
 
-Full suite: 489 passing, 0 failing (476 pre-existing/updated on the base branch + 4 property-activity tests + 9 new here).
+Full suite: see latest CI run for this branch — re-verified after the CEO's mode-default change.
