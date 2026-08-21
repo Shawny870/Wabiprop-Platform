@@ -1,8 +1,9 @@
-// /api/wabistay/cron/weekly-value-nudge.js
-// Weekly "here's what's happening at your property" nudge to owners.
-// Deliberately separate from owner-summary.js — see the comment above
-// runWeeklyValueNudge in ../webhook.js for why this isn't just a rename of
-// the existing owner P&L summary.
+// /api/wabistay/cron/weekly-recap.js
+// Weekly owner recap — implements the Meta-approved wabistay_owner_weekly_recap
+// template (7 params). Deliberately separate from owner-summary.js, which
+// remains its own unrelated P&L reconciliation feature with its own pending
+// template — this file replaces the retired weekly-value-nudge.js (renamed,
+// same Thursday slot), not owner-summary.js.
 //
 // Same fail-closed CRON_SECRET gate as daily-summary.js/owner-summary.js —
 // Vercel's native cron (see vercel.json) auto-injects
@@ -16,5 +17,5 @@ module.exports = async function handler(req, res) {
   if (!secret || auth !== `Bearer ${secret}`) {
     return res.status(401).json({ ok: false, error: 'unauthorized' });
   }
-  return wh.weeklyValueNudgeHandler(req, res);
+  return wh.weeklyRecapHandler(req, res);
 };
