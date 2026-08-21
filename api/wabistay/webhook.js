@@ -498,6 +498,28 @@ async function sendWhatsAppTemplate(to, templateName, params = [], meta = {}) {
   return { ok, wamid, error: (data && data.error) || null };
 }
 
+// TEST-MODE GATE — the entire safety mechanism for report sends (weekly
+// recap + monthly report). REPORT_TEST_MODE_PHONE is a Vercel env var the
+// CEO sets/unsets manually — NEVER committed to any file in this repo. When
+// set, EVERY report send (regardless of which property/owner it's actually
+// for) is redirected to that one number instead of the real owner's Notify
+// Phone, with the real intended recipient logged explicitly to Axiom so
+// "this would have gone to [owner]" is verifiable without the owner ever
+// receiving it. When unset, sends go to the real owner as normal. This one
+// flag, checked at the point of send, is deliberately the entire gating
+// mechanism — no second mechanism (property-level flag, allowlist, etc.) is
+// built here, per instructions.
+function resolveSendRecipient(realRecipientPhone, site, correlation = {}) {
+  const testPhone = process.env.REPORT_TEST_MODE_PHONE;
+  if (testPhone) {
+    logToAxiom('info', 'report_test_mode_redirect', {
+      site, redirectedTo: testPhone, intendedRecipient: realRecipientPhone, ...correlation
+    });
+    return testPhone;
+  }
+  return realRecipientPhone;
+}
+
 // ─── FORMAT PHONE ────────────────────────────────────────────────────────────
 
 function formatPhone(raw) {
@@ -4187,7 +4209,11 @@ async function sendOwnerSummary(property, summary) {
 //     labeled as a proxy, not silently presented as the real thing.
 //   · Rating trend         — COMPUTABLE. WS_Bookings.Rating, already
 //     captured by the existing Stage 3 Phase 3 rating flow.
-const MONTHLY_REPORT_TEMPLATE = 'wabistay_monthly_bi_report';
+// Meta-approved name, confirmed directly from Meta Business Manager's edit
+// view — the constant previously said 'wabistay_monthly_bi_report' (a
+// pre-submission draft name that was never updated once the real template
+// was approved under a different name).
+const MONTHLY_REPORT_TEMPLATE = 'wabistay_owner_monthly_recap';
 
 function avgOrNull(values) {
   const nums = values.filter(v => typeof v === 'number' && Number.isFinite(v));
@@ -4543,9 +4569,15 @@ async function sendMonthlyReport(property, report) {
   const payload = { ...reportWithOwner, template: MONTHLY_REPORT_TEMPLATE, notifyPhone, templateParams };
   logToAxiom('info', 'monthly_report_payload', payload);
 
-  // TODO: once MONTHLY_REPORT_TEMPLATE is approved by Meta, this is the
-  // one-line swap point:
-  //   await sendWhatsAppTemplate(notifyPhone, MONTHLY_REPORT_TEMPLATE, templateParams, { site: 'monthly_report', propertyId: property.id });
+  // LIVE as of MONTHLY_REPORT_TEMPLATE's Meta approval — routed through the
+  // REPORT_TEST_MODE_PHONE gate (see resolveSendRecipient's own header
+  // comment) so a real send can be tested against the CEO's own number
+  // before going out to real owners.
+  const recipient = resolveSendRecipient(notifyPhone, 'monthly_report', { propertyId: property.id });
+  if (!recipient) {
+    throw new Error('sendMonthlyReport: no recipient phone available — property has no Notify Phone and OWNER_PHONE fallback is unset');
+  }
+  await sendWhatsAppTemplate(recipient, MONTHLY_REPORT_TEMPLATE, templateParams, { site: 'monthly_report', propertyId: property.id });
   return payload;
 }
 
@@ -4574,7 +4606,7 @@ async function runMonthlyReport(opts = {}) {
   const failed = [];
   for (const property of properties) {
     // Per-property isolation + alertShawn on failure — same established
-    // pattern as runOwnerSummary/runDailySummary/runWeeklyValueNudge.
+    // pattern as runOwnerSummary/runDailySummary/runWeeklyRecap.
     try {
       const rooms = allRooms.filter(r => (r.fields['Property'] || []).includes(property.id));
       const roomIds = new Set(rooms.map(r => r.id));
@@ -5031,66 +5063,106 @@ async function sendDailySummary(property, summary) {
   return payload;
 }
 
-// ─── WEEKLY VALUE-NUDGE ──────────────────────────────────────────────────────
-// Deliberately a SEPARATE feature/template from OWNER_SUMMARY_TEMPLATE above,
-// not a rename of it, even though both reuse aggregateOwnerSummary's 7-day
-// window and both currently sit stubbed pending Meta approval. The owner
-// summary is a full P&L reconciliation; this is a short "here's what's
-// happening at your property" nudge whose PRACTICAL side effect is a second
-// weekly touchpoint with the owner — WhatsApp's Coexistence rule disconnects
-// a number after 14 days with no activity, so two independent weekly sends
-// (this one + the owner summary, once both are live) each act as their own
-// buffer even if one of the two fails or is skipped for a property.
+// ─── WEEKLY RECAP (wabistay_owner_weekly_recap) ─────────────────────────────
+// Replaces two prior dead ends: runOwnerSummary (kept — separate P&L
+// reconciliation feature, its own pending template, untouched) is NOT this;
+// and runWeeklyValueNudge (retired — 5 wrong-shape params, never matched any
+// approved template) IS what this replaces. This is the actual
+// implementation of the Meta-approved 7-param wabistay_owner_weekly_recap.
 //
-// Scheduled Thursday 06:00 UTC (see vercel.json) — deliberately NOT the same
-// day as owner-summary's Monday 06:00 UTC slot, so the two weekly touchpoints
-// land spread across the week rather than bunched, which better serves the
-// "keep the number active" goal than sending both on the same day would.
-const VALUE_NUDGE_TEMPLATE = 'wabistay_owner_value_nudge';
+// Reuses aggregateOwnerSummary wholesale for occupancy and upcoming-arrivals
+// (same CEO-confirmed exact-7-day-ahead window, same room-night occupancy
+// formula — no second, parallel calculation of either; inherits the same
+// known denominator gap aggregateOwnerSummary already has, documented on
+// aggregateOwnerSummary itself, not repeated here). Adds only what
+// aggregateOwnerSummary doesn't already produce: the overnight/short-stay
+// booking-type split (mirrors aggregateMonthlyReport's split — not
+// previously built for the weekly window) and a payment-reconciliation
+// figure scoped to stays that COMPLETED this week (Check Out within the
+// window) rather than stays that started this week (aggregateOwnerSummary's
+// own paymentDeltaTotal is Check-In-scoped) — "owed from stays completed
+// this week" is a deliberately different scope, per the approved template's
+// copy, reusing paymentReconciliationLines (the existing pure per-booking
+// reconciliation function) rather than a new calculation.
+const WEEKLY_RECAP_TEMPLATE = 'wabistay_owner_weekly_recap';
 
-// KNOWN DATA GAP, inherited and flagged rather than silently reused:
-// aggregateOwnerSummary's occupancyRate is `roomNightsSold / (rooms.length *
-// periodDays)` — it assumes every currently-bookable room was available for
-// the ENTIRE period, with no accounting for a room added mid-period or one
-// that spent part of the period in Maintenance. This value-nudge message
-// inherits that same inaccuracy by reusing aggregateOwnerSummary unchanged
-// (deliberately — building a second, parallel occupancy calculation here
-// would only get the SAME wrong number a second, differently-shaped way).
-// Fixing the denominator is out of scope for this PR.
-function valueNudgeTemplateParams(summary) {
-  const occupancyPct = `${Math.round(summary.occupancyRate * 100)}%`;
-  const attention = summary.paymentDeltaTotal > 0
-    ? `R${summary.paymentDeltaTotal.toFixed(2)} outstanding from this week`
-    : 'all payments settled';
+function aggregateWeeklyRecap(property, rooms, bookings, w, guestsById = new Map()) {
+  const summary = aggregateOwnerSummary(property, rooms, bookings, w, guestsById);
+
+  const checkInMs = b => (b.fields['Check In'] ? Date.parse(b.fields['Check In']) : NaN);
+  const periodBookings = bookings.filter(b => {
+    const t = checkInMs(b);
+    return Number.isFinite(t) && t >= w.periodStartMs && t < w.periodEndMs;
+  });
+  const overnightBookingsCount = periodBookings.filter(b => b.fields['Booking Type'] === 'Overnight').length;
+  const shortStayBookingsCount = periodBookings.filter(b => b.fields['Booking Type'] === 'Hourly').length;
+
+  const checkOutMs = b => (b.fields['Check Out'] ? Date.parse(b.fields['Check Out']) : NaN);
+  const completedThisWeek = bookings.filter(b => {
+    const t = checkOutMs(b);
+    return Number.isFinite(t) && t >= w.periodStartMs && t < w.periodEndMs;
+  });
+  const roomsById = new Map(rooms.map(r => [r.id, r.fields['Room Name'] || null]));
+  const completedPaymentLines = paymentReconciliationLines(completedThisWeek, roomsById, guestsById);
+  const outstandingFromCompletedStays = completedPaymentLines.reduce((s, l) => s + l.delta, 0);
+
+  return {
+    ...summary,
+    overnightBookingsCount,
+    shortStayBookingsCount,
+    outstandingFromCompletedStays
+  };
+}
+
+// Meta-approved 7-param order, confirmed from Meta Business Manager's edit
+// view. Deliberately synchronous and pure, same reasoning as
+// dailySummaryTemplateParams/monthlyReportTemplateParams: expects
+// report.ownerName pre-resolved and attached by the caller, throws rather
+// than silently defaulting if it's missing.
+//   {{1}} ownerName · {{2}} propertyName · {{3}} overnight booking count ·
+//   {{4}} short-stay booking count · {{5}} occupancy % (this week) ·
+//   {{6}} upcoming arrivals (next 7 days) · {{7}} outstanding payment amount
+//   (owed from stays completed this week; "R0" not blank when nothing owed —
+//   never a negative "owed" figure even if completed stays net-overpaid).
+function weeklyRecapTemplateParams(report) {
+  if (report.ownerName === undefined || report.ownerName === null) {
+    throw new Error(
+      'weeklyRecapTemplateParams: report.ownerName is missing — resolve it with ' +
+      'resolveOwnerName(property) and attach it to the report before calling this function.'
+    );
+  }
   return [
-    summary.propertyName,
-    String(summary.totalBookings),
-    occupancyPct,
-    String(summary.upcomingBookings),
-    attention
+    report.ownerName,
+    report.propertyName,
+    String(report.overnightBookingsCount),
+    String(report.shortStayBookingsCount),
+    `${Math.round(report.occupancyRate * 100)}%`,
+    String(report.upcomingBookings),
+    `R${Math.max(0, Math.round(report.outstandingFromCompletedStays))}`
   ];
 }
 
-// STUBBED until VALUE_NUDGE_TEMPLATE is approved by Meta — identical pattern
-// to sendOwnerSummary/sendDailySummary above: logs the full payload to Axiom
-// (content verifiable now) and marks the one-line swap point. Deliberately
-// NOT a free-form sendWhatsApp — would 200-and-vanish outside the 24h window,
-// same reasoning as every other business-initiated send in this file.
-async function sendWeeklyValueNudge(property, summary) {
+// LIVE as of wabistay_owner_weekly_recap's Meta approval — routed through
+// the REPORT_TEST_MODE_PHONE gate, same as sendMonthlyReport.
+async function sendWeeklyRecap(property, report) {
   const notifyPhone = property.fields['Notify Phone']
     ? property.fields['Notify Phone'].replace(/[\s\-\+]/g, '')
     : (OWNER_PHONE || null);
-  const templateParams = valueNudgeTemplateParams(summary);
-  const payload = { ...summary, template: VALUE_NUDGE_TEMPLATE, notifyPhone, templateParams };
-  logToAxiom('info', 'weekly_value_nudge_payload', payload);
+  const ownerName = await resolveOwnerName(property);
+  const reportWithOwner = { ...report, ownerName };
+  const templateParams = weeklyRecapTemplateParams(reportWithOwner);
+  const payload = { ...reportWithOwner, template: WEEKLY_RECAP_TEMPLATE, notifyPhone, templateParams };
+  logToAxiom('info', 'weekly_recap_payload', payload);
 
-  // TODO: once VALUE_NUDGE_TEMPLATE is approved by Meta, this is the one-line
-  // swap point:
-  //   await sendWhatsAppTemplate(notifyPhone, VALUE_NUDGE_TEMPLATE, templateParams, { site: 'weekly_value_nudge', propertyId: property.id });
+  const recipient = resolveSendRecipient(notifyPhone, 'weekly_recap', { propertyId: property.id });
+  if (!recipient) {
+    throw new Error('sendWeeklyRecap: no recipient phone available — property has no Notify Phone and OWNER_PHONE fallback is unset');
+  }
+  await sendWhatsAppTemplate(recipient, WEEKLY_RECAP_TEMPLATE, templateParams, { site: 'weekly_recap', propertyId: property.id });
   return payload;
 }
 
-async function runWeeklyValueNudge(opts = {}) {
+async function runWeeklyRecap(opts = {}) {
   const { now = new Date() } = opts;
   const periodDays = 7;
   const periodEndMs = now.getTime();
@@ -5110,23 +5182,22 @@ async function runWeeklyValueNudge(opts = {}) {
   const sent = [];
   const failed = [];
   for (const property of properties) {
-    // Per-property isolation, matching runOwnerSummary/runDailySummary's own
-    // established pattern: one property throwing must not abort the rest of
-    // this run. alertShawn fires per failing property (not once for the
-    // whole run) so the alert itself names which property failed.
+    // Per-property isolation, matching runOwnerSummary/runDailySummary/
+    // runMonthlyReport's own established pattern: one property throwing
+    // (including a missing ownerName) must not abort the rest of this run.
     try {
       const rooms = allRooms.filter(r => (r.fields['Property'] || []).includes(property.id));
       const roomIds = new Set(rooms.map(r => r.id));
       const bookings = allBookings.filter(b => (b.fields['Room'] || []).some(id => roomIds.has(id)));
-      const summary = aggregateOwnerSummary(property, rooms, bookings, w, guestsById);
-      await sendWeeklyValueNudge(property, summary);
-      sent.push(summary);
+      const report = aggregateWeeklyRecap(property, rooms, bookings, w, guestsById);
+      await sendWeeklyRecap(property, report);
+      sent.push(report);
     } catch (err) {
-      logToAxiom('error', 'weekly_value_nudge_property_failed', {
+      logToAxiom('error', 'weekly_recap_property_failed', {
         propertyId: property.id, propertyName: property.fields?.['Property Name'] || null,
         message: err.message, stack: err.stack
       });
-      await alertShawn('weekly_value_nudge', err.message, {
+      await alertShawn('weekly_recap', err.message, {
         propertyId: property.id, propertyName: property.fields?.['Property Name'] || null
       });
       failed.push({ propertyId: property.id, propertyName: property.fields?.['Property Name'] || null, error: err.message });
@@ -5136,14 +5207,14 @@ async function runWeeklyValueNudge(opts = {}) {
   return sent;
 }
 
-async function weeklyValueNudgeHandler(req, res) {
+async function weeklyRecapHandler(req, res) {
   try {
-    const sent = await runWeeklyValueNudge();
+    const sent = await runWeeklyRecap();
     res.status(200).json({ ok: true, count: sent.length, sent, failed: sent.failed || [] });
   } catch (err) {
-    console.error('[WEEKLY-VALUE-NUDGE FATAL]', err.message, err.stack);
-    logToAxiom('error', 'weekly_value_nudge_fatal', { message: err.message, stack: err.stack });
-    await alertShawn('weekly_value_nudge_fatal', err.message, { scope: 'entire run, not a single property' });
+    console.error('[WEEKLY-RECAP FATAL]', err.message, err.stack);
+    logToAxiom('error', 'weekly_recap_fatal', { message: err.message, stack: err.stack });
+    await alertShawn('weekly_recap_fatal', err.message, { scope: 'entire run, not a single property' });
     res.status(200).json({ ok: false, error: err.message });
   }
 }
@@ -5560,11 +5631,13 @@ module.exports.autoCheckoutHandler = autoCheckoutHandler;
 // for tests; ownerSummaryHandler is the Vercel HTTP cron entry.
 module.exports.runOwnerSummary = runOwnerSummary;
 module.exports.ownerSummaryHandler = ownerSummaryHandler;
-module.exports.runWeeklyValueNudge = runWeeklyValueNudge;
-module.exports.weeklyValueNudgeHandler = weeklyValueNudgeHandler;
-module.exports.sendWeeklyValueNudge = sendWeeklyValueNudge;
-module.exports.valueNudgeTemplateParams = valueNudgeTemplateParams;
-module.exports.VALUE_NUDGE_TEMPLATE = VALUE_NUDGE_TEMPLATE;
+module.exports.runWeeklyRecap = runWeeklyRecap;
+module.exports.weeklyRecapHandler = weeklyRecapHandler;
+module.exports.sendWeeklyRecap = sendWeeklyRecap;
+module.exports.aggregateWeeklyRecap = aggregateWeeklyRecap;
+module.exports.weeklyRecapTemplateParams = weeklyRecapTemplateParams;
+module.exports.WEEKLY_RECAP_TEMPLATE = WEEKLY_RECAP_TEMPLATE;
+module.exports.resolveSendRecipient = resolveSendRecipient;
 module.exports.runDailySummary = runDailySummary;
 module.exports.dailySummaryHandler = dailySummaryHandler;
 // Stage 3 part 2: daily summary content sections, exported individually so

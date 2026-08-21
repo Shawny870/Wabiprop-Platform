@@ -12,7 +12,7 @@
   "crons": [
     { "path": "/api/wabistay/cron/auto-checkout", "schedule": "*/5 * * * *" },
     { "path": "/api/wabistay/cron/owner-summary", "schedule": "0 6 * * 1" },
-    { "path": "/api/wabistay/cron/weekly-value-nudge", "schedule": "0 6 * * 4" },
+    { "path": "/api/wabistay/cron/weekly-recap", "schedule": "0 6 * * 4" },
     { "path": "/api/wabistay/cron/monthly-report", "schedule": "0 7 1 * *" }
   ]
 }

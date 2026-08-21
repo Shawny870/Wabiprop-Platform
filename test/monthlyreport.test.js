@@ -245,9 +245,9 @@ test('busiest day: a single booking is a true (not misleading) busiest-day claim
   assert.strictEqual(report.busiestDayInsight, 'Your busiest day this month was Saturday, 22 August, with 1 room occupied.');
 });
 
-// ── Cron-level: stubbed send, per-property isolation, alertShawn ───────────
+// ── Cron-level: LIVE send, per-property isolation, alertShawn ──────────────
 
-test('runMonthlyReport produces one stubbed payload per property, read-only', async () => {
+test('runMonthlyReport sends one live template per property, and writes no Airtable data', async () => {
   const ctx = setup({
     WS_Properties: [property],
     WS_Owners: [ownerRecord],
@@ -259,7 +259,9 @@ test('runMonthlyReport produces one stubbed payload per property, read-only', as
 
   assert.strictEqual(sent.length, 1);
   assert.strictEqual(sent.failed.length, 0);
-  assert.strictEqual(ctx.sends.length, 0, 'still stubbed — no live WhatsApp send yet');
+  assert.strictEqual(ctx.sends.length, 1, 'LIVE as of MONTHLY_REPORT_TEMPLATE approval — no REPORT_TEST_MODE_PHONE set in this test, so this sends to the real Notify Phone');
+  assert.strictEqual(ctx.sends[0].to, '27732273477');
+  assert.strictEqual(ctx.sends[0].template, wh.MONTHLY_REPORT_TEMPLATE);
   assert.strictEqual(ctx.airtable.log.length, 0, 'read-only, no Airtable writes');
   const payloadEvent = ctx.axiom.find(e => e.event === 'monthly_report_payload');
   assert.ok(payloadEvent);

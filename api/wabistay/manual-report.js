@@ -16,19 +16,20 @@
 // sharing the machine-to-machine cron secret. Fails closed: an unset secret
 // refuses every request, same pattern as daily-summary.js / owner-summary.js.
 //
-// Reuses the exact same aggregation functions the real crons call
-// (aggregateDailySummary / aggregateOwnerSummary) and the exact same stubbed
-// send functions (sendDailySummary / sendOwnerSummary) from webhook.js —
-// output here is what the real cron would produce for this property right
-// now, logged to Axiom the same way. Never attempts a live WhatsApp send:
-// the send functions are stubbed until Meta approves the templates, same as
-// prod — this route cannot send a real message regardless of report type.
+// Reuses the exact same aggregation + send functions the real crons call:
+// daily -> aggregateDailySummary/sendDailySummary (still stubbed, pending
+// DAILY_SUMMARY_TEMPLATE approval); weekly -> aggregateWeeklyRecap/
+// sendWeeklyRecap; monthly -> aggregateMonthlyReport/sendMonthlyReport.
 //
-// No monthly cron exists yet — only daily-summary.js (daily) and the weekly
-// owner-summary.js (aggregateOwnerSummary with a 7-day window). "Monthly"
-// here reuses aggregateOwnerSummary with a 30-day window instead, since
-// that's the only period-based aggregator that exists; there is no separate
-// monthly aggregation function to reuse because none has been built.
+// weekly/monthly ARE LIVE as of their templates' Meta approval — this
+// endpoint CAN send a real WhatsApp message for those two report types. Both
+// send functions are routed through the REPORT_TEST_MODE_PHONE gate (see
+// resolveSendRecipient in webhook.js), which is exactly why this endpoint
+// exists per this task: set REPORT_TEST_MODE_PHONE in Vercel, hit this route
+// for a real property, and the send goes to that one number instead of the
+// real owner — verify content against your own phone before unsetting the
+// var and letting the crons reach real owners. daily is unaffected — its
+// template is still unapproved, so sendDailySummary remains a stub.
 const wh = require('./webhook.js');
 
 const VALID_REPORT_TYPES = ['daily', 'weekly', 'monthly'];
@@ -108,17 +109,15 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    // weekly / monthly share aggregateOwnerSummary — same function, only
-    // periodDays differs.
-    const periodDays = reportType === 'weekly' ? 7 : 30;
+    // weekly -> aggregateWeeklyRecap/sendWeeklyRecap (wabistay_owner_weekly_recap).
+    // monthly -> aggregateMonthlyReport/sendMonthlyReport (wabistay_owner_monthly_recap).
+    // Each has its own window shape — monthly needs priorPeriodStartMs for its
+    // this-vs-last-month comparison, weekly needs upcomingEndMs for the
+    // next-7-days arrivals count — so these are NOT interchangeable the way
+    // this endpoint's old 7-day/30-day aggregateOwnerSummary reuse was.
     const now = new Date();
     const periodEndMs = now.getTime();
-    const w = {
-      periodDays,
-      periodStartMs: periodEndMs - periodDays * DAY_MS,
-      periodEndMs,
-      upcomingEndMs: periodEndMs + 7 * DAY_MS
-    };
+    const periodDays = reportType === 'weekly' ? 7 : 30;
 
     const allRooms = await wh.airtableGet('WS_Rooms', wh.orFormula('Status', wh.BOOKABLE_ROOM_STATUSES));
     const allBookings = await wh.airtableGet('WS_Bookings', wh.orFormula('Status', wh.BLOCKING_BOOKING_STATUSES.concat(['Checked Out'])));
@@ -129,11 +128,31 @@ module.exports = async function handler(req, res) {
     const roomIds = new Set(rooms.map(r => r.id));
     const bookings = allBookings.filter(b => (b.fields['Room'] || []).some(id => roomIds.has(id)));
 
-    // Same "empty is not an error" guarantee as daily: aggregateOwnerSummary
-    // returns zeroed totals/empty paymentLines for zero matching bookings,
-    // not a thrown error or a malformed shape.
-    const summary = wh.aggregateOwnerSummary(property, rooms, bookings, w, guestsById);
-    const payload = await wh.sendOwnerSummary(property, summary);
+    // Same "empty is not an error" guarantee as daily: both aggregators
+    // return zeroed totals/honest "no data" fields for zero matching
+    // bookings, not a thrown error or a malformed shape. A missing linked
+    // WS_Owners record IS a thrown error (ownerName is required) — same
+    // loud-failure behavior as the real crons, not swallowed here.
+    let payload;
+    if (reportType === 'weekly') {
+      const w = {
+        periodDays,
+        periodStartMs: periodEndMs - periodDays * DAY_MS,
+        periodEndMs,
+        upcomingEndMs: periodEndMs + 7 * DAY_MS
+      };
+      const report = wh.aggregateWeeklyRecap(property, rooms, bookings, w, guestsById);
+      payload = await wh.sendWeeklyRecap(property, report);
+    } else {
+      const w = {
+        periodDays,
+        periodStartMs: periodEndMs - periodDays * DAY_MS,
+        priorPeriodStartMs: periodEndMs - 2 * periodDays * DAY_MS,
+        periodEndMs
+      };
+      const report = wh.aggregateMonthlyReport(property, rooms, bookings, w, guestsById);
+      payload = await wh.sendMonthlyReport(property, report);
+    }
 
     return res.status(200).json({
       ok: true,
