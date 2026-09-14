@@ -1291,6 +1291,60 @@ function parseStartCleaningCommand(text) {
   return { ok: true, roomToken: m[1] };
 }
 
+// ─── SHIFT-STATE GRAMMAR (shift-routing/escalation PR 3 prep — pure half) ───
+// Held here deliberately as SCHEMA-INDEPENDENT prep work while the Airtable
+// API billing cap blocks live-schema verification for PR 3 proper (see
+// investigation doc / PR-breakdown). Pure text-in/structured-out, same shape
+// as parseWalkinCommand/parsePaidCommand/parseStartCleaningCommand above —
+// no Airtable field name, no WS_Cleaners-vs-WS_Staff decision, no router
+// wiring. That decision, and the actual field write, is PR 3 proper and
+// waits for CEO's explicit resume signal once the live schema is
+// re-verified from scratch, not assumed from this session.
+//
+// Covers 3 of the 4 shift_state values from the investigation doc: 'off',
+// 'on-shift', 'on-break'. 'scheduled' is deliberately NOT part of this
+// grammar — per the investigation doc's shift-declaration model, staff
+// declare who IS/is-not on shift; 'scheduled' describes a roster state set
+// ahead of time, not something a staff member texts in the moment. If that
+// assumption is wrong, PR 3 proper is where it gets corrected — flag it
+// there, not silently here.
+//
+// Reuses parseArrivalTime (above) for the "stated end time" — the
+// investigation doc's shift-declaration model requires an end time on
+// 'on-shift', and parseArrivalTime is already the exact live, tested
+// time-of-day parser this codebase uses (guest ETA capture). Not
+// reinvented. An ambiguous hour (parseArrivalTime's `{ ambiguous }` shape —
+// e.g. "6" with no am/pm) is refused rather than guessed, same posture as
+// every other ambiguous-input handling in this file: a wrong shift end time
+// is worse than none.
+function parseShiftStateCommand(text) {
+  const t = String(text || '').trim().replace(/\s+/g, ' ');
+  if (!t) return null;
+  const lower = t.toLowerCase();
+
+  if (lower === 'off' || lower === 'off shift') {
+    return { ok: true, state: 'off', endTime: null };
+  }
+  if (lower === 'on break') {
+    return { ok: true, state: 'on-break', endTime: null };
+  }
+
+  const onShiftMatch = lower.match(/^on shift(?:\s+until\s+(.+))?$/);
+  if (onShiftMatch) {
+    const timeToken = onShiftMatch[1];
+    if (!timeToken) return { ok: true, state: 'on-shift', endTime: null };
+
+    const parsed = parseArrivalTime(timeToken);
+    if (!parsed) return { ok: false, reason: 'bad_end_time' };
+    if (parsed.ambiguous !== undefined) return { ok: false, reason: 'ambiguous_end_time', ambiguousHour: parsed.ambiguous };
+    return { ok: true, state: 'on-shift', endTime: { hour: parsed.hour, minute: parsed.minute } };
+  }
+
+  // Not a shift-state command at all — falls through, same convention as
+  // parseStartCleaningCommand's bare-START handling above.
+  return null;
+}
+
 // The booking whose checkout dirtied this room: its most recent closed stay.
 // Same resolution shape as PAID's, and for the same reason — the room's current
 // clean belongs to the stay that just ended, not to whoever is in it next.
@@ -5622,6 +5676,11 @@ module.exports.parsePaidCommand = parsePaidCommand;
 // that must never regress (it is B14's opt-back-in keyword). Unit-tested in
 // test/cleaningtime.test.js alongside the derived metrics.
 module.exports.parseStartCleaningCommand = parseStartCleaningCommand;
+// Shift-routing/escalation PR 3 prep, schema-independent half only — see
+// header comment above parseShiftStateCommand. NOT wired to any router
+// branch or Airtable write yet; that's PR 3 proper, held pending live
+// schema re-verification.
+module.exports.parseShiftStateCommand = parseShiftStateCommand;
 module.exports.cleaningDurations = cleaningDurations;
 // B12: the auto-checkout cron entry point (autoCheckoutHandler wraps it for the
 // Vercel HTTP cron; runAutoCheckout takes an injected `now` for timing tests).
