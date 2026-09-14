@@ -2496,14 +2496,19 @@ const actions = {
     let checkIn = dateTokens[0] ? dateTokens[0].text : null;
     let checkOut = dateTokens[1] ? dateTokens[1].text : null;
 
-    // A returning guest already has a name — parse dates only, never re-derive it.
-    // Otherwise the name is the text before the first date token (newline- or
-    // space-separated), collapsed to a single line.
-    let guestName = ctx.guest.fields['Guest Name'] !== 'Unknown' ? ctx.guest.fields['Guest Name'] : null;
-    if (!guestName) {
-      const beforeFirstDate = dateTokens[0] ? rawText.slice(0, dateTokens[0].start) : rawText;
-      guestName = beforeFirstDate.replace(/\s+/g, ' ').trim() || null;
-    }
+    // BUGFIX (anon-name reversion): the name is whatever the guest typed THIS
+    // turn — the text before the first date token (newline- or space-
+    // separated), collapsed to a single line — including an explicit "anon".
+    // A stored name from a prior booking is used ONLY as a fallback when
+    // nothing usable was typed this turn, never as an override of what was.
+    // Previously this order was reversed ("a returning guest already has a
+    // name — parse dates only, never re-derive it"), which silently discarded
+    // "anon" for any guest who had ever given a real name before — a direct
+    // violation of the locked anonymous-entry-stays-as-entered decision. See
+    // the investigation report / PR discussion for the reproduction case.
+    const beforeFirstDate = dateTokens[0] ? rawText.slice(0, dateTokens[0].start) : rawText;
+    const typedName = beforeFirstDate.replace(/\s+/g, ' ').trim() || null;
+    const guestName = typedName || (ctx.guest.fields['Guest Name'] !== 'Unknown' ? ctx.guest.fields['Guest Name'] : null);
 
     // B8: check-out is now required. B7 allowed a check-in-only booking that
     // rendered as "TBC"; once a booking holds a room, one with no check-out
@@ -2858,7 +2863,12 @@ const actions = {
   // with free text — "2" must mean two hours, never part of a name or a time.
   async collectHourlyDetails(ctx) {
     const lines = ctx.messageText.trim().split('\n').map(l => l.trim()).filter(Boolean);
-    let guestName = ctx.guest.fields['Guest Name'] !== 'Unknown' ? ctx.guest.fields['Guest Name'] : null;
+    // BUGFIX (anon-name reversion): collect whatever non-time line the guest
+    // typed THIS turn first, including an explicit "anon" — same fix as
+    // collectDetails above. A stored name is used only as a fallback when
+    // nothing usable was typed this turn (e.g. an arrival-time-only reply),
+    // never as an override of what was actually typed.
+    let typedName = null;
     let arrival = null;
     let ambiguousHour = null;
 
@@ -2868,10 +2878,12 @@ const actions = {
         if (ambiguousHour === null) ambiguousHour = parsed.ambiguous;
       } else if (parsed && !arrival) {
         arrival = parsed;
-      } else if (!parsed && !guestName) {
-        guestName = line;
+      } else if (!parsed && !typedName) {
+        typedName = line;
       }
     }
+
+    const guestName = typedName || (ctx.guest.fields['Guest Name'] !== 'Unknown' ? ctx.guest.fields['Guest Name'] : null);
 
     if (!arrival && ambiguousHour !== null) {
       // Stay in AWAITING_HOURLY_DETAILS — ask which half of the clock they meant.
