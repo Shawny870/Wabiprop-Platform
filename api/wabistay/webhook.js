@@ -1003,6 +1003,47 @@ function inactiveByMessageActivity(properties, opts = {}) {
     }));
 }
 
+// ─── ESCALATION TIMEOUT CONFIG (per-property, global default fallback) ─────
+// Shift-routing/escalation investigation, PR 1 of 11 — config value only, no
+// routing/resolver logic yet (that starts at PR 2's role-tagged WS_Config
+// contacts). Pattern follows the CONFIRMED-live precedent for a per-property
+// value with a global fallback: runDailySummary's read of
+// `WS_Properties.'Daily Summary Hour'` (a plain per-property field, Number()'d
+// at the read site, no dedicated getter). This mirrors that shape rather than
+// gateAckGraceMs()'s env-only pattern — that function does NOT exist on main
+// (see corrected investigation report; it was unmerged WIP on a stale branch,
+// never a shipped precedent) and must not be treated as one.
+//
+// Field name is a PROPOSAL, not yet live: 'Escalation Timeout Minutes' has
+// not been created in Airtable. Per the field-names-from-live-schema-only
+// hard rule, this is deliberately written as a plain, tolerant field read
+// (same as 'Daily Summary Hour') so it degrades to the global default with
+// zero errors until the field exists — it does not assume the field is
+// there. Once CEO creates it in the Airtable UI (current workaround for the
+// live API billing cap — see PR-breakdown doc), update schema.json to match
+// and this function's behaviour is already correct, no code change needed.
+//
+// Minutes, not ms, at the Airtable field level — same unit choice as 'Daily
+// Summary Hour' (hours, not ms) for the same reason: a human configuring this
+// in Airtable's UI should never have to type milliseconds.
+const ESCALATION_TIMEOUT_DEFAULT_MINUTES = 15;
+
+// Global default is env-overridable (ESCALATION_TIMEOUT_DEFAULT_MINUTES),
+// matching DORMANT_THRESHOLD_DAYS's env-override-with-hardcoded-fallback
+// shape above. An invalid/non-positive per-property value falls back to the
+// global default rather than producing a zero or negative timeout — the same
+// "never silently produce a degenerate value" posture as gateAckGraceMs's own
+// invalid-value handling in the (unmerged) stashed branch.
+function escalationTimeoutMs(property) {
+  const globalDefaultMinutes = Number(process.env.ESCALATION_TIMEOUT_DEFAULT_MINUTES) || ESCALATION_TIMEOUT_DEFAULT_MINUTES;
+  const raw = property && property.fields && property.fields['Escalation Timeout Minutes'];
+  const parsed = Number(raw);
+  const minutes = (raw !== undefined && raw !== null && Number.isFinite(parsed) && parsed > 0)
+    ? parsed
+    : globalDefaultMinutes;
+  return minutes * 60 * 1000;
+}
+
 function propertyCityLine(property) {
   const city = property.fields['City'];
   return city ? `, ${city}` : '';
@@ -5674,6 +5715,11 @@ module.exports.getAlertPhone = getAlertPhone;
 module.exports.bumpPropertyActivity = bumpPropertyActivity;
 module.exports.dormantProperties = dormantProperties;
 module.exports.inactiveByMessageActivity = inactiveByMessageActivity;
+// Shift-routing/escalation PR 1: per-property escalation timeout, global
+// default fallback. See header comment above escalationTimeoutMs for why
+// gateAckGraceMs() is NOT the precedent this follows.
+module.exports.escalationTimeoutMs = escalationTimeoutMs;
+module.exports.ESCALATION_TIMEOUT_DEFAULT_MINUTES = ESCALATION_TIMEOUT_DEFAULT_MINUTES;
 module.exports.DORMANT_THRESHOLD_DAYS_DEFAULT = DORMANT_THRESHOLD_DAYS_DEFAULT;
 // CEO manual report-trigger (api/wabistay/cron/manual-report.js) needs these
 // to build the SAME live-data fetch + stubbed-send pipeline the real crons
