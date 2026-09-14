@@ -7,6 +7,7 @@
     { "inputs": ["done"], "guard": "senderIsCleaner", "action": "cleanerDone" },
     { "inputs": "*", "guard": "senderIsCleanerStartingRoom", "action": "startCleaningJob" },
     { "inputs": "*", "guard": "senderIsCleanerNamingRoom", "action": "cleanerRoomReply" },
+    { "inputs": ["yes"], "guard": "senderConfirmingGateAck", "action": "gateAckConfirm" },
     { "inputs": ["cancel", "menu", "hi"], "guard": "senderStuckInAwaitingState", "action": "greetAndAskStayType", "next": "AWAITING_STAY_TYPE" }
   ],
 
@@ -85,7 +86,7 @@
     "bookingReceived": "Thanks {guestName}! 🙏\n\nYour booking enquiry has been received.\n\n*Ref:* {bookingRef}\n*Check-in:* {checkIn}\n*Check-out:* {checkOut}\n{rateLine}\n\nWhat time do you expect to arrive? (e.g. \"around 2pm\" or \"after 5\")",
     "etaConfirmed": "Perfect! We'll have your room ready for you. 🛏️\n\nSee you at *{eta}*.\n\nWhen you arrive, reply with a number:\n1 - I'm at the gate\n2 - Cancel my booking\n\nWe look forward to hosting you at {propertyName}! 🌟",
     "etaWriteFailed": "Sorry, something went wrong on our end and we couldn't confirm your booking yet. Please send your arrival time again.",
-    "gateNotify": "🔔 {guestName} is at the gate. {roomInfo}\nPhone: {phone}",
+    "gateNotify": "🔔 {guestName} is at the gate. {roomInfo}\nPhone: {phone}\n\nReply YES to confirm you've got this.",
     "gateRoomAssignedInfo": "{roomName} assigned.",
     "gateNoRoomInfo": "No rooms available — please assign manually.",
     "welcomeAssigned": "Welcome to {propertyName}! 🌟 You've been assigned *{roomName}*.\n\nSomeone is on their way to open the gate for you. Enjoy your stay!\n\nWhen you're ready to leave, reply with a number:\n1 - Check out",
@@ -121,6 +122,7 @@
     "optedOut": "You've opted out of messages. 🔕 We won't send you anything further.\n\nReply *START* at any time to opt back in.",
     "optedBackIn": "Welcome back! ✅ You're opted back in and will receive messages again.\n\nReply *STOP* any time to opt out.",
     "optOutWriteFailed": "Sorry, something went wrong on our end and that didn't go through. Please try again.",
+    "ownerNotifyVerified": "Thanks — you're confirmed ✅ You'll now receive property reports and notifications on this number.",
     "walkinUsage": "Walk-in format:\n\n*WALKIN ROOM 2 2HRS John Smith*\n\nRoom, then 1, 2 or 3 hours, then the guest's name. Add their number at the end if you have it.",
     "walkinNeedName": "Almost — that walk-in needs the guest's name.\n\nSend it again like this:\n*WALKIN ROOM 2 2HRS John Smith*\n\nAdd their number at the end if you have it.",
     "walkinBadDuration": "Walk-ins are 1, 2 or 3 hours only — {hours} isn't available.\n\nExample: *WALKIN ROOM 2 2HRS John Smith*",

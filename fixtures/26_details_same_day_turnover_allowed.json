@@ -117,6 +117,13 @@
           "Outcome": "Booked",
           "Booking Type": "Overnight"
         }
+      },
+      {
+        "op": "update",
+        "table": "WS_Bookings",
+        "fields": {
+          "Guest Name (This Stay)": "John Smith"
+        }
       }
     ],
     "sends": [

@@ -39,6 +39,9 @@ const daysAgo = n => new Date(NOW.getTime() - n * DAY_MS).toISOString();
 const rooms = [{ id: 'recR1', fields: { 'Room Name': 'Room 01', 'Status': 'Available', 'Property': ['recP1'] } }];
 const property = { id: 'recP1', fields: { 'Property Name': 'Villa Liza Guest Lodge', 'Notify Phone': '27732273477', 'Owner': ['recOwnerVL'] } };
 const ownerRecord = { id: 'recOwnerVL', fields: { 'Owner Name': 'Villa Liza Owner' } };
+// WS_Owner_Notify replaces the single 'Notify Phone' field as the actual send
+// source for these E2E tests — one verified, active row per property.
+const ownerNotifyRow = { id: 'recON1', fields: { Property: ['recP1'], 'Phone Number': '27732273477', Active: true, Verified: true } };
 
 // ── resolveSendRecipient: the gate function itself ──────────────────────────
 
@@ -78,7 +81,8 @@ test('E2E monthly: REPORT_TEST_MODE_PHONE set redirects the live monthly send aw
     WS_Owners: [ownerRecord],
     WS_Rooms: rooms,
     WS_Bookings: [{ id: 'recB1', fields: { 'Guest': ['recG1'], 'Room': ['recR1'], 'Booking Type': 'Overnight', 'Amount Due': 400, 'Check In': daysAgo(5), 'Check Out': daysAgo(3) } }],
-    WS_Guests: []
+    WS_Guests: [],
+    WS_Owner_Notify: [ownerNotifyRow]
   });
 
   await withTestModePhone('27899999999', () => wh.runMonthlyReport({ now: NOW }));
@@ -98,7 +102,8 @@ test('E2E weekly: REPORT_TEST_MODE_PHONE set redirects the live weekly-recap sen
     WS_Owners: [ownerRecord],
     WS_Rooms: rooms,
     WS_Bookings: [{ id: 'recB1', fields: { 'Guest': ['recG1'], 'Room': ['recR1'], 'Booking Type': 'Overnight', 'Amount Due': 400, 'Check In': daysAgo(3), 'Check Out': daysAgo(1) } }],
-    WS_Guests: []
+    WS_Guests: [],
+    WS_Owner_Notify: [ownerNotifyRow]
   });
 
   await withTestModePhone('27899999999', () => wh.runWeeklyRecap({ now: NOW }));
@@ -118,7 +123,8 @@ test('E2E monthly: REPORT_TEST_MODE_PHONE unset sends live to the real owner, as
     WS_Owners: [ownerRecord],
     WS_Rooms: rooms,
     WS_Bookings: [{ id: 'recB1', fields: { 'Guest': ['recG1'], 'Room': ['recR1'], 'Booking Type': 'Overnight', 'Amount Due': 400, 'Check In': daysAgo(5), 'Check Out': daysAgo(3) } }],
-    WS_Guests: []
+    WS_Guests: [],
+    WS_Owner_Notify: [ownerNotifyRow]
   });
 
   await wh.runMonthlyReport({ now: NOW });

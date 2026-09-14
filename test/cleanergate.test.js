@@ -26,13 +26,19 @@ const booking = { id: 'recB1', fields: { Guest: ['recG1'], Status: 'Confirmed' }
 const cleanerA = { id: 'recC1', fields: { 'Cleaner Name': 'Thandi', 'Phone Number': '0821110000', Active: true, 'Assigned Property': ['recP1'] } };
 const cleanerB = { id: 'recC2', fields: { 'Cleaner Name': 'Sipho', 'Phone Number': '27829990000', Active: true, 'Assigned Property': ['recP2'] } };
 
+const ownerNotifyRows = [
+  { id: 'recON1', fields: { Property: ['recP1'], 'Phone Number': '27831112222', Active: true, Verified: true } },
+  { id: 'recON2', fields: { Property: ['recP2'], 'Phone Number': '27839998888', Active: true, Verified: true } }
+];
+
 function seedWith(cleaners) {
   return {
     WS_Properties: [propertyA, propertyB],
     WS_Rooms: [room],
     WS_Guests: [guest],
     WS_Bookings: [booking],
-    WS_Cleaners: cleaners
+    WS_Cleaners: cleaners,
+    WS_Owner_Notify: ownerNotifyRows
   };
 }
 
@@ -88,7 +94,7 @@ test('template unconfigured: no template send, and the skip is logged against th
   assert.strictEqual(stub.bookingId, 'recB1', 'stub log names the booking');
   assert.strictEqual(stub.to, '27821110000', 'stub log records the normalised number it would have used');
   assert.strictEqual(stub.cleanerId, 'recC1');
-  assert.deepStrictEqual(stub.params, ['Thandi', 'John Smith', 'Room 1', 'Test Lodge']);
+  assert.deepStrictEqual(stub.params, ['Thandi', 'John Smith', 'Room 1', 'Test Lodge', "Reply YES to confirm you've got this."]);
 });
 
 test('configured: only the booking property\'s cleaner is sent the template', async () => {
@@ -98,7 +104,7 @@ test('configured: only the booking property\'s cleaner is sent the template', as
   assert.strictEqual(templates.length, 1, `one template send, got ${JSON.stringify(ctx.sends)}`);
   assert.strictEqual(templates[0].to, '27821110000', '0-prefixed number normalised to 27');
   assert.strictEqual(templates[0].template, TEMPLATE_NAME);
-  assert.deepStrictEqual(templates[0].params, ['Thandi', 'John Smith', 'Room 1', 'Test Lodge']);
+  assert.deepStrictEqual(templates[0].params, ['Thandi', 'John Smith', 'Room 1', 'Test Lodge', "Reply YES to confirm you've got this."]);
 
   // Property B's cleaner asserted absent explicitly, not merely implied by count —
   // the fixture-61 exclusion pattern. Two ACTIVE cleaners are seeded, so only

@@ -43,6 +43,26 @@ function receptionPaymentTemplate() {
   return process.env.WABISTAY_RECEPTION_PAYMENT_TEMPLATE || null;
 }
 
+// Repeat-guest preference confirmation push (overnight-only, name-match-gated
+// — see namesFuzzyMatch / notifyReceptionOfPreferenceMatch below). Same
+// contract as the two template functions above: read at CALL time, unset IS
+// the stub state.
+function receptionPreferenceTemplate() {
+  return process.env.WABISTAY_RECEPTION_PREFERENCE_TEMPLATE || null;
+}
+
+// WS_Owner_Notify onboarding: a newly-added (or freshly-migrated) recipient has
+// never messaged the business, so the one-time "reply CONFIRM" verification push
+// is business-initiated and outside Meta's 24h window — same contract as every
+// other template getter here: read at CALL time, unset IS the stub state. No
+// existing template in this codebase does this job (checked: cleaner gate,
+// reception payment, reception preference, owner summary, weekly recap, monthly
+// report are all report/dispatch content, not an identity-confirmation ask), so
+// this is a NEW template Shawn must submit for Meta approval.
+function ownerNotifyVerificationTemplate() {
+  return process.env.WABISTAY_OWNER_NOTIFY_VERIFY_TEMPLATE || null;
+}
+
 // ─── AIRTABLE HELPERS ───────────────────────────────────────────────────────
 
 // `opts.throwOnError` (default false): every existing caller relies on the
@@ -275,6 +295,101 @@ async function activeCleanersForProperty(propertyId) {
   return activeCleaners.filter(c => (c.fields['Assigned Property'] || []).includes(propertyId));
 }
 
+// ─── OWNER NOTIFICATION RECIPIENTS (WS_Owner_Notify) ────────────────────────
+// Replaces WS_Properties.'Notify Phone' as a single field. Root cause of the
+// incident this exists to prevent was BAD DATA in that single field for one
+// property — a multi-row table, one row per recipient, mirrors WS_Cleaners
+// exactly (same Active-checkbox + property-link + phone shape, same
+// every-active-row-gets-notified fan-out, no per-recipient/per-report-type
+// filtering) so a wrong number is one row a human can see and fix, not an
+// opaque single value.
+//
+// Table: WS_Owner_Notify. Fields: 'Active' (checkbox), 'Property' (link to
+// WS_Properties, single), 'Phone Number' (text), 'Verified' (checkbox,
+// defaults unchecked on every new/migrated row).
+async function activeOwnerRecipientsForProperty(propertyId) {
+  const activeRecipients = await airtableGet('WS_Owner_Notify', `{Active} = TRUE()`);
+  if (!propertyId) return [];
+  return activeRecipients.filter(r => (r.fields['Property'] || []).includes(propertyId));
+}
+
+// CEO decision (confirmed, not re-litigated): HARD GATE. An unverified
+// recipient is skipped from every report/notification send, not merely
+// warned about — the incident this whole feature exists to prevent was
+// specifically an unverified/wrong number receiving owner data, so a
+// migrated-but-unconfirmed row must NOT quietly keep receiving reports.
+// Every skip is logged with the recipient and property so "why did this
+// owner stop getting reports" is answerable from Axiom, and a property left
+// with zero verified recipients is logged loudly (alertShawn) rather than
+// silently dropped — that visibility is what keeps this a safe hard gate
+// rather than an invisible one.
+async function resolveOwnerNotifyRecipients(propertyId, site, correlation = {}) {
+  const all = await activeOwnerRecipientsForProperty(propertyId);
+  const verified = [];
+  for (const r of all) {
+    if (r.fields['Verified']) {
+      verified.push(r);
+    } else {
+      logToAxiom('info', 'owner_notify_unverified_skipped', {
+        site, propertyId, recipientId: r.id,
+        phone: r.fields['Phone Number'] || null, ...correlation
+      });
+    }
+  }
+  if (verified.length === 0) {
+    logToAxiom('warn', 'owner_notify_zero_recipients', {
+      site, propertyId, totalActiveRows: all.length, ...correlation
+    });
+    if (all.length > 0) {
+      // Rows exist but none are verified — distinct from "table not migrated
+      // yet" (all.length === 0), both fail loud but this one specifically
+      // means real recipients are stuck waiting on their own CONFIRM reply.
+      await alertShawn('owner_notify', 'active WS_Owner_Notify rows exist but none are verified', {
+        propertyId, site, unverifiedCount: all.length
+      });
+    }
+  }
+  return verified;
+}
+
+// One-time onboarding push for a WS_Owner_Notify row that has never confirmed.
+// A brand-new (or freshly-migrated) recipient has never messaged the business,
+// so this is business-initiated and outside Meta's 24h window — template-only,
+// same stub-until-approved contract as every other business-initiated send in
+// this file. Deliberately idempotent to call: callers should still only invoke
+// it for a row that is not yet Verified (checked by the caller), so re-running
+// the migration script twice does not spam a phone that already confirmed.
+async function sendOwnerNotifyVerification(recipient, property) {
+  const correlation = { site: 'owner_notify_verification', propertyId: property ? property.id : (recipient.fields['Property'] || [])[0] || null, recipientId: recipient.id };
+  const rawPhone = recipient.fields['Phone Number'];
+  if (!rawPhone) {
+    logToAxiom('warn', 'owner_notify_verification_no_phone', correlation);
+    return { ok: false, reason: 'no_phone' };
+  }
+  const to = formatPhone(rawPhone);
+  const templateName = ownerNotifyVerificationTemplate();
+  const propertyName = property ? property.fields['Property Name'] : null;
+  const params = [propertyName || 'your property'];
+
+  if (!templateName) {
+    // STUBBED until WABISTAY_OWNER_NOTIFY_VERIFY_TEMPLATE is approved and
+    // configured — same pattern as every other pending-template send here.
+    logToAxiom('warn', 'owner_notify_verification_stubbed', {
+      ...correlation, to, params,
+      reason: 'WABISTAY_OWNER_NOTIFY_VERIFY_TEMPLATE not configured — template pending Meta approval'
+    });
+    return { ok: false, reason: 'stubbed' };
+  }
+
+  const result = await sendWhatsAppTemplate(to, templateName, params, correlation);
+  if (!result.ok) {
+    logToAxiom('error', 'owner_notify_verification_failed', {
+      ...correlation, to, template: templateName, error: JSON.stringify(result.error || null)
+    });
+  }
+  return result;
+}
+
 // Gate arrival → tell the property's cleaner someone has arrived. Before this,
 // `gateArrival` told the guest "someone is on their way to open the gate" and
 // notified only `Notify Phone` (the owner) — no member of staff on the ground was
@@ -314,8 +429,14 @@ async function notifyCleanerOfArrival({ propertyId, bookingId, propertyName, gue
       continue;
     }
     const to = formatPhone(rawPhone);
-    // Order is fixed by the approved template's {{1}}..{{4}} — see PR body.
-    const params = [cleanerName, guestName, roomName || 'an unassigned room', propertyName];
+    // Order is fixed by the approved template's {{1}}..{{5}} — see PR body.
+    // {{5}} added for the gate-ack escalation feature: an explicit ack request,
+    // matching the free-form gateNotify message's own "Reply YES..." suffix.
+    // FLAG: the template is still pending Meta approval (see cleanerGateTemplate
+    // above) — whoever submits/resubmits it must include a {{5}} placeholder for
+    // this text, or a future approved template with only 4 placeholders will
+    // reject every send here on param-count mismatch.
+    const params = [cleanerName, guestName, roomName || 'an unassigned room', propertyName, "Reply YES to confirm you've got this."];
 
     if (!templateName) {
       // STUBBED until WABISTAY_CLEANER_GATE_TEMPLATE is approved and configured.
@@ -389,6 +510,171 @@ async function notifyReceptionOfPayment({ propertyId, bookingId, bookingRef, roo
     // Success is already logged by sendWhatsAppTemplate as `whatsapp_template_sent`
     // carrying the wamid — the join key to B3's status callbacks. Not duplicated
     // here, matching notifyCleanerOfArrival.
+  }
+}
+
+// ─── REPEAT-GUEST NAME MATCHING (reception-facing, overnight-only) ─────────
+//
+// NEEDS CEO SIGN-OFF — algorithm and thresholds below, exactly as specified
+// 31 Aug. Pure and side-effect-free by design so it is trivially unit
+// testable and auditable independent of any Airtable/WhatsApp wiring.
+//
+// Two checks, either passing is a match:
+//
+//  1. Token-subset matching: split both names on whitespace, lowercase every
+//     token. Let SHORT be whichever name has fewer tokens (ties: either).
+//     Every token of SHORT must be a prefix of, or an exact match to, some
+//     token of LONG — each LONG token can satisfy at most one SHORT token
+//     (no reuse). This is what makes "Shawn M" match "Shawn Mahashi": "shawn"
+//     matches "shawn" exactly, "m" is a prefix of "mahashi".
+//
+//  2. Levenshtein fallback for near-miss typos on the FULL lowercased
+//     strings (not token-wise) — deliberately conservative, erring toward
+//     NO match over a false-positive match of two different guests:
+//       - names up to 8 chars (using the longer of the two): distance <= 1
+//       - longer names: normalized similarity (1 - distance/maxlen) >= 0.85
+//
+// Both are cheap on names (short strings), so no memoization/perf work here.
+
+function levenshteinDistance(a, b) {
+  const m = a.length, n = b.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  // Single rolling row — O(min(m,n)) space is unnecessary at name lengths,
+  // O(n) is simple and plenty fast here.
+  let prevRow = new Array(n + 1);
+  for (let j = 0; j <= n; j++) prevRow[j] = j;
+  for (let i = 1; i <= m; i++) {
+    const currRow = new Array(n + 1);
+    currRow[0] = i;
+    for (let j = 1; j <= n; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      currRow[j] = Math.min(
+        prevRow[j] + 1,      // deletion
+        currRow[j - 1] + 1,  // insertion
+        prevRow[j - 1] + cost // substitution
+      );
+    }
+    prevRow = currRow;
+  }
+  return prevRow[n];
+}
+
+function tokenSubsetMatch(nameA, nameB) {
+  const tokensA = String(nameA).trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const tokensB = String(nameB).trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (tokensA.length === 0 || tokensB.length === 0) return false;
+
+  // "Shorter"/"longer" is by overall string length, not token count — "Shawn
+  // M" (2 tokens, 7 chars) vs "Shawn Mahashi" (2 tokens, 13 chars) tie on
+  // token count but must still resolve short=the initial, long=the full name.
+  const [shortTokens, longTokens] = String(nameA).length <= String(nameB).length
+    ? [tokensA, tokensB]
+    : [tokensB, tokensA];
+
+  // Each long-name token can satisfy at most one short-name token — tracked
+  // so "J J" cannot match "James Jones" twice off one token.
+  const consumed = new Array(longTokens.length).fill(false);
+  for (const shortTok of shortTokens) {
+    let found = false;
+    for (let i = 0; i < longTokens.length; i++) {
+      if (consumed[i]) continue;
+      const longTok = longTokens[i];
+      if (longTok === shortTok || longTok.startsWith(shortTok)) {
+        consumed[i] = true;
+        found = true;
+        break;
+      }
+    }
+    if (!found) return false;
+  }
+  return true;
+}
+
+function levenshteinNearMiss(nameA, nameB) {
+  const a = String(nameA).trim().toLowerCase();
+  const b = String(nameB).trim().toLowerCase();
+  if (!a || !b) return false;
+  const maxLen = Math.max(a.length, b.length);
+  const distance = levenshteinDistance(a, b);
+  if (maxLen <= 8) return distance <= 1;
+  const similarity = 1 - (distance / maxLen);
+  return similarity >= 0.85;
+}
+
+// Exported entry point — match succeeds if EITHER check passes.
+function namesFuzzyMatch(nameA, nameB) {
+  if (!nameA || !nameB) return false;
+  return tokenSubsetMatch(nameA, nameB) || levenshteinNearMiss(nameA, nameB);
+}
+
+// All bookings for a guest regardless of Status — airtableGetBookingsByGuestId
+// (F5, above) is scoped to one status by design for its existing callers; the
+// repeat-guest signal and the preference match both need "any prior booking
+// at all", across every status, so this is a separate helper rather than a
+// misuse of that one with a wildcard formula.
+async function airtableGetAllBookingsByGuestId(guestId) {
+  const allBookings = await airtableGet('WS_Bookings', '');
+  return allBookings.filter(b => {
+    const guests = b.fields['Guest'] || [];
+    return guests.includes(guestId);
+  });
+}
+
+// Most recent PRIOR booking (excluding the one just created) that carries a
+// 'Guest Name (This Stay)' value — i.e. one that went through this same
+// preference-matching code path and recorded what the guest typed. Sorted by
+// Check Out descending, same idiom as findBookingAwaitingRating above.
+async function mostRecentPriorStayName(guestId, excludeBookingId) {
+  const bookings = await airtableGetAllBookingsByGuestId(guestId);
+  const withStayName = bookings.filter(b =>
+    b.id !== excludeBookingId && b.fields['Guest Name (This Stay)']
+  );
+  withStayName.sort((a, b) => Date.parse(b.fields['Check Out'] || 0) - Date.parse(a.fields['Check Out'] || 0));
+  return withStayName[0] || null;
+}
+
+// Reception push: "this looks like a returning guest, [previous name] ->
+// [current name] — confirm?". Fires ONLY when collectDetails (below) has
+// already determined this is an overnight booking, a name was provided, and
+// that name fuzzy-matched a prior stay. Same seat-lookup/template/stub-log
+// shape as notifyReceptionOfPayment — deliberately not a new pattern.
+async function notifyReceptionOfPreferenceMatch({ propertyId, bookingId, bookingRef, roomName, previousName, currentName }) {
+  const correlation = { site: 'reception_preference_match', bookingId, bookingRef, propertyId };
+  const seats = await activeReceptionRolesForProperty(propertyId);
+
+  if (seats.length === 0) {
+    logToAxiom('warn', 'reception_preference_notify_no_seat', {
+      ...correlation, reason: 'no active Reception seat for property'
+    });
+    return;
+  }
+
+  const templateName = receptionPreferenceTemplate();
+
+  for (const seat of seats) {
+    const to = formatPhone(String(seat.fields['Current Phone']));
+    const perSeat = { ...correlation, roleId: seat.id, roleLabel: seat.fields['Role Label'] || null };
+    const params = [roomName || 'a room', currentName, previousName, bookingRef || ''];
+
+    if (!templateName) {
+      // STUBBED until WABISTAY_RECEPTION_PREFERENCE_TEMPLATE is approved and
+      // set. Never downgraded to free-form, same reasoning as the cleaner
+      // gate and payment pushes — Reception has not messaged us about this
+      // booking, so free-form is outside the 24h window (131047).
+      logToAxiom('warn', 'reception_preference_notify_stubbed', {
+        ...perSeat, to, params,
+        reason: 'WABISTAY_RECEPTION_PREFERENCE_TEMPLATE not configured — template pending Meta approval'
+      });
+      continue;
+    }
+
+    const result = await sendWhatsAppTemplate(to, templateName, params, perSeat);
+    if (!result.ok) {
+      logToAxiom('error', 'reception_preference_notify_failed', {
+        ...perSeat, to, template: templateName, error: JSON.stringify(result.error || null)
+      });
+    }
   }
 }
 
@@ -578,15 +864,39 @@ async function getAlertPhone() {
   }
 }
 
-async function alertShawn(cronName, errorMessage, context = {}) {
+// `opts.message`, when given, REPLACES the "WABISTAY CRON ERROR" copy below
+// but reuses everything else (phone resolution via getAlertPhone, the same
+// context-JSON suffix, the same fire-and-forget WhatsApp send) — added for
+// the gate-ack escalation (see alertGateAckTimeout below), which is not a
+// cron/system failure and must not be mislabelled as one. Existing call
+// sites pass no 4th argument, so this is additive and does not change their
+// behaviour.
+async function alertShawn(cronName, errorMessage, context = {}, opts = {}) {
   const to = await getAlertPhone();
   if (!to) {
     logToAxiom('error', 'alert_shawn_no_destination', { cronName, errorMessage });
     return;
   }
   const extra = Object.keys(context).length ? `\n${JSON.stringify(context)}` : '';
-  const msg = `WABISTAY CRON ERROR — ${cronName} failed.\nError: ${errorMessage}${extra}`;
+  const msg = opts.message
+    ? `${opts.message}${extra}`
+    : `WABISTAY CRON ERROR — ${cronName} failed.\nError: ${errorMessage}${extra}`;
   await sendWhatsApp(to, msg).catch(e => console.error('[alertShawn failed]', e.message));
+}
+
+// Escalation delivery for a gate notification that went unacknowledged past
+// gateAckGraceMs() (see runGateAckEscalation below). Reuses alertShawn purely
+// as the delivery mechanism (phone resolution + WhatsApp send) via its
+// `opts.message` override — a missed ack is a follow-up ask, not a cron
+// failure, so it deliberately does NOT get the "WABISTAY CRON ERROR" text.
+// Includes property + guest identifying info so Shawn/the CEO can follow up
+// directly without a second lookup.
+async function alertGateAckTimeout(booking, propertyName, guestName) {
+  const bookingRef = booking.fields['Booking Ref'] || booking.id;
+  const message = `WABISTAY GATE ALERT — Gate notification for booking ${bookingRef} at ${propertyName || 'an unknown property'} went unacknowledged.\nGuest: ${guestName || 'unknown'}\nPlease follow up directly.`;
+  await alertShawn('gate_ack_escalation', 'gate notification unacknowledged past grace period',
+    { bookingId: booking.id, bookingRef, propertyName: propertyName || null, guestName: guestName || null },
+    { message });
 }
 
 // ─── SAST DATES (B7) ─────────────────────────────────────────────────────────
@@ -611,6 +921,27 @@ const OVERNIGHT_CHECKOUT_HOUR = 10;
 // sastToUtcIso), so no further SAST conversion is needed here — the arithmetic
 // is pure milliseconds, which is what the mutation test targets.
 const AUTO_CHECKOUT_GRACE_MS = 15 * 60 * 1000; // 15-minute warning window
+
+// Gate-ack escalation grace period (see runGateAckEscalation below). Unlike
+// AUTO_CHECKOUT_GRACE_MS/ENQUIRY_ABANDON_MS above/below — fixed business
+// constants nobody asked to tune live — this one was explicitly specified as
+// configurable, so it follows the same "read at CALL time from env, hardcoded
+// fallback IS the default" contract as every template getter in this file
+// (cleanerGateTemplate, receptionPaymentTemplate, etc.) and REPORT_TEST_MODE_PHONE
+// further down, rather than a module-load-time constant like AUTO_CHECKOUT_GRACE_MS.
+// That is the only existing precedent in this codebase for a runtime-tunable
+// number, and a redeploy-free env change taking effect on the next cron tick
+// (rather than needing a code change) is exactly what "configurable" should mean
+// here. GATE_ACK_GRACE_MS is expected in milliseconds, same unit as every other
+// *_GRACE_MS/*_ABANDON_MS constant in this file — no minutes-to-ms conversion,
+// to avoid a second unit convention.
+const DEFAULT_GATE_ACK_GRACE_MS = 10 * 60 * 1000; // 10-minute default
+function gateAckGraceMs() {
+  const raw = process.env.GATE_ACK_GRACE_MS;
+  if (raw === undefined || raw === '') return DEFAULT_GATE_ACK_GRACE_MS;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_GATE_ACK_GRACE_MS;
+}
 
 // B12: an EXTEND reply pushes Check Out out (uncapped, repeatable). Increment is
 // per booking type. FLAG (genuinely undefined in the brief): these exact
@@ -668,6 +999,10 @@ async function extensionCharge(booking, property) {
 // text, so STOP / Stop / stop all match — case-insensitive by construction.
 const STOP_KEYWORDS = ['stop'];
 const START_KEYWORDS = ['start'];
+// WS_Owner_Notify onboarding: a pending (unverified) recipient replies with one
+// of these to move their row to Verified. Matched the same case-insensitive way
+// as STOP/START above.
+const OWNER_NOTIFY_CONFIRM_KEYWORDS = ['confirm'];
 // "Already-active booking" for the two-tier rule: a real commitment, not a
 // browsing enquiry. Transaction-completion messages are allowed to an opted-out
 // guest only while their booking is in one of these states.
@@ -1639,6 +1974,35 @@ const guards = {
     return cleanerRecords.length > 0;
   },
 
+  // Gate-ack "YES" (see gateArrival's Gate Notify Sent At stamp and
+  // runGateAckEscalation below). A "YES" can legitimately come from EITHER
+  // recipient type notified at arrival — an owner/notify recipient or a
+  // cleaner, both got the "Reply YES..." ask — so this checks WS_Cleaners
+  // first (same lookup as senderIsCleaner) and falls back to WS_Owner_Notify
+  // (same lookup already used for the CONFIRM-verification / STOP staff-number
+  // checks elsewhere in this file). CEO-scope decision (documented, not
+  // guessed): the ack is tracked per BOOKING, not per recipient — this is a
+  // response-confirmation mechanism, not shift/roster enforcement, so ANY
+  // recognized staff number for the sender's property clears the one pending
+  // ack for that property, regardless of whether it was "meant" for a cleaner
+  // or an owner-notify recipient. A cleaner replying YES to what was really an
+  // owner-facing notification (or vice versa) still correctly stands down the
+  // escalation — genuine ambiguity flagged in the build report, not silently
+  // resolved a different way elsewhere.
+  async senderConfirmingGateAck(ctx) {
+    const cleaners = await airtableGet('WS_Cleaners', `{Phone Number} = '${ctx.phone}'`);
+    if (cleaners.length > 0) {
+      ctx.gateAckSenderPropertyIds = cleaners.flatMap(c => c.fields['Assigned Property'] || []);
+      return true;
+    }
+    const ownerRows = await airtableGet('WS_Owner_Notify', `{Phone Number} = '${ctx.phone}'`);
+    if (ownerRows.length > 0) {
+      ctx.gateAckSenderPropertyIds = ownerRows.flatMap(r => r.fields['Property'] || []);
+      return true;
+    }
+    return false;
+  },
+
   // Room-ambiguity fix: catches a cleaner's reply naming a specific room (any
   // time, not just right after "done") so cleanerDone never has to guess which
   // of several Cleaning rooms to resolve. Cheap check first (registered cleaner)
@@ -2342,6 +2706,42 @@ const actions = {
     await resolveRoomClean(ctx, ctx.matchedCleaningRoom);
   },
 
+  // Gate-ack "YES" from a recognized cleaner or owner-notify sender (guard:
+  // senderConfirmingGateAck). Correlates to a booking by property, JS-side
+  // (fetch-then-filter — same idiom as airtableGetBookingsByGuestId/F5-style
+  // throughout this file, avoiding Airtable blank-field formula quirks rather
+  // than relying on `!= ''`/`= ''` in filterByFormula). If more than one
+  // booking for this sender's property(ies) is awaiting ack (rare — two
+  // arrivals close together), the most recently notified one is acked; this
+  // is a best-effort correlation, not a guaranteed-unique match, since there
+  // is no per-message reply-to/thread id available from WhatsApp here.
+  async gateAckConfirm(ctx) {
+    const propertyIds = ctx.gateAckSenderPropertyIds || [];
+    if (propertyIds.length === 0) {
+      logToAxiom('warn', 'gate_ack_sender_no_property', { phone: ctx.phone });
+      return;
+    }
+    const allBookings = await airtableGet('WS_Bookings', '');
+    const pending = allBookings.filter(b =>
+      b.fields['Gate Notify Sent At'] && !b.fields['Gate Notify Acked At'] &&
+      (b.fields['WS_Property'] || []).some(id => propertyIds.includes(id))
+    );
+    if (pending.length === 0) {
+      logToAxiom('info', 'gate_ack_no_pending_booking', { phone: ctx.phone, propertyIds });
+      return;
+    }
+    pending.sort((a, b) => Date.parse(b.fields['Gate Notify Sent At']) - Date.parse(a.fields['Gate Notify Sent At']));
+    const booking = pending[0];
+    const ackWrite = await airtableUpdate('WS_Bookings', booking.id, { 'Gate Notify Acked At': new Date().toISOString() });
+    if (ackWrite && ackWrite.error) {
+      logToAxiom('error', 'gate_ack_write_failed', {
+        bookingId: booking.id, phone: ctx.phone, error: JSON.stringify(ackWrite.error)
+      });
+      return;
+    }
+    logToAxiom('info', 'gate_ack_confirmed', { bookingId: booking.id, phone: ctx.phone });
+  },
+
   // NEW guest (or reset): greet with availability + rates, ask for details (F10)
   // 6.4: scoped to ctx.property via {Property} linked-record filter — Airtable
   // FIND/ARRAYJOIN pattern for filtering multipleRecordLinks by record ID.
@@ -2665,6 +3065,76 @@ const actions = {
       await logEnquiry(ctx.property, ctx.phone, 'Booked', {
         checkInIso, checkOutIso, bookingType: 'Overnight', bookingId: booking.id
       });
+
+      // ─── Repeat-guest preference matching (overnight only, name-gated) ──
+      // Point 1 (stay-length gate): this whole block sits inside collectDetails,
+      // which is ONLY the Overnight capture path (collectHourlyDetails is the
+      // separate short-stay path and never calls any of this) — so hourly/
+      // walk-in bookings never reach here, unconditionally anonymous per spec.
+      // Point 2/3/4/5: no consent gate anywhere below, deliberately — the CEO
+      // spec is explicit that one must not be added.
+      if (guestName) {
+        const priorBookings = (await airtableGetAllBookingsByGuestId(ctx.guest.id))
+          .filter(b => b.id !== booking.id);
+
+        // Silent repeat-number signal — fires off ANY prior booking on this
+        // phone, independent of whether the name below matches. Log-event
+        // rather than a new Airtable field: this file already logs this exact
+        // shape of internal-only signal via logToAxiom (e.g. booking_create,
+        // hourly_not_configured) rather than persisting a counter field, so a
+        // log event is the more consistent choice here.
+        if (priorBookings.length > 0) {
+          logToAxiom('info', 'repeat_guest_signal', {
+            phone: ctx.phone, guestId: ctx.guest.id, bookingId: booking.id,
+            priorBookingCount: priorBookings.length
+          });
+        }
+
+        // Freeze what was actually typed for THIS stay, per point 6 — guest-
+        // facing display already reads Guest Name off the booking's own copy
+        // (`guestName`, computed above) rather than re-reading WS_Guests, so
+        // this write does not change what the guest sees; it only gives
+        // FUTURE bookings something per-stay to fuzzy-match against, since
+        // WS_Guests.Guest Name is persistent-per-phone and never re-typed
+        // once set (see collectDetails above) and so cannot itself serve as
+        // per-stay history.
+        const stayNameWrite = await airtableUpdate('WS_Bookings', booking.id, {
+          'Guest Name (This Stay)': guestName
+        });
+        if (stayNameWrite && stayNameWrite.error) {
+          logToAxiom('warn', 'collectdetails_stayname_writeback_failed', {
+            phone: ctx.phone, bookingId: booking.id, error: JSON.stringify(stayNameWrite.error)
+          });
+        }
+
+        const priorStay = await mostRecentPriorStayName(ctx.guest.id, booking.id);
+        if (priorStay) {
+          const previousName = priorStay.fields['Guest Name (This Stay)'];
+          if (namesFuzzyMatch(previousName, guestName)) {
+            // Fire-and-forget, matching notifyReceptionOfPayment's own call
+            // sites: no state-machine state change and no AWAITING_* state,
+            // because the booking is not blocked on Reception's answer (point
+            // 5) — if Reception never responds, no preference field is ever
+            // written, which is the entire "no-response fallback": there is
+            // nothing to revert because nothing is written until an explicit
+            // confirmation handler runs, and none is being built here since no
+            // guest/reception-facing preference STORAGE field exists yet
+            // (flagged in the PR description for the human reviewer).
+            await notifyReceptionOfPreferenceMatch({
+              propertyId: ctx.property.id,
+              bookingId: booking.id,
+              bookingRef,
+              roomName: room.fields['Room Name'],
+              previousName,
+              currentName: guestName
+            });
+          }
+          // No-match case: fully anonymous for this stay (point 2) — nothing
+          // else happens here. previousName/priorStay never reach the guest
+          // (guest-facing copy uses `guestName` only, never previousName) or
+          // Reception (notifyReceptionOfPreferenceMatch is simply not called).
+        }
+      }
     }
     logToAxiom(booking.id ? 'info' : 'error', 'booking_create', {
       phone: ctx.phone,
@@ -3174,11 +3644,12 @@ const actions = {
 
   // CONFIRMED → "1": gate arrival (F11)
   async gateArrival(ctx) {
-    // Step 1: notify phone from ctx.property (resolved once at dispatch — 6.4,
-    // no second WS_Properties call needed), fallback to OWNER_PHONE
-    const notifyPhone = ctx.property.fields['Notify Phone']
-      ? ctx.property.fields['Notify Phone'].replace(/[\s\-\+]/g, '')
-      : OWNER_PHONE;
+    // Step 1: owner-notify recipients for this property (WS_Owner_Notify —
+    // replaces the single WS_Properties.'Notify Phone' field this incident
+    // traced back to). Resolved here, before any write, same as the old
+    // single-phone read — but this is now a HARD GATE list: unverified rows
+    // are already excluded and logged by resolveOwnerNotifyRecipients.
+    const ownerRecipients = await resolveOwnerNotifyRecipients(ctx.property.id, 'gate_arrival', { bookingGuestPhone: ctx.phone });
 
     // Step 2: settle which room this guest actually gets.
     // F5-style: see greetAndAskStayType — FIND/ARRAYJOIN confirmed unreliable, JS-filter instead
@@ -3288,8 +3759,45 @@ const actions = {
     await updateGuestState(ctx.guest.id, { 'Session State': ctx.next });
     logToAxiom('info', 'state_transition', { phone: ctx.phone, guestId: ctx.guest.id, from: 'CONFIRMED', to: ctx.next, assignedRoom: assignedRoomName || null });
 
-    // Step 6: notify party
-    if (notifyPhone) {
+    // Step 5b: stamp 'Gate Notify Sent At' once for this gate-arrival cycle,
+    // BEFORE either notify site below — mirrors runAutoCheckout's
+    // 'Checkout Warning Sent At' guard (stamp once, checked before re-firing)
+    // rather than re-checking after each send. Both notify sites (owner loop,
+    // then notifyCleanerOfArrival) run inside this same function call, so this
+    // single check upfront IS "first send of either type stamps, don't
+    // re-stamp" — gateArrival only runs once per CONFIRMED→CHECKED_IN
+    // transition, so there is no second call within the same cycle to race
+    // against. Rule 30 step 2, slice 2: non-fatal, matching the owner-notify
+    // sends right after it — a failed stamp just means runGateAckEscalation
+    // never sees this booking as pending, which is a missed escalation, not a
+    // guest-facing failure, so it must not block Step 6/6b/7.
+    if (booking && !booking.fields['Gate Notify Sent At']) {
+      const gateNotifyStampWrite = await airtableUpdate('WS_Bookings', booking.id, {
+        'Gate Notify Sent At': new Date().toISOString()
+      });
+      if (gateNotifyStampWrite && gateNotifyStampWrite.error) {
+        logToAxiom('error', 'gate_notify_sent_stamp_write_failed', {
+          bookingId: booking.id, error: JSON.stringify(gateNotifyStampWrite.error)
+        });
+      }
+    }
+
+    // Step 6: notify party. Free-form (sendWhatsApp), NOT a template — this
+    // courtesy notification stays subject to Meta's 24h window exactly as
+    // before; only the recipient list changed, from one field to every
+    // verified-active WS_Owner_Notify row for this property. Each recipient
+    // gets their OWN send (own message), not one send with numbers merged.
+    for (const recipient of ownerRecipients) {
+      const rawPhone = recipient.fields['Phone Number'];
+      if (!rawPhone) {
+        logToAxiom('warn', 'gate_arrival_notify_no_phone', {
+          bookingId: booking ? booking.id : null, recipientId: recipient.id
+        });
+        continue;
+      }
+      const notifyPhone = resolveSendRecipient(formatPhone(rawPhone), 'gate_arrival', {
+        propertyId: ctx.property.id, recipientId: recipient.id
+      });
       logOwnerSendWindow('gate_arrival', notifyPhone, ctx.phone); // B17 instrumentation
       // Rule 30 step 2, slice 2: checked but non-fatal — courtesy notification.
       // notifyCleanerOfArrival (Step 6b, right after) is the operationally
@@ -3303,7 +3811,7 @@ const actions = {
       }));
       if (ownerSend && ownerSend.error) {
         logToAxiom('error', 'gate_arrival_notify_failed', {
-          bookingId: booking ? booking.id : null, error: JSON.stringify(ownerSend.error)
+          bookingId: booking ? booking.id : null, recipientId: recipient.id, error: JSON.stringify(ownerSend.error)
         });
       }
     }
@@ -4007,17 +4515,79 @@ async function runEnquiryAbandonment(now = new Date()) {
   return summary;
 }
 
+// Gate-ack escalation sweep. Modeled directly on runAutoCheckout's shape: query
+// → per-row grace comparison → fallback action if unacked, just with a single
+// terminal action (alert) rather than a warn-then-act two-step, since there is
+// no "in-between" state here to warn about — the ack ask already went out at
+// gate-arrival time (states.json 'gateNotify' / the cleaner template's {{5}}),
+// so this sweep only ever needs to notice silence and escalate it.
+//
+// JS-side filtering (fetch-then-filter), matching gateAckConfirm above and the
+// F5-style precedent throughout this file, rather than a blank-field
+// filterByFormula on 'Gate Notify Acked At'.
+//
+// Out of scope (CEO-confirmed): no on-duty/roster concept. A booking escalates
+// on elapsed time alone, regardless of who was "supposed" to be on shift.
+async function runGateAckEscalation(now = new Date()) {
+  const nowMs = now.getTime();
+  const graceMs = gateAckGraceMs();
+  const summary = { escalated: 0 };
+
+  const bookings = await airtableGet('WS_Bookings', '');
+  for (const booking of bookings) {
+    const sentAt = booking.fields['Gate Notify Sent At'];
+    if (!sentAt) continue;                               // no gate notification was ever sent
+    if (booking.fields['Gate Notify Acked At']) continue; // already acked
+    if (nowMs < Date.parse(sentAt) + graceMs) continue;   // still inside grace
+
+    const propId = (booking.fields['WS_Property'] || [])[0];
+    const property = propId ? (await airtableGet('WS_Properties', `RECORD_ID() = '${propId}'`))[0] : null;
+    const propertyName = property ? property.fields['Property Name'] : null;
+    const guestId = (booking.fields['Guest'] || [])[0];
+    const guest = guestId ? (await airtableGet('WS_Guests', `RECORD_ID() = '${guestId}'`))[0] : null;
+    const guestName = guest ? guest.fields['Guest Name'] : null;
+
+    await alertGateAckTimeout(booking, propertyName, guestName);
+    logToAxiom('warn', 'gate_ack_escalated', { bookingId: booking.id, propertyId: propId, sentAt });
+    summary.escalated++;
+  }
+  return summary;
+}
+
 async function autoCheckoutHandler(req, res) {
+  // Per-sweep isolation: one sweep's failure must not block the others (same
+  // alertShawn-per-failure posture as runMonthlyReport's per-property loop) —
+  // added for the gate-ack sweep below, which previously shared one try/catch
+  // with runAutoCheckout/runEnquiryAbandonment and so could have been silently
+  // starved by either of the other two throwing first.
+  const summary = { warnings: 0, autoCheckouts: 0 };
+  let enquiry = { abandoned: 0 };
+  let gateAck = { escalated: 0 };
+
   try {
-    const summary = await runAutoCheckout();
-    // B19: reuse this cron for the enquiry-abandonment staleness sweep.
-    const enquiry = await runEnquiryAbandonment();
-    res.status(200).json({ ok: true, ...summary, ...enquiry });
+    Object.assign(summary, await runAutoCheckout());
   } catch (err) {
     console.error('[AUTO-CHECKOUT FATAL]', err.message, err.stack);
     logToAxiom('error', 'auto_checkout_fatal', { message: err.message, stack: err.stack });
-    res.status(200).json({ ok: false, error: err.message });
+    await alertShawn('auto_checkout', err.message, {});
   }
+  try {
+    // B19: reuse this cron for the enquiry-abandonment staleness sweep.
+    enquiry = await runEnquiryAbandonment();
+  } catch (err) {
+    console.error('[ENQUIRY-ABANDONMENT FATAL]', err.message, err.stack);
+    logToAxiom('error', 'enquiry_abandonment_fatal', { message: err.message, stack: err.stack });
+    await alertShawn('enquiry_abandonment', err.message, {});
+  }
+  try {
+    gateAck = await runGateAckEscalation();
+  } catch (err) {
+    console.error('[GATE-ACK-ESCALATION FATAL]', err.message, err.stack);
+    logToAxiom('error', 'gate_ack_escalation_sweep_fatal', { message: err.message, stack: err.stack });
+    await alertShawn('gate_ack_escalation_sweep', err.message, {});
+  }
+
+  res.status(200).json({ ok: true, ...summary, ...enquiry, ...gateAck });
 }
 
 // ─── OWNER SUMMARY (B17) ─────────────────────────────────────────────────────
@@ -4560,24 +5130,31 @@ function monthlyReportTemplateParams(report) {
 // every template param costs message length — Axiom still gets the full
 // `insights` array including it, for anyone who wants it.
 async function sendMonthlyReport(property, report) {
-  const notifyPhone = property.fields['Notify Phone']
-    ? property.fields['Notify Phone'].replace(/[\s\-\+]/g, '')
-    : (OWNER_PHONE || null);
   const ownerName = await resolveOwnerName(property);
   const reportWithOwner = { ...report, ownerName };
   const templateParams = monthlyReportTemplateParams(reportWithOwner);
-  const payload = { ...reportWithOwner, template: MONTHLY_REPORT_TEMPLATE, notifyPhone, templateParams };
+
+  // WS_Owner_Notify replaces the single WS_Properties.'Notify Phone' read —
+  // see resolveOwnerNotifyRecipients' own header for the hard-gate reasoning.
+  const ownerRecipients = await resolveOwnerNotifyRecipients(property.id, 'monthly_report');
+  const notifyPhones = ownerRecipients.map(r => formatPhone(r.fields['Phone Number']));
+  const payload = { ...reportWithOwner, template: MONTHLY_REPORT_TEMPLATE, notifyPhones, templateParams };
   logToAxiom('info', 'monthly_report_payload', payload);
 
-  // LIVE as of MONTHLY_REPORT_TEMPLATE's Meta approval — routed through the
-  // REPORT_TEST_MODE_PHONE gate (see resolveSendRecipient's own header
-  // comment) so a real send can be tested against the CEO's own number
-  // before going out to real owners.
-  const recipient = resolveSendRecipient(notifyPhone, 'monthly_report', { propertyId: property.id });
-  if (!recipient) {
-    throw new Error('sendMonthlyReport: no recipient phone available — property has no Notify Phone and OWNER_PHONE fallback is unset');
+  // LIVE as of MONTHLY_REPORT_TEMPLATE's Meta approval — each recipient routed
+  // through the REPORT_TEST_MODE_PHONE gate individually (see
+  // resolveSendRecipient's own header comment) so a real send can be tested
+  // against the CEO's own number before going out to real owners. Every
+  // verified recipient gets their OWN template send — never one send with
+  // multiple numbers concatenated.
+  for (const recipient of ownerRecipients) {
+    const to = resolveSendRecipient(formatPhone(recipient.fields['Phone Number']), 'monthly_report', {
+      propertyId: property.id, recipientId: recipient.id
+    });
+    await sendWhatsAppTemplate(to, MONTHLY_REPORT_TEMPLATE, templateParams, {
+      site: 'monthly_report', propertyId: property.id, recipientId: recipient.id
+    });
   }
-  await sendWhatsAppTemplate(recipient, MONTHLY_REPORT_TEMPLATE, templateParams, { site: 'monthly_report', propertyId: property.id });
   return payload;
 }
 
@@ -5041,23 +5618,30 @@ function dailySummaryTemplateParams(summary) {
 // ONE property's failure from the rest of a run is the caller's job
 // (runDailySummary's per-property try/catch) — not this function's.
 async function sendDailySummary(property, summary) {
-  const notifyPhone = property.fields['Notify Phone']
-    ? property.fields['Notify Phone'].replace(/[\s\-\+]/g, '')
-    : (OWNER_PHONE || null);
+  // WS_Owner_Notify wired in even while the send itself stays stubbed, so
+  // enabling the live send later (per the TODO below) is still the one-line
+  // swap the comment describes, now over the recipient LIST rather than a
+  // single field.
+  const ownerRecipients = await resolveOwnerNotifyRecipients(property.id, 'daily_summary');
+  const notifyPhones = ownerRecipients.map(r => formatPhone(r.fields['Phone Number']));
 
   const ownerName = await resolveOwnerName(property);
   const summaryWithOwner = { ...summary, ownerName };
   const templateParams = dailySummaryTemplateParams(summaryWithOwner);
 
-  const payload = { ...summaryWithOwner, template: DAILY_SUMMARY_TEMPLATE, notifyPhone, templateParams };
+  const payload = { ...summaryWithOwner, template: DAILY_SUMMARY_TEMPLATE, notifyPhones, templateParams };
   // See the matching comment in sendOwnerSummary — deliberately no Airtable
   // write here either, for the same read-only-cron reason.
   logToAxiom('info', 'daily_summary_payload', payload);
 
   // TODO(Stage 3 part 3): once DAILY_SUMMARY_TEMPLATE is approved by Meta,
   // this is now genuinely the one-line swap point — templateParams above is
-  // already the exact array sendWhatsAppTemplate needs:
-  //   await sendWhatsAppTemplate(notifyPhone, DAILY_SUMMARY_TEMPLATE, templateParams, { site: 'daily_summary', propertyId: property.id });
+  // already the exact array sendWhatsAppTemplate needs, looped per recipient
+  // exactly like sendMonthlyReport/sendWeeklyRecap:
+  //   for (const recipient of ownerRecipients) {
+  //     const to = resolveSendRecipient(formatPhone(recipient.fields['Phone Number']), 'daily_summary', { propertyId: property.id, recipientId: recipient.id });
+  //     await sendWhatsAppTemplate(to, DAILY_SUMMARY_TEMPLATE, templateParams, { site: 'daily_summary', propertyId: property.id, recipientId: recipient.id });
+  //   }
   // Left stubbed here deliberately — enabling it is a separate, CEO-gated change
   // once the template exists, same reasoning as sendOwnerSummary's stub above.
   return payload;
@@ -5145,20 +5729,23 @@ function weeklyRecapTemplateParams(report) {
 // LIVE as of wabistay_owner_weekly_recap's Meta approval — routed through
 // the REPORT_TEST_MODE_PHONE gate, same as sendMonthlyReport.
 async function sendWeeklyRecap(property, report) {
-  const notifyPhone = property.fields['Notify Phone']
-    ? property.fields['Notify Phone'].replace(/[\s\-\+]/g, '')
-    : (OWNER_PHONE || null);
   const ownerName = await resolveOwnerName(property);
   const reportWithOwner = { ...report, ownerName };
   const templateParams = weeklyRecapTemplateParams(reportWithOwner);
-  const payload = { ...reportWithOwner, template: WEEKLY_RECAP_TEMPLATE, notifyPhone, templateParams };
+
+  const ownerRecipients = await resolveOwnerNotifyRecipients(property.id, 'weekly_recap');
+  const notifyPhones = ownerRecipients.map(r => formatPhone(r.fields['Phone Number']));
+  const payload = { ...reportWithOwner, template: WEEKLY_RECAP_TEMPLATE, notifyPhones, templateParams };
   logToAxiom('info', 'weekly_recap_payload', payload);
 
-  const recipient = resolveSendRecipient(notifyPhone, 'weekly_recap', { propertyId: property.id });
-  if (!recipient) {
-    throw new Error('sendWeeklyRecap: no recipient phone available — property has no Notify Phone and OWNER_PHONE fallback is unset');
+  for (const recipient of ownerRecipients) {
+    const to = resolveSendRecipient(formatPhone(recipient.fields['Phone Number']), 'weekly_recap', {
+      propertyId: property.id, recipientId: recipient.id
+    });
+    await sendWhatsAppTemplate(to, WEEKLY_RECAP_TEMPLATE, templateParams, {
+      site: 'weekly_recap', propertyId: property.id, recipientId: recipient.id
+    });
   }
-  await sendWhatsAppTemplate(recipient, WEEKLY_RECAP_TEMPLATE, templateParams, { site: 'weekly_recap', propertyId: property.id });
   return payload;
 }
 
@@ -5337,6 +5924,42 @@ async function handleMessage(from, messageText, phoneNumberId, wamid) {
   // Best-effort, non-blocking — see bumpPropertyActivity's own comment.
   await bumpPropertyActivity(property.id, 'Last Message Received');
 
+  // ── WS_Owner_Notify onboarding: "confirm" reply verifies a pending recipient ──
+  // Checked before anything guest-shaped (POPIA notice, state machine) — an
+  // owner-notify recipient is staff, not a guest, exactly like the cleaner/owner/
+  // Reception exclusions below. Correlated purely by phone number, the same way
+  // WS_Cleaners/WS_Roles commands already are (activeWalkinRoleForPhone,
+  // {Phone Number} = ctx.phone throughout this file) — no separate pending-state
+  // tracking needed since "Verified" is itself the pending/confirmed flag.
+  // Scoped to THIS property's own recipients (the Property link), matching how
+  // resolveProperty already scopes everything else per phone_number_id — a
+  // recipient for property B replying "confirm" on property A's number does not
+  // verify a row that never received property A's verification push.
+  if (OWNER_NOTIFY_CONFIRM_KEYWORDS.includes(text)) {
+    const candidateRows = await airtableGet('WS_Owner_Notify', `{Phone Number} = '${phone}'`);
+    const pending = candidateRows.filter(r =>
+      !r.fields['Verified'] && (r.fields['Property'] || []).includes(property.id)
+    );
+    if (pending.length > 0) {
+      for (const row of pending) {
+        const write = await airtableUpdate('WS_Owner_Notify', row.id, { 'Verified': true });
+        if (write && write.error) {
+          logToAxiom('error', 'owner_notify_verify_write_failed', {
+            phone, recipientId: row.id, propertyId: property.id, error: JSON.stringify(write.error)
+          });
+        } else {
+          logToAxiom('info', 'owner_notify_verified', { phone, recipientId: row.id, propertyId: property.id });
+        }
+      }
+      await sendWhatsApp(phone, msg('ownerNotifyVerified'));
+      return;
+    }
+    // A "confirm" from a number that is not a pending WS_Owner_Notify row falls
+    // through unchanged — it is just ordinary guest/staff text (e.g. could
+    // collide with other flows), same non-hijacking behaviour STOP/START keep
+    // for numbers the keyword doesn't apply to.
+  }
+
   const guestRecords = await airtableGet('WS_Guests', `{Phone Number} = '${phone}'`);
   const guest = guestRecords[0] || null;
   const sessionState = guest ? guest.fields['Session State'] : null;
@@ -5369,7 +5992,8 @@ async function handleMessage(from, messageText, phoneNumberId, wamid) {
     // message.
     const isCleanerNumber = (await airtableGet('WS_Cleaners', `{Phone Number} = '${phone}'`)).length > 0;
     const isOwnerNumber = OWNER_PHONE && phone === formatPhone(OWNER_PHONE);
-    const isStaffNumber = isCleanerNumber || isOwnerNumber || (await activeWalkinRoleForPhone(phone)) !== null;
+    const isOwnerNotifyNumber = (await airtableGet('WS_Owner_Notify', `{Phone Number} = '${phone}'`)).length > 0;
+    const isStaffNumber = isCleanerNumber || isOwnerNumber || isOwnerNotifyNumber || (await activeWalkinRoleForPhone(phone)) !== null;
     if (isStaffNumber) {
       logToAxiom('info', 'stop_ignored_staff_number', { phone });
       return;
@@ -5455,7 +6079,10 @@ async function handleMessage(from, messageText, phoneNumberId, wamid) {
     // already fix. Costs one extra read, and only for a number we have never
     // seen before.
     const isStaff = (await activeWalkinRoleForPhone(phone)) !== null;
-    if (!isCleaner && !isOwner && !isStaff) {
+    // An owner-notify recipient (WS_Owner_Notify) is also staff, not a guest —
+    // same exclusion, same reasoning.
+    const isOwnerNotifyRecipient = (await airtableGet('WS_Owner_Notify', `{Phone Number} = '${phone}'`)).length > 0;
+    if (!isCleaner && !isOwner && !isStaff && !isOwnerNotifyRecipient) {
       await sendWhatsApp(phone, msg('consentNotice', { propertyName: property.fields['Property Name'] }));
       logToAxiom('info', 'popia_consent_sent', { phone });
     }
@@ -5627,6 +6254,9 @@ module.exports.cleaningDurations = cleaningDurations;
 // Vercel HTTP cron; runAutoCheckout takes an injected `now` for timing tests).
 module.exports.runAutoCheckout = runAutoCheckout;
 module.exports.autoCheckoutHandler = autoCheckoutHandler;
+module.exports.runGateAckEscalation = runGateAckEscalation;
+module.exports.gateAckGraceMs = gateAckGraceMs;
+module.exports.DEFAULT_GATE_ACK_GRACE_MS = DEFAULT_GATE_ACK_GRACE_MS;
 // B17: owner summary aggregation. runOwnerSummary(opts) takes injected now/daily
 // for tests; ownerSummaryHandler is the Vercel HTTP cron entry.
 module.exports.runOwnerSummary = runOwnerSummary;
@@ -5638,6 +6268,17 @@ module.exports.aggregateWeeklyRecap = aggregateWeeklyRecap;
 module.exports.weeklyRecapTemplateParams = weeklyRecapTemplateParams;
 module.exports.WEEKLY_RECAP_TEMPLATE = WEEKLY_RECAP_TEMPLATE;
 module.exports.resolveSendRecipient = resolveSendRecipient;
+// WS_Owner_Notify: multi-recipient owner notifications, replacing the single
+// WS_Properties.'Notify Phone' field. Exported for the migration script
+// (scripts/migrate-owner-notify.js) and for direct unit coverage of the
+// recipient-resolution/hard-gate/verification logic apart from any one send
+// path — same reasoning as activeCleanersForProperty/notifyCleanerOfArrival's
+// own exports.
+module.exports.activeOwnerRecipientsForProperty = activeOwnerRecipientsForProperty;
+module.exports.resolveOwnerNotifyRecipients = resolveOwnerNotifyRecipients;
+module.exports.sendOwnerNotifyVerification = sendOwnerNotifyVerification;
+module.exports.ownerNotifyVerificationTemplate = ownerNotifyVerificationTemplate;
+module.exports.OWNER_NOTIFY_CONFIRM_KEYWORDS = OWNER_NOTIFY_CONFIRM_KEYWORDS;
 module.exports.runDailySummary = runDailySummary;
 module.exports.dailySummaryHandler = dailySummaryHandler;
 // Stage 3 part 2: daily summary content sections, exported individually so
@@ -5670,6 +6311,7 @@ module.exports.airtableCreate = airtableCreate;
 module.exports.airtableUpdate = airtableUpdate;
 module.exports.sendWhatsApp = sendWhatsApp;
 module.exports.alertShawn = alertShawn;
+module.exports.alertGateAckTimeout = alertGateAckTimeout;
 module.exports.getAlertPhone = getAlertPhone;
 module.exports.bumpPropertyActivity = bumpPropertyActivity;
 module.exports.dormantProperties = dormantProperties;
@@ -5679,6 +6321,11 @@ module.exports.DORMANT_THRESHOLD_DAYS_DEFAULT = DORMANT_THRESHOLD_DAYS_DEFAULT;
 // to build the SAME live-data fetch + stubbed-send pipeline the real crons
 // use, without duplicating the Airtable query/pagination logic here.
 module.exports.airtableGet = airtableGet;
+module.exports.namesFuzzyMatch = namesFuzzyMatch;
+module.exports.levenshteinDistance = levenshteinDistance;
+module.exports.airtableGetAllBookingsByGuestId = airtableGetAllBookingsByGuestId;
+module.exports.mostRecentPriorStayName = mostRecentPriorStayName;
+module.exports.notifyReceptionOfPreferenceMatch = notifyReceptionOfPreferenceMatch;
 module.exports.orFormula = orFormula;
 module.exports.BLOCKING_BOOKING_STATUSES = BLOCKING_BOOKING_STATUSES;
 module.exports.BOOKABLE_ROOM_STATUSES = BOOKABLE_ROOM_STATUSES;

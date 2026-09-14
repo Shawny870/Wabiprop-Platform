@@ -72,7 +72,18 @@
         }
       }
     ],
-    "WS_Cleaners": []
+    "WS_Cleaners": [],
+    "WS_Owner_Notify": [
+      {
+        "id": "recON1",
+        "fields": {
+          "Property": ["recP1"],
+          "Phone Number": "27831112222",
+          "Active": true,
+          "Verified": true
+        }
+      }
+    ]
   },
   "message": {
     "from": "27821234567",
@@ -114,6 +125,14 @@
         "id": "recG1",
         "fields": {
           "Session State": "CHECKED_IN"
+        }
+      },
+      {
+        "op": "update",
+        "table": "WS_Bookings",
+        "id": "recB1",
+        "fields": {
+          "Gate Notify Sent At": "re:^\\d{4}-\\d{2}-\\d{2}T"
         }
       }
     ],

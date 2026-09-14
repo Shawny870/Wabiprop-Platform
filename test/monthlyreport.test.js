@@ -38,6 +38,10 @@ const rooms = [
 ];
 const property = { id: 'recP1', fields: { 'Property Name': 'Villa Liza Guest Lodge', 'Notify Phone': '27732273477', 'Owner': ['recOwnerVL'] } };
 const ownerRecord = { id: 'recOwnerVL', fields: { 'Owner Name': 'Villa Liza Owner' } };
+// WS_Owner_Notify replaces the single 'Notify Phone' field as the actual send
+// source — seeded here as one verified, active row so the E2E send tests below
+// still exercise a live send exactly like the old single-field behaviour did.
+const ownerNotifyRow = { id: 'recON1', fields: { Property: ['recP1'], 'Phone Number': '27732273477', Active: true, Verified: true } };
 
 test('occupancy, revenue, and rating trends compare this month vs last month correctly', () => {
   const bookings = [
@@ -253,7 +257,8 @@ test('runMonthlyReport sends one live template per property, and writes no Airta
     WS_Owners: [ownerRecord],
     WS_Rooms: rooms,
     WS_Bookings: [{ id: 'recB1', fields: { 'Guest': ['recG1'], 'Room': ['recR1'], 'Booking Type': 'Overnight', 'Amount Due': 400, 'Check In': daysAgo(5), 'Check Out': daysAgo(3) } }],
-    WS_Guests: []
+    WS_Guests: [],
+    WS_Owner_Notify: [ownerNotifyRow]
   });
   const sent = await wh.runMonthlyReport({ now: NOW });
 
@@ -459,7 +464,8 @@ test('E2E: runMonthlyReport resolves a real linked owner and logs correct 11-par
     WS_Owners: [ownerRecord],
     WS_Rooms: rooms,
     WS_Bookings: [{ id: 'recB1', fields: { 'Guest': ['recG1'], 'Room': ['recR1'], 'Booking Type': 'Overnight', 'Amount Due': 400, 'Rating': 5, 'Check In': daysAgo(5), 'Check Out': daysAgo(3) } }],
-    WS_Guests: []
+    WS_Guests: [],
+    WS_Owner_Notify: [ownerNotifyRow]
   });
 
   const sent = await wh.runMonthlyReport({ now: NOW });
@@ -500,13 +506,21 @@ test('a property that throws mid-run does not abort the others, and alertShawn f
   const ctx = setup({
     WS_Config: [{ id: 'recCFG1', fields: { 'Alert Phone': '27811110000' } }],
     WS_Properties: [
-      { id: 'recBad', fields: { 'Property Name': 'Broken Lodge', 'Notify Phone': 12345 } }, // non-string — .replace() throws
+      // No 'Owner' link at all — resolveOwnerName returns null, so
+      // monthlyReportTemplateParams throws 'ownerName is missing' for this
+      // property. (The old trigger here was a non-string 'Notify Phone' that
+      // broke a direct .replace() call — that read no longer exists on this
+      // path, since WS_Owner_Notify replaced it.)
+      { id: 'recBad', fields: { 'Property Name': 'Broken Lodge', 'Notify Phone': '27700000009' } },
       { id: 'recGood', fields: { 'Property Name': 'Good Lodge', 'Notify Phone': '27700000002', 'Owner': ['recOwnerGood'] } }
     ],
     WS_Owners: [{ id: 'recOwnerGood', fields: { 'Owner Name': 'Good Owner' } }],
     WS_Rooms: [{ id: 'recR3', fields: { 'Room Name': 'Room A', 'Status': 'Available', 'Property': ['recGood'] } }],
     WS_Bookings: [],
-    WS_Guests: []
+    WS_Guests: [],
+    WS_Owner_Notify: [
+      { id: 'recON2', fields: { Property: ['recGood'], 'Phone Number': '27700000002', Active: true, Verified: true } }
+    ]
   });
 
   const sent = await wh.runMonthlyReport({ now: NOW });

@@ -91,6 +91,26 @@
           ]
         }
       }
+    ],
+    "WS_Owner_Notify": [
+      {
+        "id": "recON1",
+        "fields": {
+          "Property": ["recP1"],
+          "Phone Number": "27831112222",
+          "Active": true,
+          "Verified": true
+        }
+      },
+      {
+        "id": "recON2",
+        "fields": {
+          "Property": ["recP2"],
+          "Phone Number": "27839998888",
+          "Active": true,
+          "Verified": true
+        }
+      }
     ]
   },
   "message": {
@@ -138,6 +158,14 @@
         "fields": {
           "Session State": "CHECKED_IN"
         }
+      },
+      {
+        "op": "update",
+        "table": "WS_Bookings",
+        "id": "recB1",
+        "fields": {
+          "Gate Notify Sent At": "re:^\\d{4}-\\d{2}-\\d{2}T"
+        }
       }
     ],
     "sends": [
@@ -156,7 +184,8 @@
           "Thandi",
           "John Smith",
           "Room 1",
-          "Test Lodge"
+          "Test Lodge",
+          "Reply YES to confirm you've got this."
         ]
       },
       {

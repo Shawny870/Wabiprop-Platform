@@ -40,6 +40,10 @@ const rooms = [
 ];
 const property = { id: 'recP1', fields: { 'Property Name': 'Villa Liza Guest Lodge', 'Notify Phone': '27732273477', 'Owner': ['recOwnerVL'] } };
 const ownerRecord = { id: 'recOwnerVL', fields: { 'Owner Name': 'Villa Liza Owner' } };
+// WS_Owner_Notify replaces the single 'Notify Phone' field as the actual send
+// source — seeded as one verified, active row so the E2E send tests still
+// exercise a live send exactly like the old single-field behaviour did.
+const ownerNotifyRow = { id: 'recON1', fields: { Property: ['recP1'], 'Phone Number': '27732273477', Active: true, Verified: true } };
 
 function withOwner(report, ownerName = 'Villa Liza Owner') {
   return { ...report, ownerName };
@@ -156,7 +160,8 @@ test('E2E: runWeeklyRecap resolves a real linked owner and sends a live template
     WS_Bookings: [
       { id: 'recB1', fields: { 'Guest': ['recG1'], 'Room': ['recR1'], 'Booking Type': 'Overnight', 'Amount Due': 400, 'Amount Paid': 400, 'Check In': daysAgo(3), 'Check Out': daysAgo(1) } }
     ],
-    WS_Guests: []
+    WS_Guests: [],
+    WS_Owner_Notify: [ownerNotifyRow]
   });
 
   const sent = await wh.runWeeklyRecap({ now: NOW });
@@ -204,16 +209,25 @@ test('a property that throws mid-run does not abort the others, and alertShawn f
   const ctx = setup({
     WS_Config: [{ id: 'recCFG1', fields: { 'Alert Phone': '27811110000' } }],
     WS_Properties: [
-      { id: 'recBad', fields: { 'Property Name': 'Broken Lodge', 'Notify Phone': 12345, 'Owner': ['recOwnerBad'] } }, // non-string — .replace() throws
+      // 'Owner' links to an id with no matching WS_Owners record — resolveOwnerName
+      // returns null for a dangling link exactly as it does for no link at all, so
+      // weeklyRecapTemplateParams still throws 'ownerName is missing' for this
+      // property. (The old trigger here was a non-string 'Notify Phone' that broke
+      // a direct .replace() call — that read no longer exists on this path, since
+      // WS_Owner_Notify replaced it; a dangling owner link is the equivalent
+      // "still misconfigured, still throws" case for THIS path.)
+      { id: 'recBad', fields: { 'Property Name': 'Broken Lodge', 'Notify Phone': '27700000009', 'Owner': ['recOwnerMissing'] } },
       { id: 'recGood', fields: { 'Property Name': 'Good Lodge', 'Notify Phone': '27700000002', 'Owner': ['recOwnerGood'] } }
     ],
     WS_Owners: [
-      { id: 'recOwnerBad', fields: { 'Owner Name': 'Bad Owner' } },
       { id: 'recOwnerGood', fields: { 'Owner Name': 'Good Owner' } }
     ],
     WS_Rooms: [{ id: 'recR3', fields: { 'Room Name': 'Room A', 'Status': 'Available', 'Property': ['recGood'] } }],
     WS_Bookings: [],
-    WS_Guests: []
+    WS_Guests: [],
+    WS_Owner_Notify: [
+      { id: 'recON2', fields: { Property: ['recGood'], 'Phone Number': '27700000002', Active: true, Verified: true } }
+    ]
   });
 
   const sent = await wh.runWeeklyRecap({ now: NOW });
