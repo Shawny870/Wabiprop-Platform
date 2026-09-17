@@ -1701,19 +1701,69 @@ const guards = {
 // Shared by cleanerDone (unambiguous case) and cleanerRoomReply (disambiguated
 // case) -- same side effects either way: room -> Available, thank the cleaner,
 // notify the owner.
+// D3 (gap-and-failure audit, this session): cleanerDone/cleanerRoomReply both
+// select from a top-level `{Status} = 'Cleaning'` fetch and pass that ALREADY-
+// FETCHED room record in — the guard below was re-checking a value that could
+// already be stale by the time it ran, with no re-query immediately before
+// the write. Two different phone numbers sending DONE close enough together
+// could both pass the guard before either write landed, and the second write
+// silently overwrote the first cleaner's `Cleaned By`/`Cleaning Completed At`
+// — no error, no log, nothing to notice. Confirmed by code inspection this
+// session (the audit), fixed here (implementation, not investigation).
+//
+// Two-layer fix, both closing a DIFFERENT part of the window:
+//
+//   Layer 1 (below): re-query the room's Status immediately before doing
+//   anything else, rather than trusting the caller's top-level fetch. This
+//   closes the window between "cleanerDone ran its query" and "this function
+//   started running" — the common case (a second DONE arriving seconds
+//   later, not simultaneously).
+//
+//   Layer 2 (further down, around the booking write): even Layer 1 has a
+//   window between its own re-query and this function's write — Airtable
+//   exposes no conditional/optimistic-concurrency PATCH (no ETag/If-Match on
+//   their REST API; confirmed absent from their API docs, not assumed), so a
+//   compare-and-swap at the API level isn't available. Instead this mirrors
+//   the exact pattern already proven in this file for the P1a booking race
+//   (see booking-race.test.js / the collectDetails re-verify around line
+//   2616): WRITE first, then immediately RE-READ the same record and compare
+//   the stored value to what was just written. A mismatch means a concurrent
+//   write landed in between and is now what Airtable actually holds — this
+//   request's own PATCH call can return success while still having lost the
+//   race, which a "did my write error" check alone would never catch.
 async function resolveRoomClean(ctx, room) {
-  // Locked requirement: only a room actually in Cleaning can be completed. Both
-  // callers already select from `{Status} = 'Cleaning'`, so this is belt-and-
-  // braces — but it is the guard the metric depends on, and an invariant that is
-  // merely implied by two call sites is one refactor away from being untrue.
-  if (room.fields['Status'] !== 'Cleaning') {
+  // Layer 1: re-query, don't trust the caller's already-fetched value.
+  const freshRoom = (await airtableGet('WS_Rooms', `RECORD_ID() = '${room.id}'`))[0] || room;
+
+  if (freshRoom.fields['Status'] !== 'Cleaning') {
+    // Distinguish "someone already completed this" (a race this fix cares
+    // about) from "there was never anything to complete" (unrelated, existing
+    // behaviour, untouched) — look up the most recent job for this room and
+    // only use the more specific message when it actually explains what
+    // happened. Never guess a name/time that isn't backed by a real record.
+    const recentBooking = await bookingForCleaningJob(room.id);
+    const completedByOther = recentBooking && recentBooking.fields[CLEANING_COMPLETED_FIELD];
     logToAxiom('warn', 'cleaning_complete_room_not_cleaning', {
-      phone: ctx.phone, roomId: room.id, roomName: room.fields['Room Name'],
-      status: room.fields['Status'] || null
+      phone: ctx.phone, roomId: room.id, roomName: freshRoom.fields['Room Name'],
+      status: freshRoom.fields['Status'] || null,
+      reason: completedByOther ? 'lost_race_layer1' : 'nothing_to_clean'
     });
-    await sendWhatsApp(ctx.phone, msg('cleanerNothingToClean'));
+    if (completedByOther) {
+      await sendWhatsApp(ctx.phone, msg('cleaningAlreadyCompleted', {
+        roomName: freshRoom.fields['Room Name'],
+        cleanedBy: recentBooking.fields[CLEANED_BY_FIELD] || 'someone else',
+        completedAtText: formatSastDateTime(completedByOther)
+      }));
+    } else {
+      await sendWhatsApp(ctx.phone, msg('cleanerNothingToClean'));
+    }
     return;
   }
+  // Everything below must use the re-queried record, not the (possibly
+  // stale) one the caller passed in — reassigning the parameter itself so
+  // every existing reference to `room` below this point picks it up, rather
+  // than renaming every call site.
+  room = freshRoom;
 
   const completedAt = new Date().toISOString();
   const booking = await bookingForCleaningJob(room.id);
@@ -1753,6 +1803,35 @@ async function resolveRoomClean(ctx, room) {
     // WS_People, and a link built today would just be torn out then.
     if (ctx.cleaner) jobUpdate[CLEANED_BY_FIELD] = ctx.cleaner.fields['Cleaner Name'] || null;
     await airtableUpdate('WS_Bookings', booking.id, jobUpdate);
+
+    // Layer 2 (see this function's header comment): write-then-verify, the
+    // only race-closing check Airtable's API actually supports. Re-read the
+    // SAME field we just wrote — if it no longer matches what THIS request
+    // wrote, a concurrent DONE landed its own write in between, and that
+    // write is what Airtable now holds, regardless of what our own PATCH
+    // call returned. This is the only place a truly-simultaneous race (both
+    // requests passing Layer 1 before either reached this point) gets caught.
+    const verifyBooking = (await airtableGet('WS_Bookings', `RECORD_ID() = '${booking.id}'`))[0];
+    const survivedRace = verifyBooking && verifyBooking.fields[CLEANING_COMPLETED_FIELD] === completedAt;
+    if (!survivedRace) {
+      logToAxiom('warn', 'cleaning_complete_lost_race_layer2', {
+        phone: ctx.phone, roomId: room.id, roomName: room.fields['Room Name'],
+        bookingId: booking.id, ourCompletedAt: completedAt,
+        actualCompletedAt: verifyBooking ? verifyBooking.fields[CLEANING_COMPLETED_FIELD] : null,
+        reason: 'a concurrent DONE won the race between this write and the read that verifies it'
+      });
+      // The loser gets the SAME informative message as the Layer-1 case, built
+      // from whatever actually survived — never our own now-overwritten values.
+      await sendWhatsApp(ctx.phone, msg('cleaningAlreadyCompleted', {
+        roomName: room.fields['Room Name'],
+        cleanedBy: (verifyBooking && verifyBooking.fields[CLEANED_BY_FIELD]) || 'someone else',
+        completedAtText: formatSastDateTime((verifyBooking && verifyBooking.fields[CLEANING_COMPLETED_FIELD]) || completedAt)
+      }));
+      // No success flow for the loser: no cleanerThanks, no ownerRoomCleaned,
+      // no duplicate 'cleaning_job_completed' metric — the winner's request
+      // already produced all of those (or will, on its own execution).
+      return;
+    }
   } else {
     logToAxiom('warn', 'cleaning_complete_no_booking', {
       phone: ctx.phone, roomId: room.id, roomName: room.fields['Room Name'],
