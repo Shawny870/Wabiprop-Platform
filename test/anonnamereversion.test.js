@@ -39,7 +39,7 @@ const property = { id: 'recP1', fields: {
   'Property Name': 'Test Lodge', 'Phone Number ID': '111000111000', 'Notify Phone': '27831112222',
   'Hourly Rate 1hr': 120, 'Hourly Rate 2hr': 250, 'Hourly Rate 3hr': 320
 } };
-const room = { id: 'recR1', fields: { 'Room Name': 'Room 1', 'Status': 'Available', 'Property': ['recP1'] } };
+const room = { id: 'recR1', fields: { 'Room Name': 'Room 1', 'Status': 'Available', 'Property': ['recP1'], 'Active': true } };
 const rates = [
   { id: 'recRS', fields: { 'Rate Name': 'Single', 'Rate Type': 'Per Night', 'Amount': 250, 'Active': true, 'Occupancy Type': 'Single', 'Property': ['recP1'] } },
   { id: 'recRC', fields: { 'Rate Name': 'Couple', 'Rate Type': 'Per Night', 'Amount': 400, 'Active': true, 'Occupancy Type': 'Couple', 'Property': ['recP1'] } }
