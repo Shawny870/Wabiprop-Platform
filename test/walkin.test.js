@@ -46,9 +46,9 @@ function seed(overrides = {}) {
       }
     ],
     WS_Rooms: [
-      { id: 'recR1', fields: { 'Room Name': 'Room 01', 'Room Number': 1, 'Status': 'Available', 'Property': ['recP1'] } },
-      { id: 'recR2', fields: { 'Room Name': 'Room 02', 'Room Number': 2, 'Status': 'Available', 'Property': ['recP1'] } },
-      { id: 'recR9', fields: { 'Room Name': 'Room 09', 'Room Number': 9, 'Status': 'Available', 'Property': ['recP2'] } }
+      { id: 'recR1', fields: { 'Room Name': 'Room 01', 'Room Number': 1, 'Status': 'Available', 'Property': ['recP1'], 'Active': true } },
+      { id: 'recR2', fields: { 'Room Name': 'Room 02', 'Room Number': 2, 'Status': 'Available', 'Property': ['recP1'], 'Active': true } },
+      { id: 'recR9', fields: { 'Room Name': 'Room 09', 'Room Number': 9, 'Status': 'Available', 'Property': ['recP2'], 'Active': true } }
     ],
     WS_Roles: [
       {
@@ -146,8 +146,8 @@ test('ROOM 12 2HRS books room 12 — the duration digit never selects the room',
   // would match Room 02 on the trailing "2" of "2HRS".
   const ctx = start({
     WS_Rooms: [
-      { id: 'recR2', fields: { 'Room Name': 'Room 02', 'Room Number': 2, 'Status': 'Available', 'Property': ['recP1'] } },
-      { id: 'recR12', fields: { 'Room Name': 'Room 12', 'Room Number': 12, 'Status': 'Available', 'Property': ['recP1'] } }
+      { id: 'recR2', fields: { 'Room Name': 'Room 02', 'Room Number': 2, 'Status': 'Available', 'Property': ['recP1'], 'Active': true } },
+      { id: 'recR12', fields: { 'Room Name': 'Room 12', 'Room Number': 12, 'Status': 'Available', 'Property': ['recP1'], 'Active': true } }
     ]
   });
   await send(STAFF_PHONE, 'WALKIN ROOM 12 2HRS John Smith');
@@ -428,8 +428,8 @@ test('WALKIN from a phone that is also a cleaner books the room instead of marki
       fields: { 'Cleaner Name': 'Eric', 'Phone Number': STAFF_PHONE, 'Active': true, 'Assigned Property': ['recP1'] }
     }],
     WS_Rooms: [
-      { id: 'recR1', fields: { 'Room Name': 'Room 01', 'Room Number': 1, 'Status': 'Available', 'Property': ['recP1'] } },
-      { id: 'recR2', fields: { 'Room Name': 'Room 02', 'Room Number': 2, 'Status': 'Available', 'Property': ['recP1'] } }
+      { id: 'recR1', fields: { 'Room Name': 'Room 01', 'Room Number': 1, 'Status': 'Available', 'Property': ['recP1'], 'Active': true } },
+      { id: 'recR2', fields: { 'Room Name': 'Room 02', 'Room Number': 2, 'Status': 'Available', 'Property': ['recP1'], 'Active': true } }
     ]
   });
   await send(STAFF_PHONE, 'WALKIN ROOM 2 2HRS John Smith');
@@ -451,8 +451,8 @@ test('WALKIN refuses a room that is currently mid-clean — an immediate sale, n
   // item 5b targeted.
   const ctx = start({
     WS_Rooms: [
-      { id: 'recR1', fields: { 'Room Name': 'Room 01', 'Room Number': 1, 'Status': 'Available', 'Property': ['recP1'] } },
-      { id: 'recR2', fields: { 'Room Name': 'Room 02', 'Room Number': 2, 'Status': 'Cleaning', 'Property': ['recP1'] } }
+      { id: 'recR1', fields: { 'Room Name': 'Room 01', 'Room Number': 1, 'Status': 'Available', 'Property': ['recP1'], 'Active': true } },
+      { id: 'recR2', fields: { 'Room Name': 'Room 02', 'Room Number': 2, 'Status': 'Cleaning', 'Property': ['recP1'], 'Active': true } }
     ]
   });
   await send(STAFF_PHONE, 'WALKIN ROOM 2 2HRS John Smith');
@@ -465,8 +465,8 @@ test('WALKIN refuses a room that is currently mid-clean — an immediate sale, n
 test('WALKIN still books a different, available room even when the requested one is mid-clean', async () => {
   const ctx = start({
     WS_Rooms: [
-      { id: 'recR1', fields: { 'Room Name': 'Room 01', 'Room Number': 1, 'Status': 'Available', 'Property': ['recP1'] } },
-      { id: 'recR2', fields: { 'Room Name': 'Room 02', 'Room Number': 2, 'Status': 'Cleaning', 'Property': ['recP1'] } }
+      { id: 'recR1', fields: { 'Room Name': 'Room 01', 'Room Number': 1, 'Status': 'Available', 'Property': ['recP1'], 'Active': true } },
+      { id: 'recR2', fields: { 'Room Name': 'Room 02', 'Room Number': 2, 'Status': 'Cleaning', 'Property': ['recP1'], 'Active': true } }
     ]
   });
   await send(STAFF_PHONE, 'WALKIN ROOM 1 2HRS John Smith');
@@ -484,8 +484,8 @@ test('the same phone can still do ordinary cleaner work — WALKIN did not swall
       fields: { 'Cleaner Name': 'Eric', 'Phone Number': STAFF_PHONE, 'Active': true, 'Assigned Property': ['recP1'] }
     }],
     WS_Rooms: [
-      { id: 'recR1', fields: { 'Room Name': 'Room 01', 'Room Number': 1, 'Status': 'Cleaning', 'Property': ['recP1'] } },
-      { id: 'recR2', fields: { 'Room Name': 'Room 02', 'Room Number': 2, 'Status': 'Available', 'Property': ['recP1'] } }
+      { id: 'recR1', fields: { 'Room Name': 'Room 01', 'Room Number': 1, 'Status': 'Cleaning', 'Property': ['recP1'], 'Active': true } },
+      { id: 'recR2', fields: { 'Room Name': 'Room 02', 'Room Number': 2, 'Status': 'Available', 'Property': ['recP1'], 'Active': true } }
     ]
   });
   await send(STAFF_PHONE, 'done');

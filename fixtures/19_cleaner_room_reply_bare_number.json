@@ -28,7 +28,8 @@
         "fields": {
           "Room Name": "Room 04",
           "Room Number": 4,
-          "Status": "Cleaning"
+          "Status": "Cleaning",
+          "Active": true
         }
       },
       {
@@ -36,7 +37,8 @@
         "fields": {
           "Room Name": "Room 07",
           "Room Number": 7,
-          "Status": "Cleaning"
+          "Status": "Cleaning",
+          "Active": true
         }
       }
     ],

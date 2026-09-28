@@ -31,7 +31,7 @@ function baseSeed(overrides = {}) {
       }
     }],
     WS_Rooms: [
-      { id: 'recR1', fields: { 'Room Name': 'Room 01', 'Room Number': 1, 'Status': 'Available', 'Property': ['recP1'] } }
+      { id: 'recR1', fields: { 'Room Name': 'Room 01', 'Room Number': 1, 'Status': 'Available', 'Property': ['recP1'], 'Active': true } }
     ],
     WS_Rates: [
       { id: 'recRateSingle', fields: { 'Rate Name': 'Single', 'Occupancy Type': 'Single', 'Rate Type': 'Per Night', 'Amount': 300, 'Active': true, 'Property': ['recP1'] } },

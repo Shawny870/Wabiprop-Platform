@@ -27,14 +27,16 @@
         "id": "recR1",
         "fields": {
           "Room Name": "Room 1",
-          "Status": "Cleaning"
+          "Status": "Cleaning",
+          "Active": true
         }
       },
       {
         "id": "recR2",
         "fields": {
           "Room Name": "Room 2",
-          "Status": "Available"
+          "Status": "Available",
+          "Active": true
         }
       }
     ],

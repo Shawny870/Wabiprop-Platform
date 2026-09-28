@@ -27,7 +27,8 @@
         "id": "recR1",
         "fields": {
           "Room Name": "Room 1",
-          "Status": "Available"
+          "Status": "Available",
+          "Active": true
         }
       }
     ],

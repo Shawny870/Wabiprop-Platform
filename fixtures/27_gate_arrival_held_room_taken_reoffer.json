@@ -21,7 +21,8 @@
           "Status": "Available",
           "Property": [
             "recP1"
-          ]
+          ],
+          "Active": true
         }
       },
       {
@@ -31,7 +32,8 @@
           "Status": "Available",
           "Property": [
             "recP1"
-          ]
+          ],
+          "Active": true
         }
       }
     ],

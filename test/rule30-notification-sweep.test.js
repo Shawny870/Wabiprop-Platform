@@ -47,7 +47,7 @@ function baseSeed(overrides = {}) {
       }
     }],
     WS_Rooms: [
-      { id: 'recR1', fields: { 'Room Name': 'Room 01', 'Room Number': 1, 'Status': 'Available', 'Property': ['recP1'] } }
+      { id: 'recR1', fields: { 'Room Name': 'Room 01', 'Room Number': 1, 'Status': 'Available', 'Property': ['recP1'], 'Active': true } }
     ],
     WS_Rates: [
       { id: 'recRateCouple', fields: { 'Rate Name': 'Couple', 'Occupancy Type': 'Couple', 'Amount': 400, 'Active': true, 'Property': ['recP1'] } }
@@ -158,7 +158,7 @@ test('runAutoCheckout: a failed warning-stamp write is logged loud but the warni
     airtable: new MockAirtable({
       WS_Properties: [{ id: 'recP1', fields: { 'Property Name': 'Test Lodge' } }],
       WS_Guests: [{ id: 'recG1', fields: { 'Guest Name': 'Jane Doe', 'Phone Number': GUEST_PHONE } }],
-      WS_Rooms: [{ id: 'recR1', fields: { 'Room Name': 'Room 01', 'Status': 'Occupied', 'Property': ['recP1'] } }],
+      WS_Rooms: [{ id: 'recR1', fields: { 'Room Name': 'Room 01', 'Status': 'Occupied', 'Property': ['recP1'], 'Active': true } }],
       WS_Bookings: [{
         id: 'recBook1',
         fields: { 'Guest': ['recG1'], 'Status': 'Checked In', 'Booking Type': 'Overnight', 'Room': ['recR1'], 'Check Out': minsBefore(1) }
@@ -202,7 +202,7 @@ function seedCheckedIn(overrides = {}) {
       id: 'recBook1',
       fields: { 'Guest': ['recG1'], 'Status': 'Checked In', 'Room': ['recR1'], 'Amount Due': 400, 'Checked In At': '2020-01-01T00:00:00.000Z' }
     }],
-    WS_Rooms: [{ id: 'recR1', fields: { 'Room Name': 'Room 01', 'Room Number': 1, 'Status': 'Occupied', 'Property': ['recP1'] } }],
+    WS_Rooms: [{ id: 'recR1', fields: { 'Room Name': 'Room 01', 'Room Number': 1, 'Status': 'Occupied', 'Property': ['recP1'], 'Active': true } }],
     WS_Cleaners: [{ id: 'recC1', fields: { 'Cleaner Name': 'Thandi', 'Phone Number': '27821110000', 'Active': true, 'Assigned Property': ['recP1'] } }],
     ...overrides
   });

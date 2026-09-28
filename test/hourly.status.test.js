@@ -48,8 +48,8 @@ function seed() {
       }
     }],
     WS_Rooms: [
-      { id: 'recR1', fields: { 'Room Name': 'Room 1', 'Status': 'Available', 'Property': ['recP1'] } },
-      { id: 'recR2', fields: { 'Room Name': 'Room 2', 'Status': 'Available', 'Property': ['recP1'] } }
+      { id: 'recR1', fields: { 'Room Name': 'Room 1', 'Status': 'Available', 'Property': ['recP1'], 'Active': true } },
+      { id: 'recR2', fields: { 'Room Name': 'Room 2', 'Status': 'Available', 'Property': ['recP1'], 'Active': true } }
     ],
     WS_Guests: [{
       id: 'recG1',

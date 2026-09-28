@@ -26,7 +26,7 @@ const enquiries = ctx => ctx.airtable.tables['WS_Enquiries'] || [];
 const outcomes = ctx => enquiries(ctx).map(e => e.fields['Outcome']);
 
 const property = { id: 'recP1', fields: { 'Property Name': 'Test Lodge', 'Phone Number ID': '111000111000', 'Notify Phone': '27831112222' } };
-const room = { id: 'recR1', fields: { 'Room Name': 'Room 1', 'Status': 'Available', 'Property': ['recP1'] } };
+const room = { id: 'recR1', fields: { 'Room Name': 'Room 1', 'Status': 'Available', 'Property': ['recP1'], 'Active': true } };
 const rates = [
   { id: 'recRS', fields: { 'Rate Name': 'Single', 'Rate Type': 'Per Night', 'Amount': 250, 'Active': true, 'Occupancy Type': 'Single', 'Property': ['recP1'] } },
   { id: 'recRC', fields: { 'Rate Name': 'Couple', 'Rate Type': 'Per Night', 'Amount': 400, 'Active': true, 'Occupancy Type': 'Couple', 'Property': ['recP1'] } }
@@ -69,7 +69,7 @@ test('B19: the full booked flow logs ONE Booked row despite passing through coll
 test('B19: property scoping — the enquiry row carries the messaged property, not another', async () => {
   const ctx = makeCtx({
     WS_Properties: [property, { id: 'recPB', fields: { 'Property Name': 'Other Lodge', 'Phone Number ID': '999', 'Notify Phone': '27830000009' } }],
-    WS_Rooms: [room, { id: 'recRB', fields: { 'Room Name': 'B1', 'Status': 'Available', 'Property': ['recPB'] } }],
+    WS_Rooms: [room, { id: 'recRB', fields: { 'Room Name': 'B1', 'Status': 'Available', 'Property': ['recPB'], 'Active': true } }],
     WS_Rates: rates,
     WS_Guests: [{ id: 'recG1', fields: { 'Guest Name': 'Unknown', 'Phone Number': FROM, 'Session State': 'AWAITING_DETAILS' } }],
     WS_Bookings: [], WS_Cleaners: []

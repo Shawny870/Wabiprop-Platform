@@ -46,7 +46,8 @@
           "Status": "Occupied",
           "Property": [
             "recP1"
-          ]
+          ],
+          "Active": true
         }
       },
       {
@@ -57,7 +58,8 @@
           "Status": "Cleaning",
           "Property": [
             "recP1"
-          ]
+          ],
+          "Active": true
         }
       }
     ],

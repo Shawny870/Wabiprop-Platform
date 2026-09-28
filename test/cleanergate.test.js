@@ -20,7 +20,7 @@ const TEMPLATE_NAME = 'wabistay_cleaner_gate_arrival';
 
 const propertyA = { id: 'recP1', fields: { 'Property Name': 'Test Lodge', 'Phone Number ID': TEST_ENV.WA_PHONE_NUMBER_ID, 'Notify Phone': '27831112222' } };
 const propertyB = { id: 'recP2', fields: { 'Property Name': 'Other Lodge', 'Phone Number ID': '222000222000', 'Notify Phone': '27839998888' } };
-const room = { id: 'recR1', fields: { 'Room Name': 'Room 1', 'Status': 'Available', 'Property': ['recP1'] } };
+const room = { id: 'recR1', fields: { 'Room Name': 'Room 1', 'Status': 'Available', 'Property': ['recP1'], 'Active': true } };
 const guest = { id: 'recG1', fields: { 'Guest Name': 'John Smith', 'Phone Number': '27821234567', 'Session State': 'CONFIRMED' } };
 const booking = { id: 'recB1', fields: { Guest: ['recG1'], Status: 'Confirmed' } };
 const cleanerA = { id: 'recC1', fields: { 'Cleaner Name': 'Thandi', 'Phone Number': '0821110000', Active: true, 'Assigned Property': ['recP1'] } };
