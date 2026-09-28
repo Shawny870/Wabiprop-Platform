@@ -53,6 +53,9 @@
       { "inputs": ["skip", "no", "none", "no thanks"], "action": "skipRatingFeedback", "next": "NEW" },
       { "inputs": "*", "action": "recordRatingFeedback", "next": "NEW" }
     ],
+    "HUMAN_HANDLING": [
+      { "inputs": "*", "action": "suppressedForHuman" }
+    ],
     "*": [
       { "inputs": "*", "action": "unknownStateReset", "next": "NEW" }
     ]

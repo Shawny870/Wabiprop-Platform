@@ -213,6 +213,27 @@ function metaTextPayload(from, text, id) {
   };
 }
 
+// Coexistence: a message_echoes webhook — a human's own outbound message,
+// sent via the native WhatsApp Business app. `to` is the guest; `from` is
+// this WABA's own number. Shaped nothing like metaTextPayload's `messages`
+// array — see handleMessageEcho's own comment for why it needs its own field.
+function metaEchoPayload(to, text, id) {
+  return {
+    object: 'whatsapp_business_account',
+    entry: [{
+      id: 'WABA_TEST',
+      changes: [{
+        field: 'smb_message_echoes',
+        value: {
+          messaging_product: 'whatsapp',
+          metadata: { display_phone_number: '27000000000', phone_number_id: TEST_ENV.WA_PHONE_NUMBER_ID },
+          message_echoes: [{ from: '27000000000', to, id: id || `wamid.echo.test.${++_wamidCounter}`, timestamp: '1750000000', type: 'text', text: { body: text } }]
+        }
+      }]
+    }]
+  };
+}
+
 function makeRes() {
   const res = { statusCode: null, body: null };
   res.status = code => { res.statusCode = code; return res; };
@@ -343,4 +364,4 @@ function assertFixture(assert, expect, ctx, res) {
   }
 }
 
-module.exports = { installEnv, runFixture, assertFixture, metaTextPayload, makeRes, TEST_ENV, installFetch, MockAirtable };
+module.exports = { installEnv, runFixture, assertFixture, metaTextPayload, metaEchoPayload, makeRes, TEST_ENV, installFetch, MockAirtable };

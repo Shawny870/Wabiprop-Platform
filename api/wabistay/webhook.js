@@ -3559,6 +3559,18 @@ const actions = {
     await sendWhatsApp(ctx.phone, msg('ratingFeedbackThanks'));
   },
 
+  // Coexistence: a human took over this conversation via the WhatsApp Business
+  // app. Every guest message lands here while suppressed and does nothing — no
+  // send, no state change (no `next` in this state's states.json row, so
+  // Session State stays HUMAN_HANDLING). The explicit "bot on" handback is
+  // deliberately NOT a row in this table — it only ever comes from
+  // handleMessageEcho below, reading the STAFF's own outbound message via the
+  // app, never from anything a guest could type here. A guest typing "bot on"
+  // by coincidence must not be able to end their own suppression.
+  async suppressedForHuman(ctx) {
+    logToAxiom('info', 'guest_message_suppressed_human_handling', { phone: ctx.phone, guestId: ctx.guest.id, text: ctx.text });
+  },
+
   // CHECKED_IN + "extend": B12. Push the checkout window out (uncapped, per the
   // 16 July lock — guests can extend repeatedly). Owner is notified on the FIRST
   // extension only (one notification per booking), tracked by the
@@ -5312,6 +5324,60 @@ async function dailySummaryHandler(req, res) {
   }
 }
 
+// ─── COEXISTENCE: MESSAGE ECHO HANDLING ─────────────────────────────────────
+// Meta ships a human's own outbound message (sent via the native WhatsApp
+// Business app while Cloud API coexistence is enabled) as a `message_echoes`
+// webhook — a different payload shape from `messages`, not a variant of it,
+// handled here rather than through the state-machine dispatcher below.
+//
+// Two jobs, and deliberately nothing else:
+//   1. First echo for a guest not already HUMAN_HANDLING → hand off: suppress
+//      the bot for that guest until an explicit handback.
+//   2. Echo text is exactly "bot on" (case-insensitive) AND the guest is
+//      currently HUMAN_HANDLING → hand back to NEW.
+//
+// Never sends the guest anything, either direction. Per the pre-check: a
+// human's reply does not reopen the Cloud API's 24h free-form window, so a
+// bot-sent message here could silently need a template that doesn't exist.
+// Staff's own message via the app is already the guest-visible confirmation
+// of a handoff; a handback is a control action with nothing new to tell the
+// guest. `to` on an echo is always the guest's own number — `from` is this
+// WABA's own number — so `to` alone identifies the conversation.
+const BOT_HANDBACK_COMMAND = 'bot on';
+
+async function handleMessageEcho(echo) {
+  const guestPhone = formatPhone(String(echo.to || ''));
+  if (!guestPhone) return;
+  const guestRecords = await airtableGet('WS_Guests', `{Phone Number} = '${guestPhone}'`);
+  const guest = guestRecords[0] || null;
+  if (!guest) {
+    // Staff messaged a number with no WS_Guests row yet — nothing to suppress;
+    // the bot was never going to auto-reply to a guest it doesn't know.
+    logToAxiom('info', 'message_echo_no_guest', { guestPhone });
+    return;
+  }
+
+  const echoText = (echo.text && echo.text.body ? String(echo.text.body) : '').trim().toLowerCase();
+  const currentState = guest.fields['Session State'];
+
+  if (echoText === BOT_HANDBACK_COMMAND) {
+    if (currentState !== 'HUMAN_HANDLING') {
+      // Not currently suppressed — a stray "bot on" must not reset a guest
+      // mid-flow (e.g. AWAITING_HOURLY_DETAILS). No-op, logged for visibility.
+      logToAxiom('info', 'bot_on_no_op', { guestPhone, guestId: guest.id, currentState });
+      return;
+    }
+    await updateGuestState(guest.id, { 'Session State': 'NEW' });
+    logToAxiom('info', 'human_handback', { guestPhone, guestId: guest.id });
+    return;
+  }
+
+  if (currentState === 'HUMAN_HANDLING') return; // already suppressed, nothing to do
+
+  await updateGuestState(guest.id, { 'Session State': 'HUMAN_HANDLING' });
+  logToAxiom('info', 'human_handoff', { guestPhone, guestId: guest.id, fromState: currentState || null });
+}
+
 // ─── DISPATCHER ──────────────────────────────────────────────────────────────
 // Reads states.json: global rows first (guarded), then the current state's rows.
 // A row matches when `inputs` is "*" or contains the lowercased message.
@@ -5554,6 +5620,22 @@ module.exports = async function handler(req, res) {
       return;
     }
 
+    // Coexistence: message_echoes — see handleMessageEcho above for why this
+    // is its own branch rather than falling through to the "not a message"
+    // check below (which would silently drop it, exactly the gap the
+    // coexistence pre-check identified). Kept here too, same reasoning as the
+    // statuses branch above, in case this handler is ever invoked directly.
+    const messageEchoes = value?.message_echoes;
+    if (messageEchoes && messageEchoes.length > 0) {
+      for (const echo of messageEchoes) {
+        await handleMessageEcho(echo).catch(err =>
+          logToAxiom('error', 'message_echo_handling_failed', { echoId: echo.id, error: err.message })
+        );
+      }
+      res.status(200).send('OK');
+      return;
+    }
+
     if (!messages || messages.length === 0) {
       // F2: respond 200 before returning on no-message events (status updates etc)
       res.status(200).send('OK');
@@ -5684,6 +5766,10 @@ module.exports.BLOCKING_BOOKING_STATUSES = BLOCKING_BOOKING_STATUSES;
 module.exports.BOOKABLE_ROOM_STATUSES = BOOKABLE_ROOM_STATUSES;
 module.exports.sendDailySummary = sendDailySummary;
 module.exports.sendOwnerSummary = sendOwnerSummary;
+// Coexistence: exported for direct unit testing (test/coexistence.test.js),
+// same rationale as the Rule 30 step 1 exports above.
+module.exports.handleMessageEcho = handleMessageEcho;
+module.exports.BOT_HANDBACK_COMMAND = BOT_HANDBACK_COMMAND;
 // Stage 3 part 3 prep (dailySummaryTemplateParams) — exported for isolated
 // unit testing per the TODO at sendDailySummary; NOT wired to a live send.
 module.exports.resolveOwnerName = resolveOwnerName;
