@@ -47,7 +47,7 @@ function seed(overrides = {}) {
       { id: 'recR1', fields: { 'Room Name': 'Room 01', 'Room Number': 1, 'Status': 'Available', 'Property': ['recP1'], 'Active': true } }
     ],
     WS_Rates: [
-      { id: 'recRateSingle', fields: { 'Rate Name': 'Single', 'Occupancy Type': 'Single', 'Amount': 250, 'Active': true, 'Property': ['recP1'] } }
+      { id: 'recRateSingle', fields: { 'Rate Name': 'Single', 'Rate Type': 'Per Night', 'Amount': 250, 'Active': true, 'Property': ['recP1'] } }
     ],
     WS_Guests: [],
     WS_Bookings: [],
@@ -139,7 +139,7 @@ test('overnight: a competing booking that lands between the pre-check and create
   assert.ok(asRecord, 'A\'s own booking still exists as a record');
   assert.strictEqual(asRecord.fields['Status'], 'Cancelled', 'but rolled back, not left Confirmed');
 
-  assert.strictEqual(guestRow(ctx, GUEST_A_PHONE).fields['Session State'], 'AWAITING_DETAILS', 'guest reset, not stuck in AWAITING_OCCUPANCY with no valid booking');
+  assert.strictEqual(guestRow(ctx, GUEST_A_PHONE).fields['Session State'], 'AWAITING_DETAILS', 'guest reset, not stuck in AWAITING_ETA with no valid booking');
   assert.match(texts(ctx, GUEST_A_PHONE), /fully booked/i, 'told no availability, not "booking received"');
   assert.ok(axiomEvents(ctx).includes('booking_race_lost'));
 });
@@ -154,7 +154,7 @@ test('overnight: no competitor — the ordinary single-guest booking is unaffect
   const live = bookings(ctx).filter(b => b.fields['Status'] !== 'Cancelled');
   assert.strictEqual(live.length, 1, 'the booking survives — the re-check does not manufacture a false conflict');
   assert.strictEqual(live[0].fields['Status'], 'Enquiry');
-  assert.match(texts(ctx, GUEST_A_PHONE), /occupancy|How many of you/i, 'flow proceeds normally to the occupancy question');
+  assert.match(texts(ctx, GUEST_A_PHONE), /R250 per night/i, 'flow proceeds normally straight to the flat-rate quote');
 });
 
 test('overnight: a rollback write that itself fails is logged loudly, not silently', async () => {

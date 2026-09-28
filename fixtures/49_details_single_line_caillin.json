@@ -1,6 +1,6 @@
 {
   "name": "parser: Caillin's real single-line input 'name 31July 2026 1 August 2026' parses correctly (F20)",
-  "comment": "Confirmed live: Caillin Mendes (a real prospect's guest) sent name + both dates on ONE line and the old three-separate-lines parser re-prompted three times until he abandoned the booking. Name is everything before the first date token; the two date-shaped spans become check-in/check-out. Years are explicit (2026), so the datetimes are pinned exactly. Flow then advances to the F19 occupancy step.",
+  "comment": "Confirmed live: Caillin Mendes (a real prospect's guest) sent name + both dates on ONE line and the old three-separate-lines parser re-prompted three times until he abandoned the booking. Name is everything before the first date token; the two date-shaped spans become check-in/check-out. Years are explicit (2026), so the datetimes are pinned exactly. Flow then applies the flat per-night rate and quotes immediately (CEO 2026-09-28).",
   "seed": {
     "WS_Properties": [
       {
@@ -17,7 +17,7 @@
       {
         "id": "recRATE_S",
         "fields": {
-          "Rate Name": "Standard Night Single",
+          "Rate Name": "Standard Night",
           "Rate Type": "Per Night",
           "Amount": 250,
           "Active": true,
@@ -75,7 +75,7 @@
         "id": "recG1",
         "fields": {
           "Guest Name": "Caillin Mendes",
-          "Session State": "AWAITING_OCCUPANCY"
+          "Session State": "AWAITING_ETA"
         }
       },
       {
@@ -100,6 +100,16 @@
         "table": "WS_Bookings",
         "fields": {
           "Booking Ref": "re:^WS-[A-Z0-9]{6}$"
+        }
+      },
+      {
+        "op": "update",
+        "table": "WS_Bookings",
+        "fields": {
+          "Rate Applied": [
+            "recRATE_S"
+          ],
+          "Amount Due": 250
         }
       },
       {
@@ -128,7 +138,7 @@
         "to": "27821234567",
         "includes": [
           "Thanks Caillin Mendes",
-          "How many of you are staying"
+          "R250 per night"
         ]
       }
     ]

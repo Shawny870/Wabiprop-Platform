@@ -60,7 +60,7 @@
         "id": "recG1",
         "fields": {
           "Guest Name": "John Smith",
-          "Session State": "AWAITING_OCCUPANCY"
+          "Session State": "AWAITING_ETA"
         }
       },
       {
@@ -108,7 +108,8 @@
       {
         "to": "27821234567",
         "includes": [
-          "How many of you are staying"
+          "owner will be in touch",
+          "finalise the price"
         ]
       }
     ]

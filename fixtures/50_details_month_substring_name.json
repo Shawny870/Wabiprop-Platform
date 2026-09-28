@@ -17,7 +17,7 @@
       {
         "id": "recRATE_S",
         "fields": {
-          "Rate Name": "Standard Night Single",
+          "Rate Name": "Standard Night",
           "Rate Type": "Per Night",
           "Amount": 250,
           "Active": true,
@@ -75,7 +75,7 @@
         "id": "recG1",
         "fields": {
           "Guest Name": "May Ndlovu",
-          "Session State": "AWAITING_OCCUPANCY"
+          "Session State": "AWAITING_ETA"
         }
       },
       {
@@ -103,6 +103,16 @@
         }
       },
       {
+        "op": "update",
+        "table": "WS_Bookings",
+        "fields": {
+          "Rate Applied": [
+            "recRATE_S"
+          ],
+          "Amount Due": 250
+        }
+      },
+      {
         "op": "create",
         "table": "WS_Enquiries",
         "fields": {
@@ -126,7 +136,7 @@
         "to": "27821234567",
         "includes": [
           "Thanks May Ndlovu",
-          "How many of you are staying"
+          "R250 per night"
         ]
       }
     ]

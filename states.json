@@ -21,10 +21,7 @@
     ],
     "AWAITING_DETAILS": [
       { "inputs": ["hourly"], "action": "startHourly", "next": "AWAITING_HOURLY_DETAILS" },
-      { "inputs": "*", "action": "collectDetails", "next": "AWAITING_OCCUPANCY" }
-    ],
-    "AWAITING_OCCUPANCY": [
-      { "inputs": "*", "action": "selectOccupancy", "next": "AWAITING_ETA" }
+      { "inputs": "*", "action": "collectDetails", "next": "AWAITING_ETA" }
     ],
     "AWAITING_HOURLY_DETAILS": [
       { "inputs": "*", "action": "collectHourlyDetails", "next": "AWAITING_HOURLY_DURATION" }
