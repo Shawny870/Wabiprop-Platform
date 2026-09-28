@@ -195,6 +195,29 @@ module.exports = async function handler(req, res) {
       return res.status(200).send('OK');
     }
 
+    // Coexistence: message_echoes — a human sent a message via the native
+    // WhatsApp Business app while Cloud API coexistence is enabled. Ships on
+    // its own `field: "smb_message_echoes"`, shaped as `value.message_echoes[]`
+    // rather than `value.messages[]` — a different payload entirely, not a
+    // variant of the normal message webhook, so it needs its own branch here
+    // rather than falling into the messages check below (which would silently
+    // drop it as "not a message" — exactly the gap the coexistence pre-check
+    // identified). Router only dispatches by phone_number_id per its own rule
+    // (Solar Geyser Principle) — the actual handoff/handback logic lives in
+    // the product handler (handleMessageEcho, api/wabistay/webhook.js).
+    const messageEchoes = body?.entry?.[0]?.changes?.[0]?.value?.message_echoes;
+    if (messageEchoes && messageEchoes.length > 0) {
+      if (phoneNumberId === WS_PHONE_NUMBER_ID_CONST) {
+        logToAxiom('info', 'router_route', { phone_number_id: phoneNumberId, destination: 'wabistay', reason: 'message_echo' });
+        console.log(`[Router] message_echoes → Wabistay (phone_number_id: ${phoneNumberId})`);
+        return wabistayHandler(req, res);
+      }
+      // Not Wabistay's number — no coexistence handling built for Wabiprop yet.
+      console.error(`[Router] message_echoes on non-Wabistay phone_number_id: ${phoneNumberId}`);
+      logToAxiom('error', 'router_echo_unknown_number_id', { phone_number_id: phoneNumberId });
+      return res.status(200).send('OK');
+    }
+
     // Neither a status callback nor a message — genuinely empty/unsupported payload
     const messages = body?.entry?.[0]?.changes?.[0]?.value?.messages;
     if (!messages || messages.length === 0) {
