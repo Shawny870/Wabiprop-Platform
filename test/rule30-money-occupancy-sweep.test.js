@@ -42,8 +42,8 @@ function baseSeed(overrides = {}) {
       { id: 'recR1', fields: { 'Room Name': 'Room 01', 'Room Number': 1, 'Status': 'Available', 'Property': ['recP1'], 'Active': true } }
     ],
     WS_Rates: [
-      { id: 'recRateSingle', fields: { 'Rate Name': 'Single', 'Occupancy Type': 'Single', 'Amount': 250, 'Active': true, 'Property': ['recP1'] } },
-      { id: 'recRateCouple', fields: { 'Rate Name': 'Couple', 'Occupancy Type': 'Couple', 'Amount': 400, 'Active': true, 'Property': ['recP1'] } }
+      { id: 'recRateSingle', fields: { 'Rate Name': 'Standard Night', 'Rate Type': 'Per Night', 'Amount': 250, 'Active': true, 'Property': ['recP1'] } },
+      { id: 'recRateCouple', fields: { 'Rate Name': 'Couple', 'Amount': 400, 'Active': true, 'Property': ['recP1'] } }
     ],
     WS_Guests: [],
     WS_Bookings: [],
@@ -88,44 +88,45 @@ function failNextWrite(ctx, { method, pathIncludes, bodyIncludes } = {}) {
   };
 }
 
-// ── selectOccupancy (FATAL: Rate Applied / Amount Due) ──────────────────────
+// ── collectDetails's flat-rate write (FATAL: Rate Applied / Amount Due) ─────
+// CEO decision, 2026-09-28: occupancy is gone, the rate is resolved and
+// applied within collectDetails itself, in the same turn as the dates. A
+// failed write here must NOT reset to AWAITING_DETAILS (that would let the
+// guest resend the same dates and self-block against the Enquiry booking
+// this very call already created and is holding) — the booking stays held,
+// the guest is told the owner will finalise price, same fail-closed shape as
+// the zero/ambiguous-rate case.
 
-function seedAwaitingOccupancy(fields = {}) {
-  return baseSeed({
-    WS_Guests: [{ id: 'recG1', fields: { 'Guest Name': 'Jane Doe', 'Phone Number': GUEST_PHONE, 'Session State': 'AWAITING_OCCUPANCY' } }],
-    WS_Bookings: [{
-      id: 'recBook1',
-      fields: {
-        'Guest': ['recG1'], 'Booking Type': 'Overnight', 'Status': 'Enquiry',
-        'Notes': 'Check-in: 1 September 2026 | Check-out: 2 September 2026',
-        'Check In': '2026-09-01T12:00:00.000Z', 'Check Out': '2026-09-02T08:00:00.000Z',
-        ...fields
-      }
-    }]
+test('collectDetails: a failed rate write tells the guest plainly, does not advance to a real quote, but keeps the booking held', async () => {
+  const ctx = start({
+    WS_Guests: [{ id: 'recG1', fields: { 'Guest Name': 'Unknown', 'Phone Number': GUEST_PHONE, 'Session State': 'AWAITING_DETAILS' } }]
   });
-}
+  failNextWrite(ctx, { method: 'PATCH', pathIncludes: 'WS_Bookings', bodyIncludes: 'Amount Due' });
 
-test('selectOccupancy: a failed rate write tells the guest plainly and does not advance state', async () => {
-  const ctx = start(seedAwaitingOccupancy());
-  failNextWrite(ctx, { method: 'PATCH', pathIncludes: 'WS_Bookings/recBook1', bodyIncludes: 'Amount Due' });
+  await send(GUEST_PHONE, 'Jane Doe\n1 September 2026\n2 September 2026');
 
-  await send(GUEST_PHONE, '2'); // "Two of us" -> Couple
-
-  assert.strictEqual(bookingRow(ctx, 'recBook1')['Amount Due'], undefined, 'no price written on a failed PATCH');
-  assert.strictEqual(guestRow(ctx, GUEST_PHONE).fields['Session State'], 'AWAITING_OCCUPANCY', 'not advanced to AWAITING_ETA with no rate behind it');
-  assert.match(texts(ctx, GUEST_PHONE), /went wrong/i);
-  assert.doesNotMatch(texts(ctx, GUEST_PHONE), /booking enquiry has been received/i);
-  assert.ok(axiomEvents(ctx).includes('occupancy_rate_write_failed'));
+  const booking = ctx.airtable.tables['WS_Bookings'].find(b => b.fields['Guest'] && b.fields['Guest'].includes('recG1'));
+  assert.ok(booking, 'booking still exists — the room stays held');
+  assert.strictEqual(booking.fields['Status'], 'Enquiry');
+  assert.strictEqual(booking.fields['Amount Due'], undefined, 'no price written on a failed PATCH');
+  assert.strictEqual(guestRow(ctx, GUEST_PHONE).fields['Session State'], 'AWAITING_ETA', 'still moves forward — never reset to AWAITING_DETAILS, which would self-block on the same dates');
+  assert.match(texts(ctx, GUEST_PHONE), /owner will be in touch/i);
+  assert.doesNotMatch(texts(ctx, GUEST_PHONE), /R250 per night/i);
+  assert.ok(axiomEvents(ctx).includes('overnight_rate_write_failed'));
 });
 
-test('selectOccupancy: a successful rate write is unaffected by the new check', async () => {
-  const ctx = start(seedAwaitingOccupancy());
+test('collectDetails: a successful rate write applies the flat per-night rate and quotes it', async () => {
+  const ctx = start({
+    WS_Guests: [{ id: 'recG1', fields: { 'Guest Name': 'Unknown', 'Phone Number': GUEST_PHONE, 'Session State': 'AWAITING_DETAILS' } }]
+  });
 
-  await send(GUEST_PHONE, '2');
+  await send(GUEST_PHONE, 'Jane Doe\n1 September 2026\n2 September 2026');
 
-  assert.strictEqual(bookingRow(ctx, 'recBook1')['Amount Due'], 400);
+  const booking = ctx.airtable.tables['WS_Bookings'].find(b => b.fields['Guest'] && b.fields['Guest'].includes('recG1'));
+  assert.strictEqual(booking.fields['Amount Due'], 250);
+  assert.deepStrictEqual(booking.fields['Rate Applied'], ['recRateSingle']);
   assert.strictEqual(guestRow(ctx, GUEST_PHONE).fields['Session State'], 'AWAITING_ETA');
-  assert.match(texts(ctx, GUEST_PHONE), /booking enquiry has been received/i);
+  assert.match(texts(ctx, GUEST_PHONE), /R250 per night/i);
 });
 
 // ── selectHourlyDuration (FATAL: core confirm write; NON-FATAL: >3hr cancel) ─
@@ -475,5 +476,5 @@ test('collectDetails: a failed Booking Ref writeback is logged loud but the book
   assert.ok(booking, 'booking still exists');
   assert.strictEqual(booking.fields['Status'], 'Enquiry');
   assert.ok(axiomEvents(ctx).includes('collectdetails_bookingref_writeback_failed'));
-  assert.match(texts(ctx, GUEST_PHONE), /occupancy|How many of you/i, 'flow proceeds normally to the occupancy question');
+  assert.match(texts(ctx, GUEST_PHONE), /R250 per night/i, 'flow proceeds normally straight to the flat-rate quote');
 });

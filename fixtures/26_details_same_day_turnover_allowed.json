@@ -86,7 +86,7 @@
         "id": "recG1",
         "fields": {
           "Guest Name": "John Smith",
-          "Session State": "AWAITING_OCCUPANCY"
+          "Session State": "AWAITING_ETA"
         }
       },
       {
@@ -105,6 +105,16 @@
         "table": "WS_Bookings",
         "fields": {
           "Booking Ref": "re:^WS-[A-Z0-9]{6}$"
+        }
+      },
+      {
+        "op": "update",
+        "table": "WS_Bookings",
+        "fields": {
+          "Rate Applied": [
+            "recRATE1"
+          ],
+          "Amount Due": 350
         }
       },
       {
@@ -131,7 +141,7 @@
         "to": "27821234567",
         "includes": [
           "Thanks John Smith",
-          "How many of you are staying"
+          "R350 per night"
         ]
       }
     ]

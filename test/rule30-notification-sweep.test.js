@@ -190,7 +190,7 @@ test('collectDetails: a failed WS_Enquiries log write is logged loud but the boo
 
   assert.strictEqual(ctx.airtable.tables['WS_Enquiries'].length, 0, 'the enquiry row genuinely failed to write');
   assert.ok(axiomEvents(ctx).includes('enquiry_log_write_failed'));
-  assert.match(texts(ctx, GUEST_PHONE), /occupancy|How many of you/i, 'the booking flow proceeds regardless');
+  assert.match(texts(ctx, GUEST_PHONE), /owner will be in touch/i, 'the booking flow proceeds regardless');
 });
 
 // ── NON-FATAL: cleaner dispatch via free-form sendWhatsApp ──────────────────
@@ -230,7 +230,7 @@ test('collectDetails: a failed owner new-booking notify is logged loud but the g
   await send(GUEST_PHONE, 'Jane Doe\n1 September 2026\n2 September 2026');
 
   assert.ok(axiomEvents(ctx).includes('owner_new_booking_notify_failed'));
-  assert.match(texts(ctx, GUEST_PHONE), /How many of you/i, 'the guest still gets the occupancy question');
+  assert.match(texts(ctx, GUEST_PHONE), /owner will be in touch/i, 'the guest still gets a reply even though the owner notify failed');
 });
 
 test('extendStay: a failed owner extension notify is logged loud but the guest is still confirmed', async () => {

@@ -4,11 +4,9 @@
 // Diagnosed shape (not assumed from the symptom): the create's return value
 // was checked only to pick between rollback/booked-log sub-branches, never to
 // guard whether the guest reply, owner notify, or Session State advance
-// should happen at all. Session State was already written to AWAITING_OCCUPANCY
+// should happen at all. Session State was already written to the next state
 // BEFORE the create ran, so on outright create failure the guest was left
-// there with no booking behind it — the next message hits selectOccupancy,
-// finds nothing, and just re-prompts the same dead question forever with no
-// path back to AWAITING_DETAILS. The owner also got a false "new booking"
+// there with no booking behind it. The owner also got a false "new booking"
 // notification for a booking that doesn't exist.
 //
 // collectHourlyDetails had the identical unchecked-write pattern (its return
@@ -110,7 +108,7 @@ test('overnight: after a failed create, an immediate retry with the same details
 
   const live = bookings(ctx).filter(b => b.fields['Status'] !== 'Cancelled');
   assert.strictEqual(live.length, 1, 'the retry actually creates a booking');
-  assert.match(texts(ctx, GUEST_PHONE), /occupancy|How many of you/i, 'the retry proceeds to the normal next step');
+  assert.match(texts(ctx, GUEST_PHONE), /owner will be in touch/i, 'the retry proceeds to the normal next step');
 });
 
 test('overnight: a successful create is completely unaffected by the new check', async () => {
@@ -121,7 +119,7 @@ test('overnight: a successful create is completely unaffected by the new check',
   await send(GUEST_PHONE, 'Jane Doe\n1 September 2026\n2 September 2026');
 
   assert.strictEqual(bookings(ctx).length, 1);
-  assert.strictEqual(guestRow(ctx, GUEST_PHONE).fields['Session State'], 'AWAITING_OCCUPANCY');
+  assert.strictEqual(guestRow(ctx, GUEST_PHONE).fields['Session State'], 'AWAITING_ETA');
   assert.strictEqual(ctx.sends.filter(s => s.to === '27830000001').length, 1, 'owner is notified normally on a real booking');
 });
 

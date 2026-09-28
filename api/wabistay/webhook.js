@@ -1815,8 +1815,11 @@ const guards = {
   },
 
   // Universal escape hatch for the guest-side AWAITING_* limbo states
-  // (AWAITING_STAY_TYPE / AWAITING_DETAILS / AWAITING_OCCUPANCY /
-  // AWAITING_HOURLY_DETAILS / AWAITING_HOURLY_DURATION / AWAITING_ETA). Found
+  // (AWAITING_STAY_TYPE / AWAITING_DETAILS / AWAITING_HOURLY_DETAILS /
+  // AWAITING_HOURLY_DURATION / AWAITING_ETA — AWAITING_OCCUPANCY removed from
+  // states.json, CEO decision 2026-09-28, but this guard's `startsWith`
+  // check still catches any straggler still literally in that state in
+  // Airtable). Found
   // via live testing: a guest in one of these states whose input never
   // satisfies that state's own free-text parser (wrong format, or a reply
   // meant for a different flow entirely) gets the same reprompt forever —
@@ -2734,8 +2737,8 @@ const actions = {
       return;
     }
 
-    // Unreadable answer — zero writes, same re-prompt-in-place pattern as
-    // selectOccupancy's own invalid-answer branch.
+    // Unreadable answer — zero writes, same re-prompt-in-place pattern used
+    // throughout this file for an unparseable numbered menu answer.
     await sendWhatsApp(ctx.phone, msg('stayTypeReprompt', { guestName }));
   },
 
@@ -2836,14 +2839,11 @@ const actions = {
       'Last Inbound At': now.toISOString() // B19: staleness anchor for the abandonment sweep
     }, { phone: ctx.phone });
 
-    // F19 (Rate-fix): the rate is NOT chosen here any more. It was `activeRates[0]`
-    // — no sort, no filter — so pricing was silently position-dependent: reorder the
-    // WS_Rates view and every couple's price flipped with zero code change and zero
-    // signal. Rate selection now waits for the occupancy answer (AWAITING_OCCUPANCY →
-    // selectOccupancy), which matches on {Occupancy Type} rather than array position.
-    // The booking is created here, unpriced, with the room already held — so the
-    // occupancy question is answered against a real, blocking hold, and Amount Due /
-    // Rate Applied are filled in the next step.
+    // Flat per-night rate (CEO decision, 2026-09-28): rooms are all the same
+    // size, so occupancy is no longer asked — every guest gets the one active
+    // Per Night rate for this property. The booking is created here, unpriced,
+    // with the room already held; the rate is resolved and applied further
+    // down in this same turn, once the create/rollback race check has passed.
     const bookingData = {
       'Guest': [ctx.guest.id],
       'Booking Type': 'Overnight',
@@ -2893,7 +2893,7 @@ const actions = {
             reason: 'lost the availability race AND the Cancelled write failed — booking may still be holding a contested room'
           });
         }
-        // The guest's Session State was already advanced to AWAITING_OCCUPANCY
+        // The guest's Session State was already advanced to AWAITING_ETA
         // above, before this booking existed to occupy that state. Leaving them
         // there with no valid booking is the same stuck-loop symptom PR1 exists
         // to prevent, just reached via the race instead of a create failure —
@@ -2922,11 +2922,11 @@ const actions = {
           phone: ctx.phone, bookingId: booking.id, bookingRef, error: JSON.stringify(refWrite.error)
         });
       }
-      // B19: Booked, logged at creation. recordEta re-affirms on confirmation but
-      // the booking-id dedup keeps it to one row.
-      await logEnquiry(ctx.property, ctx.phone, 'Booked', {
-        checkInIso, checkOutIso, bookingType: 'Overnight', bookingId: booking.id
-      });
+      // CEO decision, 2026-09-28: 'Booked' used to log here, right after
+      // creation and before any price existed — so a guest who abandoned
+      // right after giving dates was already logged Booked with no quote
+      // ever sent. Moved to fire only once the flow actually reaches its
+      // quote (or fail-closed contact-owner) terminal, further down.
     }
     logToAxiom(booking.id ? 'info' : 'error', 'booking_create', {
       phone: ctx.phone,
@@ -2939,24 +2939,75 @@ const actions = {
     // F41-4 (fix-order item 4): the create itself failed outright — no room was
     // held, no booking exists. Session State was already written to ctx.next
     // above, before this create ran, so left unhandled the guest silently
-    // stayed in AWAITING_OCCUPANCY with nothing behind it — selectOccupancy's
-    // next turn finds no matching Enquiry row and just re-prompts forever,
-    // with no path back to AWAITING_DETAILS. Reset here, tell the guest
-    // plainly, and skip the owner notify — there is nothing for the owner to
-    // action.
+    // stayed in AWAITING_ETA with nothing behind it. Reset here, tell the guest
+    // plainly, and skip the owner notify and rate lookup — there is nothing for
+    // anyone to action.
     if (!booking.id) {
       await updateGuestState(ctx.guest.id, { 'Session State': 'AWAITING_DETAILS', 'Last Inbound At': new Date().toISOString() });
       await sendWhatsApp(ctx.phone, msg('bookingCreateFailed', { guestName }));
       return;
     }
 
-    // F7: notify owner on new booking (owner copy carries no rate, so it is
-    // correct to send before occupancy is chosen — the human owner sees the
-    // enquiry immediately and can finalise price if the fail-closed path fires).
+    // Flat per-night rate (CEO decision, 2026-09-28, replaces F19's occupancy-
+    // based selection): the one active Per Night rate for this property. Fail
+    // closed on zero OR more than one match — never guess, never fall back to
+    // array position. This mirrors F19's own fail-closed posture, just against
+    // a different ambiguity (no {Occupancy Type} to disambiguate any more).
+    const allActiveRates = await airtableGet('WS_Rates', `AND({Active} = TRUE(), {Rate Type} = 'Per Night')`);
+    const nightlyRates = allActiveRates.filter(r => (r.fields['Property'] || []).includes(ctx.property.id));
+    const rate = nightlyRates.length === 1 ? nightlyRates[0] : null;
+    // Whether a price actually got written and can be quoted. Starts false; a
+    // rate-write failure below also lands here, NOT reset to AWAITING_DETAILS —
+    // that would send the guest back through collectDetails with the same
+    // dates, which would immediately self-block against the Enquiry booking
+    // this very call already created and is holding. The booking already
+    // exists either way, so the guest stays in AWAITING_ETA and the owner
+    // finalises price manually, same as the zero/ambiguous-rate case.
+    let priced = false;
+
+    if (!rate) {
+      // Zero configured, or more than one active Per Night rate for this
+      // property (ambiguous — the property needs a human to sort out its own
+      // rate config, this is never guessed at runtime).
+      logToAxiom('warn', 'overnight_rate_lookup_not_singular', {
+        phone: ctx.phone, propertyId: ctx.property.id, bookingId: booking.id, matchCount: nightlyRates.length
+      });
+    } else {
+      // Rule 30 step 2, slice 1: FATAL on failure — this write sets the price
+      // the guest is about to be told and billed, so an unchecked failure here
+      // would confirm a booking at a rate that was never actually saved.
+      const rateWrite = await airtableUpdate('WS_Bookings', booking.id, {
+        'Rate Applied': [rate.id],
+        'Amount Due': rate.fields['Amount']
+      });
+      if (rateWrite && rateWrite.error) {
+        logToAxiom('error', 'overnight_rate_write_failed', {
+          phone: ctx.phone, bookingId: booking.id, amount: rate.fields['Amount'], error: JSON.stringify(rateWrite.error)
+        });
+      } else {
+        priced = true;
+      }
+    }
+
+    // B19: logged here, at the same point the guest is actually quoted (or, in
+    // the fail-closed branch, told the owner will finalise price) — CEO
+    // decision, 2026-09-28. Previously logged right after creation, before any
+    // price existed, so an abandoning guest was already marked Booked with no
+    // quote ever sent. recordEta re-affirms on confirmation but the booking-id
+    // dedup keeps it to one row.
+    await logEnquiry(ctx.property, ctx.phone, 'Booked', {
+      checkInIso, checkOutIso, bookingType: 'Overnight', bookingId: booking.id
+    });
+
+    // F7: notify owner on new booking. Moved to fire after the price is quoted
+    // (CEO decision, 2026-09-28) — previously sent right after creation, before
+    // the guest had any price, which meant reception got an alert for an
+    // enquiry the guest might abandon before ever seeing a number.
     if (OWNER_PHONE) {
       logOwnerSendWindow('new_booking', OWNER_PHONE, ctx.phone); // B17 instrumentation
       // Rule 30 step 2, slice 2: checked but non-fatal — courtesy notification,
-      // the guest already got their own occupancyMenu reply independent of this.
+      // the guest already got their own quote/contact-owner reply independent
+      // of this.
       const ownerSend = await sendWhatsApp(OWNER_PHONE, msg('ownerNewBooking', {
         guestName, phone: ctx.phone, bookingRef, checkIn, checkOut: checkOut || 'TBC'
       }));
@@ -2967,89 +3018,11 @@ const actions = {
       }
     }
 
-    // F19: ask occupancy (numbered menu, Rule 11) instead of confirming the
-    // booking — the rate depends on the answer, so bookingReceived now fires from
-    // selectOccupancy once a rate has been matched.
-    await sendWhatsApp(ctx.phone, msg('occupancyMenu', { guestName }));
-  },
-
-  // AWAITING_OCCUPANCY: F19 (Rate-fix). Map the numbered occupancy answer to an
-  // {Occupancy Type} and select the matching WS_Rates row by that field — NEVER
-  // by array position. Fail closed: if no rate row matches the chosen occupancy
-  // for this property, do not fall back to activeRates[0]; route to a contact-the-
-  // owner message and never quote a price picked by position.
-  async selectOccupancy(ctx) {
-    const OCCUPANCY_BY_CHOICE = {
-      '1': 'Single', 'just me': 'Single',
-      '2': 'Couple', 'two of us': 'Couple'
-    };
-    const occupancyType = OCCUPANCY_BY_CHOICE[ctx.text] || null;
-
-    // Invalid / unreadable answer — re-prompt with zero writes (mirrors the
-    // hourly duration re-prompt). Resolved before any Airtable read so a bad
-    // answer costs nothing and cannot write.
-    if (!occupancyType) {
-      await sendWhatsApp(ctx.phone, msg('occupancyMenu', { guestName: ctx.guest.fields['Guest Name'] }));
-      return;
-    }
-
-    // The unpriced overnight hold collectDetails created for this guest.
-    const enquiries = await airtableGetBookingsByGuestId(ctx.guest.id, 'Enquiry');
-    const booking = enquiries.find(b => b.fields['Booking Type'] === 'Overnight' && b.fields['Check Out']) || null;
-    if (!booking) {
-      // Flow lost its footing (no pending overnight enquiry) — re-prompt rather
-      // than dead-end. Still zero writes.
-      await sendWhatsApp(ctx.phone, msg('occupancyMenu', { guestName: ctx.guest.fields['Guest Name'] }));
-      return;
-    }
-
-    // F5-style JS filter — see greetAndAskStayType. Match on {Occupancy Type}, the
-    // whole point of F19: the selection is by field value, invariant to the order
-    // Airtable returns the rows in.
-    const allActiveRates = await airtableGet('WS_Rates', `{Active} = TRUE()`);
-    const activeRates = allActiveRates.filter(r => (r.fields['Property'] || []).includes(ctx.property.id));
-    const rate = activeRates.find(r => r.fields['Occupancy Type'] === occupancyType) || null;
-
-    const guestName = ctx.guest.fields['Guest Name'];
-
-    if (!rate) {
-      // Fail closed. No rate write, no positional fallback. Advance to
-      // AWAITING_ETA so the (already owner-notified) booking can still complete;
-      // the owner finalises the price offline.
-      logToAxiom('warn', 'occupancy_no_matching_rate', {
-        phone: ctx.phone, propertyId: ctx.property.id, occupancyType
-      });
-      await updateGuestState(ctx.guest.id, { 'Session State': ctx.next, 'Last Inbound At': new Date().toISOString() });
+    if (!priced) {
       await sendWhatsApp(ctx.phone, msg('occupancyContactOwner', { guestName }));
       return;
     }
 
-    // Rule 30 step 2, slice 1: FATAL on failure — this write sets the price the
-    // guest is about to be told and billed, so an unchecked failure here would
-    // confirm a booking at a rate that was never actually saved. Session State
-    // is deliberately NOT advanced on failure, so the guest's next "1"/"2" reply
-    // re-runs this same handler rather than landing in AWAITING_ETA with no
-    // rate behind it.
-    const rateWrite = await airtableUpdate('WS_Bookings', booking.id, {
-      'Rate Applied': [rate.id],
-      'Amount Due': rate.fields['Amount']
-    });
-    if (rateWrite && rateWrite.error) {
-      logToAxiom('error', 'occupancy_rate_write_failed', {
-        phone: ctx.phone, bookingId: booking.id, occupancyType,
-        amount: rate.fields['Amount'], error: JSON.stringify(rateWrite.error)
-      });
-      await sendWhatsApp(ctx.phone, msg('occupancyWriteFailed', { guestName }));
-      return;
-    }
-    await updateGuestState(ctx.guest.id, { 'Session State': ctx.next, 'Last Inbound At': new Date().toISOString() });
-    logToAxiom('info', 'occupancy_selected', {
-      phone: ctx.phone, guestId: ctx.guest.id, occupancyType, amount: rate.fields['Amount']
-    });
-
-    const { checkIn, checkOut } = checkDatesFromNotes(booking.fields['Notes']);
-    const bookingRef = booking.fields['Booking Ref']
-      || (booking.id ? `WS-${booking.id.slice(-6).toUpperCase()}` : 'WS-000001');
     await sendWhatsApp(ctx.phone, msg('bookingReceived', {
       guestName, bookingRef, checkIn, checkOut,
       rateLine: `*Rate:* R${rate.fields['Amount']} per night`

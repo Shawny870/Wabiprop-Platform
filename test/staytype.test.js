@@ -8,11 +8,12 @@
 // existing "hourly" keyword shortcut still works at every entry point.
 //
 // Rule 29 — interaction surface: this reorders NEW's fallback destination and
-// inserts one new state ahead of AWAITING_DETAILS. AWAITING_OCCUPANCY
-// (Single/Couple, F19 rate-fix) and AWAITING_HOURLY_DETAILS/DURATION are
-// UNCHANGED — this only changes what precedes them, not their own logic. No
-// shared writable state with those states beyond Session State itself, which
-// every state transition already owns exclusively per guest.
+// inserts one new state ahead of AWAITING_DETAILS. AWAITING_HOURLY_DETAILS/
+// DURATION are UNCHANGED — this only changes what precedes them, not their
+// own logic. No shared writable state beyond Session State itself, which
+// every state transition already owns exclusively per guest. (AWAITING_
+// OCCUPANCY itself was later removed entirely — CEO decision, 2026-09-28,
+// flat per-night rate, no occupancy question.)
 
 const { test } = require('node:test');
 const assert = require('node:assert');
@@ -189,5 +190,5 @@ test('End-to-end: short-stay-then-multi-day-reconsidered guest can still complet
   const booking = ctx.airtable.tables['WS_Bookings'][0];
   assert.ok(booking, 'a booking was created');
   assert.strictEqual(booking.fields['Booking Type'], 'Overnight');
-  assert.strictEqual(guestRow(ctx).fields['Session State'], 'AWAITING_OCCUPANCY', 'still lands in the unchanged occupancy step next');
+  assert.strictEqual(guestRow(ctx).fields['Session State'], 'AWAITING_ETA', 'still completes into the unchanged next step (occupancy removed, CEO 2026-09-28)');
 });

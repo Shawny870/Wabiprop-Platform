@@ -1,5 +1,5 @@
 {
-  "name": "details: name + dates creates Enquiry booking with structured SAST datetimes (B7/F15), writes Booking Ref (F13), notifies owner (F7), asks occupancy (F19)",
+  "name": "details: name + dates creates Enquiry booking with structured SAST datetimes (B7/F15), writes Booking Ref (F13), applies the flat per-night rate, notifies owner after the quote (CEO 2026-09-28)",
   "comment": "B7: the year in Check In/Check Out is deliberately a regex wildcard. '25 June' resolves against the real clock, so it means 2026 until 25 June 2026 passes and 2027 thereafter — pinning a year here would make this fixture rot on a calendar date. The month/day/time are exact, and test/dates.test.js pins the year rule against a frozen clock. Notes stays asserted byte-for-byte: B7 must not change it.",
   "seed": {
     "WS_Properties": [
@@ -74,7 +74,7 @@
         "id": "recG1",
         "fields": {
           "Guest Name": "John Smith",
-          "Session State": "AWAITING_OCCUPANCY"
+          "Session State": "AWAITING_ETA"
         }
       },
       {
@@ -105,6 +105,16 @@
         }
       },
       {
+        "op": "update",
+        "table": "WS_Bookings",
+        "fields": {
+          "Rate Applied": [
+            "recRATE1"
+          ],
+          "Amount Due": 350
+        }
+      },
+      {
         "op": "create",
         "table": "WS_Enquiries",
         "fields": {
@@ -131,9 +141,8 @@
         "to": "27821234567",
         "includes": [
           "Thanks John Smith",
-          "How many of you are staying",
-          "1 - Just me",
-          "2 - Two of us"
+          "R350 per night",
+          "What time do you expect to arrive"
         ]
       }
     ]

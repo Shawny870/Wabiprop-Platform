@@ -74,7 +74,7 @@
         "id": "recG1",
         "fields": {
           "Guest Name": "John Smith",
-          "Session State": "AWAITING_OCCUPANCY"
+          "Session State": "AWAITING_ETA"
         }
       },
       {
@@ -103,6 +103,16 @@
         }
       },
       {
+        "op": "update",
+        "table": "WS_Bookings",
+        "fields": {
+          "Rate Applied": [
+            "recRATE1"
+          ],
+          "Amount Due": 350
+        }
+      },
+      {
         "op": "create",
         "table": "WS_Enquiries",
         "fields": {
@@ -128,9 +138,8 @@
         "to": "27821234567",
         "includes": [
           "Thanks John Smith",
-          "How many of you are staying",
-          "1 - Just me",
-          "2 - Two of us"
+          "R350 per night",
+          "What time do you expect to arrive"
         ]
       }
     ]
