@@ -50,7 +50,7 @@ test('router: message on 1157302750805659 (Wabistay cutover number) dispatches t
           'Notify Phone': '27831112222'
         }
       }],
-      WS_Rooms: [{ id: 'recR1', fields: { 'Room Name': 'Room 1', Status: 'Available', Property: ['recP1'] } }],
+      WS_Rooms: [{ id: 'recR1', fields: { 'Room Name': 'Room 1', Status: 'Available', Property: ['recP1'], Active: true } }],
       WS_Rates: [{ id: 'recRATE1', fields: { 'Rate Name': 'Standard Overnight', 'Rate Type': 'Per Night', Amount: 350, Active: true, Property: ['recP1'] } }],
       WS_Guests: [],
       WS_Cleaners: []

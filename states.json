@@ -66,6 +66,7 @@
     "propertySuspendedRedirect": "Sorry, we can't take bookings through this chat right now. For an immediate booking, please call or WhatsApp us directly on {redirectPhoneText}.",
     "propertySuspendedNoNumberFallback": "Sorry, we can't take bookings through this chat right now. Please contact the guesthouse directly to book.",
     "greeting": "Hi! 👋 Welcome to {propertyName}{propertyCityLine}.\n\nWe currently have *{roomCountText}* available.\n\nAre you looking for a *short stay* (a few hours) or *multiple days*? Reply with a number:\n1 - Short stay\n2 - Multiple days",
+    "fullyBooked": "Hi! 👋 Welcome to {propertyName}{propertyCityLine}.\n\nSorry, we're fully booked right now. 😔 Please check back again soon, or contact us directly to check availability.",
     "stayTypeReprompt": "Sorry, I didn't quite get that. Please reply with a number:\n1 - Short stay\n2 - Multiple days",
     "hourlyRatesMenu": "*Short stay rates at {propertyName}:*\n{hourlyRateText}",
     "overnightRatesMenu": "*Overnight rates at {propertyName}:*\n{rateText}\n\nTo make your booking, please send:\n1. Your full name\n2. Check-in date (e.g. 25 June)\n3. Check-out date (e.g. 27 June)\n\nSend all three, each on a new line.",
