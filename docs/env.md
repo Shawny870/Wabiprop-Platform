@@ -79,6 +79,17 @@ enforced in production** — it ships in report-only mode by default.
 
 Until step 2 is done, treat the webhook as unauthenticated.
 
+## PayFast ITN verification (Payment Gating — transport layer only, not yet wired to a route)
+
+`lib/payfast.js` verifies PayFast Instant Transaction Notifications: four checks (signature, source IP, amount match, server round-trip confirmation), not a single HMAC comparison — see that file's header comment for why this is not `lib/hmac.js` with different strings. No webhook route reads these env vars yet; they exist so the module is ready the moment Phase 2 wires a route to it.
+
+| Variable | Scope | Notes |
+|---|---|---|
+| `PAYFAST_PASSPHRASE` | [PER-ENV] | The merchant "Salt Passphrase" set in the PayFast dashboard (Settings, or Sandbox → Account Information). **Required** for Subscriptions per PayFast's own docs. Absent is never treated as a pass — a missing passphrase changes what gets signed, so the signature check fails honestly rather than skipping the passphrase silently |
+| `PAYFAST_ITN_MODE` | optional | Same three-mode shape as `HMAC_MODE`, carried over deliberately (CEO-confirmed 2026-09-17): unset or `log` = run all four checks, log the real verdict, **always pass through** (safe default — this scheme was built from documentation, not yet proven against real PayFast traffic). `enforce` = reject if any of the four checks fails. `off` = no checks. An unrecognised value falls back to `log`, never `off` |
+
+**Known gap, not yet resolved (see `lib/payfast.js`'s `classifyPaymentStatus` and its header comment):** PayFast's docs document `payment_status: COMPLETE / CANCELLED` for subscriptions but no documented value for "this billing cycle's card charge failed, will retry." Do not wire Phase 2's suspend-on-failure logic against a guessed value — `classifyPaymentStatus` returns `'unknown'` for anything undocumented, deliberately not `'failed'`.
+
 ## Notifications and reporting
 
 | Variable | Scope | Notes |
