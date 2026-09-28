@@ -111,6 +111,24 @@ function setup(seed) {
   return ctx;
 }
 
+// dormant-report.js has no now-injection path — it reads the real clock, on
+// purpose (a live route has no business accepting a client-supplied "now").
+// So fixtures for its route-level tests must be anchored to the real clock
+// too, not to the frozen NOW above, or they go stale the moment real time
+// drifts past the frozen constant.
+const REAL_NOW = new Date();
+const realDaysAgo = n => new Date(REAL_NOW.getTime() - n * DAY_MS).toISOString();
+function propsReal(overrides) {
+  return [
+    { id: 'recFresh', fields: { 'Property Name': 'Fresh Lodge', 'Last Message Received': realDaysAgo(1), 'Last Owner App Open': realDaysAgo(1) } },
+    { id: 'recStaleMsg', fields: { 'Property Name': 'Stale Message Lodge', 'Last Message Received': realDaysAgo(15), 'Last Owner App Open': realDaysAgo(1) } },
+    { id: 'recStaleOpen', fields: { 'Property Name': 'Stale Open Lodge', 'Last Message Received': realDaysAgo(1), 'Last Owner App Open': realDaysAgo(15) } },
+    { id: 'recBothStale', fields: { 'Property Name': 'Both Stale Lodge', 'Last Message Received': realDaysAgo(20), 'Last Owner App Open': realDaysAgo(20) } },
+    { id: 'recNever', fields: { 'Property Name': 'Never Seen Lodge' } }, // neither field ever set
+    ...(overrides || [])
+  ];
+}
+
 test('dormant-report route: refuses with no MANUAL_REPORT_SECRET configured', async () => {
   delete process.env.MANUAL_REPORT_SECRET;
   setup({ WS_Properties: [] });
@@ -123,7 +141,7 @@ test('dormant-report route: refuses with no MANUAL_REPORT_SECRET configured', as
 
 test('dormant-report route: with a valid secret, returns BOTH distinct views read-only, defaulting to owner_open_only', async () => {
   process.env.MANUAL_REPORT_SECRET = 'test-secret';
-  const ctx = setup({ WS_Properties: props() });
+  const ctx = setup({ WS_Properties: propsReal() });
   delete require.cache[require.resolve('../api/wabistay/dormant-report.js')];
   const route = require('../api/wabistay/dormant-report.js');
   const res = fakeRes();
@@ -148,7 +166,7 @@ test('dormant-report route: with a valid secret, returns BOTH distinct views rea
 
 test('dormant-report route: mode=either still works as a non-default option', async () => {
   process.env.MANUAL_REPORT_SECRET = 'test-secret';
-  setup({ WS_Properties: props() });
+  setup({ WS_Properties: propsReal() });
   delete require.cache[require.resolve('../api/wabistay/dormant-report.js')];
   const route = require('../api/wabistay/dormant-report.js');
   const res = fakeRes();
