@@ -5468,10 +5468,39 @@ async function handleMessage(from, messageText, phoneNumberId, wamid) {
   // rather than following an existing pattern, so it's left as-is and named
   // explicitly rather than silently handled either way.
   if (property.fields['Subscription Status'] === 'Suspended' && !activeBooking) {
+    // CEO decision, 2026-09-28: every property is expected to carry a Guest
+    // Redirect Phone before it is ever suspended (true today for the one live
+    // property, Canary Street). This branch is the exception path for a
+    // property suspended before that number was set — the guest still needs
+    // a graceful reply (can't leave them on a broken/numberless redirect
+    // while the CEO gets alerted), and the CEO must be told directly rather
+    // than discover it from a confused guest. alertShawn is the existing
+    // CEO-facing alert channel (used for cron failures and gate_arrival's
+    // missing-cleaner case above) — reused as-is, no new notify mechanism.
+    // No per-property/per-day dedupe exists anywhere else in this codebase to
+    // reuse (checked); this fires on every message from an affected guest
+    // until the number is set, same fail-loud posture as the rest of this
+    // gate.
+    if (!property.fields['Guest Redirect Phone']) {
+      logToAxiom('error', 'suspended_property_missing_redirect_phone', {
+        phone, propertyId: property.id, sessionState
+      });
+      await alertShawn(
+        'suspended_property_missing_redirect_phone',
+        'A Suspended property has no Guest Redirect Phone set — a guest just hit the booking block and got the generic fallback message.',
+        { propertyId: property.id, propertyName: property.fields['Property Name'] || null }
+      );
+      await sendWhatsApp(phone, msg('propertySuspendedNoNumberFallback', {
+        propertyName: property.fields['Property Name']
+      }));
+      return;
+    }
     // msg() does plain string substitution (String(v)) with no null-handling
     // of its own — an unset 'Guest Redirect Phone' must not leak the literal
     // text "null" into a guest-facing message, so the fallback is resolved
-    // here, not left to the template.
+    // here, not left to the template. In practice unreachable now that the
+    // check above handles the missing-number case explicitly first — kept as
+    // a defensive second line, not the primary path.
     const redirectPhoneText = property.fields['Guest Redirect Phone'] || 'our team directly';
     logToAxiom('info', 'booking_blocked_property_suspended', {
       phone, propertyId: property.id, sessionState

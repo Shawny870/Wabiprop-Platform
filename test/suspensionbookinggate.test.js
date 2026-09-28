@@ -57,12 +57,12 @@ test('suspended property, first-ever contact (no guest record): gets ONLY the re
   });
   await send(FROM, 'hi');
   const out = texts(ctx);
-  assert.match(out, /automated booking is temporarily unavailable/);
+  assert.match(out, /can't take bookings through this chat right now/);
   assert.match(out, /27839998888/, 'the configured Guest Redirect Phone must appear in the message');
   assert.doesNotMatch(out, /Quick note before we start/, 'consent notice must NOT also fire — redirect only');
 });
 
-test('suspended property, no Guest Redirect Phone configured yet: falls back gracefully, never leaks literal "null"', async () => {
+test('suspended property, no Guest Redirect Phone configured yet: guest gets a graceful generic fallback, never leaks literal "null"', async () => {
   const noPhoneProperty = { id: 'recP1', fields: { ...suspendedProperty.fields, 'Guest Redirect Phone': undefined } };
   const ctx = makeCtx({
     WS_Properties: [noPhoneProperty], WS_Rooms: [room], WS_Rates: rates,
@@ -70,8 +70,22 @@ test('suspended property, no Guest Redirect Phone configured yet: falls back gra
   });
   await send(FROM, 'hi');
   const out = texts(ctx);
-  assert.match(out, /automated booking is temporarily unavailable/);
+  assert.match(out, /can't take bookings through this chat right now/);
+  assert.match(out, /contact the guesthouse directly/);
   assert.doesNotMatch(out, /null/i);
+});
+
+test('suspended property, no Guest Redirect Phone configured yet: CEO is alerted via the existing alertShawn channel, exactly once per message', async () => {
+  const noPhoneProperty = { id: 'recP1', fields: { ...suspendedProperty.fields, 'Guest Redirect Phone': undefined } };
+  const ctx = makeCtx({
+    WS_Properties: [noPhoneProperty], WS_Rooms: [room], WS_Rates: rates,
+    WS_Guests: [], WS_Bookings: [], WS_Cleaners: [],
+    WS_Config: [{ id: 'recCfg1', fields: { 'Alert Phone': '27811110000' } }]
+  });
+  await send(FROM, 'hi');
+  const alertSend = ctx.sends.find(s => s.to === '27811110000' && /missing_redirect_phone|Guest Redirect Phone/.test(s.body));
+  assert.ok(alertSend, 'alertShawn must fire when a Suspended property has no Guest Redirect Phone');
+  assert.strictEqual(ctx.axiom.some(e => e.event === 'suspended_property_missing_redirect_phone'), true, 'must be logged, not silent');
 });
 
 test('suspended property, guest mid-enquiry (AWAITING_DETAILS, not yet confirmed): still blocked, redirected instead of processing the booking', async () => {
@@ -82,7 +96,7 @@ test('suspended property, guest mid-enquiry (AWAITING_DETAILS, not yet confirmed
   });
   await send(FROM, 'John Smith\n1 Dec 2026\n3 Dec 2026');
   const out = texts(ctx);
-  assert.match(out, /automated booking is temporarily unavailable/);
+  assert.match(out, /can't take bookings through this chat right now/);
   assert.strictEqual(ctx.airtable.tables['WS_Bookings'].length, 0, 'no booking must be created for a suspended property');
 });
 
@@ -98,7 +112,7 @@ test('suspended property, guest WITH an existing confirmed booking: normal servi
   });
   await send(FROM, '1'); // gate arrival — normal transaction-completion flow
   const out = texts(ctx);
-  assert.doesNotMatch(out, /automated booking is temporarily unavailable/, 'a guest with an existing confirmed booking must never see the suspension redirect');
+  assert.doesNotMatch(out, /can't take bookings through this chat right now/, 'a guest with an existing confirmed booking must never see the suspension redirect');
 });
 
 test('suspended property, guest CHECKED_IN: normal service (e.g. checkout) continues uninterrupted', async () => {
@@ -113,7 +127,7 @@ test('suspended property, guest CHECKED_IN: normal service (e.g. checkout) conti
   });
   await send(FROM, 'random text');
   const out = texts(ctx);
-  assert.doesNotMatch(out, /automated booking is temporarily unavailable/);
+  assert.doesNotMatch(out, /can't take bookings through this chat right now/);
 });
 
 test('not-suspended property (no Subscription Status field at all): consent notice fires exactly as before — no regression on the ordinary path', async () => {
@@ -124,7 +138,7 @@ test('not-suspended property (no Subscription Status field at all): consent noti
   await send(FROM, 'hi');
   const out = texts(ctx);
   assert.match(out, /Quick note before we start/, 'consent notice must still fire for an unsuspended property');
-  assert.doesNotMatch(out, /automated booking is temporarily unavailable/);
+  assert.doesNotMatch(out, /can't take bookings through this chat right now/);
 });
 
 test('property with Subscription Status explicitly "Active": treated identically to unset — not suspended', async () => {
@@ -134,7 +148,7 @@ test('property with Subscription Status explicitly "Active": treated identically
     WS_Guests: [], WS_Bookings: [], WS_Cleaners: []
   });
   await send(FROM, 'hi');
-  assert.doesNotMatch(texts(ctx), /automated booking is temporarily unavailable/);
+  assert.doesNotMatch(texts(ctx), /can't take bookings through this chat right now/);
 });
 
 test('STOP still works on a suspended property, regardless of booking status — opt-out is a compliance concern, not a booking one', async () => {
