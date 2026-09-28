@@ -1443,6 +1443,95 @@ async function activeReceptionRolesForProperty(propertyId) {
   );
 }
 
+// ─── ESCALATION CONTACTS (shift-routing/escalation PR 2 of 11) ──────────────
+// Resolver only — nothing in this PR wires a notification flow to it (that's
+// PR 5/6 onward). Given a property, resolves the ordered on-duty → backup →
+// manager → owner escalation chain, skipping any tier with no active seat.
+//
+// CORRECTED PRECEDENT (see investigation report Correction #2): the original
+// design cited `WS_Owner_Notify` as precedent — that table does not exist on
+// main, it was unmerged WIP. The REAL, live precedent is `WS_Roles`, already
+// used by the Reception/PAID feature (PAID_ROLE_TYPES, above) and the WALKIN
+// feature (WALKIN_ROLE_TYPES, also above) — both confirmed real and shipped.
+//
+// CEO DECISION (2026-09-14), two halves, do not "helpfully" unify them later:
+//   1. On Duty / Backup / Manager tiers reuse `WS_Roles` directly.
+//      'On Duty' and 'Backup' are NEW Role Type values this PR introduces.
+//      'Manager' is NOT new — it reuses the exact same Role Type WALKIN_ROLE_TYPES
+//      already uses. Deliberate: a property's manager is one seat, one phone,
+//      one physical person, whether they're authorising a walk-in sale or being
+//      escalated to for a missed ack. Accepted coupling risk: changing a
+//      property's walk-in-authorized manager seat also changes its escalation
+//      manager. If that ever needs to diverge, it needs a NEW Role Type value
+//      at that point — do not silently split it now on spec.
+//   2. Owner tier is DELIBERATELY NOT a WS_Roles lookup, even though 'Owner' is
+//      already a live WALKIN_ROLE_TYPES value sitting right there. Owner
+//      contact has exactly one source of truth everywhere else in this
+//      codebase: `WS_Properties.'Notify Phone'`, falling back to `OWNER_PHONE`.
+//      Adding a second, WS_Roles-sourced owner phone — even a correct one —
+//      recreates the exact "plausible second data source" failure shape this
+//      investigation already hit twice (the fake WS_Owner_Notify and the
+//      unmerged gate-ack branch). One property, one phone per role, single
+//      mechanism per role, no exception for Owner just because WS_Roles
+//      happens to have a matching value. If a future session is tempted to
+//      route Owner through WS_Roles too "for consistency" — don't. This
+//      comment is the record of why not.
+//
+// Seam this reuse creates, called out per CEO instruction: the filter below
+// MUST use ESCALATION_TIER_ROLE_TYPES explicitly and must never widen to "any
+// active WS_Roles row for this property" — that would silently pull in
+// 'Reception' rows meant for the payment feature.
+const ESCALATION_TIER_ROLE_TYPES = ['On Duty', 'Backup', 'Manager'];
+
+// Scoped + filtered in JS, same reasoning as activeReceptionRolesForProperty
+// immediately above (filterByFormula on a linked field matches display value,
+// not id — not safe here either).
+async function activeEscalationRolesForProperty(propertyId) {
+  if (!propertyId) return [];
+  const roles = await airtableGet('WS_Roles', `{Active} = TRUE()`);
+  return roles.filter(r =>
+    ESCALATION_TIER_ROLE_TYPES.includes(r.fields['Role Type']) &&
+    (r.fields['Property'] || []).includes(propertyId) &&
+    r.fields['Current Phone']
+  );
+}
+
+// Walks ESCALATION_TIER_ROLE_TYPES in order, skipping any tier with no active
+// seat — "the resolver must skip missing tiers gracefully rather than assume
+// fixed depth" (investigation doc, Decisions Already Locked In). A property
+// with no Backup configured simply has no 'Backup' entry in the returned
+// chain; it is not a null placeholder or a thrown error.
+//
+// Owner is always appended last and is the one tier NOT sourced from
+// `roles` — see the header comment above for why this must stay that way.
+// Owner is effectively never "missing": `OWNER_PHONE` is the existing
+// last-resort fallback used everywhere else Notify Phone might be unset, so
+// this mirrors that same fallback chain rather than inventing a new one.
+//
+// Returns raw, unformatted phone strings (same convention as
+// activeReceptionRolesForProperty/activeCleanersForProperty — formatPhone()
+// is applied by the caller at the actual send site, not here) since this PR
+// deliberately does not wire any send.
+async function resolveEscalationChain(propertyId, property) {
+  const roles = await activeEscalationRolesForProperty(propertyId);
+  const chain = [];
+
+  for (const tier of ESCALATION_TIER_ROLE_TYPES) {
+    const seat = roles.find(r => r.fields['Role Type'] === tier);
+    if (seat) {
+      chain.push({ tier, phone: String(seat.fields['Current Phone']), roleId: seat.id });
+    }
+  }
+
+  const notifyPhone = property && property.fields && property.fields['Notify Phone'];
+  const ownerPhone = notifyPhone || OWNER_PHONE || null;
+  if (ownerPhone) {
+    chain.push({ tier: 'Owner', phone: String(ownerPhone), roleId: null });
+  }
+
+  return chain;
+}
+
 // Exact match only — never `roomMatchesText`, whose \b<number>\b test would
 // match a room on the DURATION digit of the same command. `Room 01` is the live
 // name shape and `Room Number` is 1, so both routes have to be tried; a token
@@ -5720,6 +5809,13 @@ module.exports.inactiveByMessageActivity = inactiveByMessageActivity;
 // gateAckGraceMs() is NOT the precedent this follows.
 module.exports.escalationTimeoutMs = escalationTimeoutMs;
 module.exports.ESCALATION_TIMEOUT_DEFAULT_MINUTES = ESCALATION_TIMEOUT_DEFAULT_MINUTES;
+// Shift-routing/escalation PR 2: role-tagged escalation contacts, extending
+// WS_Roles (see header comment above resolveEscalationChain for why
+// WS_Owner_Notify is NOT the precedent, and why Owner deliberately stays a
+// Notify Phone/OWNER_PHONE lookup, never a WS_Roles one).
+module.exports.ESCALATION_TIER_ROLE_TYPES = ESCALATION_TIER_ROLE_TYPES;
+module.exports.activeEscalationRolesForProperty = activeEscalationRolesForProperty;
+module.exports.resolveEscalationChain = resolveEscalationChain;
 module.exports.DORMANT_THRESHOLD_DAYS_DEFAULT = DORMANT_THRESHOLD_DAYS_DEFAULT;
 // CEO manual report-trigger (api/wabistay/cron/manual-report.js) needs these
 // to build the SAME live-data fetch + stubbed-send pipeline the real crons
