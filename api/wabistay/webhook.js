@@ -3485,6 +3485,31 @@ const actions = {
     // cleaner dispatch / Step 7's welcome message would both be false
     // positives. Everything past this point is skipped on failure.
     if (booking) {
+      // Race guard (CEO decision, 2026-09-28, same class of fix as extendStay's
+      // PR3/PR3b — see that action's own comment for the full reasoning).
+      // `booking` was read back at Step 2, before Steps 2-3's several
+      // sequential Airtable calls (findAvailableRoom's own availability
+      // re-verification, the room status write) — real wall-clock time in
+      // which a genuinely concurrent duplicate delivery of this same
+      // gate-arrival message (Meta's at-least-once retry, landing before this
+      // invocation's first response reaches Meta) can complete its own
+      // check-in. Fresh re-read, immediately before the write that actually
+      // checks the guest in: if this booking is no longer 'Confirmed', a
+      // concurrent invocation already checked it in — stand down rather than
+      // re-running check-in, double-assigning a room, or double-notifying the
+      // owner/cleaner. Silent, not a guest send: whichever invocation won
+      // already delivered the welcome message, and this is Meta's own
+      // duplicate of a message the guest only sent once.
+      const freshBookingCheck = await airtableGet('WS_Bookings', `RECORD_ID() = '${booking.id}'`);
+      const stillConfirmed = freshBookingCheck[0] && freshBookingCheck[0].fields['Status'] === 'Confirmed';
+      if (!stillConfirmed) {
+        logToAxiom('warn', 'gate_arrival_skipped_already_checked_in', {
+          phone: ctx.phone, bookingId: booking.id,
+          currentStatus: freshBookingCheck[0] ? freshBookingCheck[0].fields['Status'] : null
+        });
+        return;
+      }
+
       const bookingUpdate = {
         'Status': 'Checked In',
         'Checked In At': new Date().toISOString()
@@ -3969,6 +3994,29 @@ const actions = {
 // B10.5 Bug 2: `propertyId` is the caller's room-walk result, used only as a
 // fallback for bookings checked in before WS_Property was persisted.
 async function settleAutoCheckout(booking, room, guest, propertyName, propertyId) {
+  // Race guard (CEO decision, 2026-09-28, same class of fix as extendStay's
+  // PR3/PR3b — see that action's own comment for the full reasoning). `booking`
+  // is the snapshot runAutoCheckout's tick-start query captured; real wall-clock
+  // time passes between that read and this call (per-booking guest/room/property
+  // lookups, then this function's own several sequential writes), which is
+  // exactly the gap a manual checkout can land in for the same booking. A fresh
+  // re-read of the one fact this function's precondition depends on — Status
+  // still 'Checked In' — immediately before any write. If the guest already
+  // checked out manually (or a genuinely concurrent cron invocation already
+  // settled this booking), stand down entirely: no booking write, no room
+  // write, no cleaner dispatch, no guest message, no Session State overwrite.
+  // A booking that is STILL legitimately Checked In and overdue is completely
+  // unaffected — this only ever short-circuits work that would otherwise
+  // duplicate or clobber something that already happened.
+  const freshBookings = await airtableGet('WS_Bookings', `RECORD_ID() = '${booking.id}'`);
+  const freshBooking = freshBookings[0] || null;
+  if (!freshBooking || freshBooking.fields['Status'] !== 'Checked In') {
+    logToAxiom('warn', 'auto_checkout_skipped_already_settled', {
+      bookingId: booking.id, currentStatus: freshBooking ? freshBooking.fields['Status'] : null
+    });
+    return false;
+  }
+
   // Rule 30 step 2, slice 1: FATAL on failure, cron twin of the manual
   // checkout write. No guest to reply to here — on failure this just logs
   // loud and returns without dispatching cleaners/reception/guest-thanks;
@@ -4037,6 +4085,7 @@ async function settleAutoCheckout(booking, room, guest, propertyName, propertyId
     await sendWhatsApp(guestPhone, msg('autoCheckoutThanks', { propertyName }));
     await sendWhatsApp(guestPhone, msg('ratingPrompt', { propertyName }));
   }
+  return true;
 }
 
 async function runAutoCheckout(now = new Date()) {
@@ -4084,9 +4133,20 @@ async function runAutoCheckout(now = new Date()) {
       // Grace elapsed, no extension, no manual checkout → auto-checkout.
       // B10.5 Bug 2: the room walk above stays — it feeds `propertyName` into the
       // guest copy. `propId` is passed only as the legacy-booking scoping fallback.
-      await settleAutoCheckout(booking, room, guest, propertyName, propId);
-      logToAxiom('info', 'auto_checkout_fired', { bookingId: booking.id, phone: guestPhone || null });
-      summary.autoCheckouts++;
+      //
+      // Race guard (2026-09-28): settleAutoCheckout returns `false` only from
+      // its own fresh-read guard (booking already moved on since this
+      // function's snapshot read above) — a genuine write failure inside it
+      // still returns undefined, preserving the pre-existing "count it,
+      // retry next tick" behaviour for that unrelated case. Only the new
+      // already-settled case is excluded here, so this cron's own summary/log
+      // stay honest about what it actually did, without changing what a real
+      // write failure reports.
+      const settled = await settleAutoCheckout(booking, room, guest, propertyName, propId);
+      if (settled !== false) {
+        logToAxiom('info', 'auto_checkout_fired', { bookingId: booking.id, phone: guestPhone || null });
+        summary.autoCheckouts++;
+      }
     }
     // else: warned, still inside the grace — wait for the next run.
   }
