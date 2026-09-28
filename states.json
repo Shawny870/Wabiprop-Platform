@@ -63,6 +63,8 @@
 
   "messages": {
     "consentNotice": "Welcome to {propertyName} 👋\n\nQuick note before we start: we collect your name, number and stay dates to manage your booking. We keep it safe and don't share it with anyone. Carrying on with this chat means you're OK with that.\n\nReply STOP anytime to opt out of messages.",
+    "propertySuspendedRedirect": "Sorry, we can't take bookings through this chat right now. For an immediate booking, please call or WhatsApp us directly on {redirectPhoneText}.",
+    "propertySuspendedNoNumberFallback": "Sorry, we can't take bookings through this chat right now. Please contact the guesthouse directly to book.",
     "greeting": "Hi! 👋 Welcome to {propertyName}{propertyCityLine}.\n\nWe currently have *{roomCountText}* available.\n\nAre you looking for a *short stay* (a few hours) or *multiple days*? Reply with a number:\n1 - Short stay\n2 - Multiple days",
     "stayTypeReprompt": "Sorry, I didn't quite get that. Please reply with a number:\n1 - Short stay\n2 - Multiple days",
     "hourlyRatesMenu": "*Short stay rates at {propertyName}:*\n{hourlyRateText}",

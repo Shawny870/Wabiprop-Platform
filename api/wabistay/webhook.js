@@ -5786,6 +5786,79 @@ async function handleMessage(from, messageText, phoneNumberId, wamid) {
     logToAxiom('info', 'opted_out_transaction_allowed', { phone, sessionState });
   }
 
+  // ── Payment gating: suspended-property booking block ───────────────────────
+  // Wabistay Automated Payment Gating investigation, Phase 4. Placed AFTER the
+  // STOP/opt-out block above (opt-out/opt-back-in must work regardless of
+  // subscription status — that's a compliance concern, not a booking one) but
+  // BEFORE the POPIA consent notice below (CEO decision, 2026-09-17): a
+  // suspended property must show a first-ever contact ONLY the redirect, never
+  // the consent notice first — sending both leaks "the bot is active/booking-
+  // capable" before telling them to go elsewhere, which is confusing and
+  // pointless. Reuses `activeBooking` (ACTIVE_BOOKING_STATES, computed above
+  // for the STOP two-tier rule) as the exemption boundary — a guest with an
+  // existing/confirmed booking must continue receiving normal service
+  // uninterrupted; only NEW enquiries are blocked.
+  //
+  // FIELD NAMES ARE PROPOSED, NOT YET LIVE (blocked on the Airtable API
+  // billing cap, same as PR 1-3 this session): 'Subscription Status' and
+  // 'Guest Redirect Phone' on WS_Properties. Do not treat these as confirmed
+  // until CEO creates them and a live schema pull verifies them — same
+  // two-phase workaround as the rest of this session's work.
+  //
+  // OPEN QUESTION, not resolved here (flagged, not guessed): this check does
+  // NOT distinguish staff numbers (cleaner/owner/WALKIN-authorized) from
+  // genuine guests the way the consent-notice block just below does. A staff
+  // member's very first-ever message to this property, if it happened to be
+  // read as a NEW enquiry with no active booking, would currently receive the
+  // suspended-redirect instead of proceeding — duplicating the consent
+  // block's isCleaner/isOwner/isStaff check here felt like guessing at scope
+  // rather than following an existing pattern, so it's left as-is and named
+  // explicitly rather than silently handled either way.
+  if (property.fields['Subscription Status'] === 'Suspended' && !activeBooking) {
+    // CEO decision, 2026-09-28: every property is expected to carry a Guest
+    // Redirect Phone before it is ever suspended (true today for the one live
+    // property, Canary Street). This branch is the exception path for a
+    // property suspended before that number was set — the guest still needs
+    // a graceful reply (can't leave them on a broken/numberless redirect
+    // while the CEO gets alerted), and the CEO must be told directly rather
+    // than discover it from a confused guest. alertShawn is the existing
+    // CEO-facing alert channel (used for cron failures and gate_arrival's
+    // missing-cleaner case above) — reused as-is, no new notify mechanism.
+    // No per-property/per-day dedupe exists anywhere else in this codebase to
+    // reuse (checked); this fires on every message from an affected guest
+    // until the number is set, same fail-loud posture as the rest of this
+    // gate.
+    if (!property.fields['Guest Redirect Phone']) {
+      logToAxiom('error', 'suspended_property_missing_redirect_phone', {
+        phone, propertyId: property.id, sessionState
+      });
+      await alertShawn(
+        'suspended_property_missing_redirect_phone',
+        'A Suspended property has no Guest Redirect Phone set — a guest just hit the booking block and got the generic fallback message.',
+        { propertyId: property.id, propertyName: property.fields['Property Name'] || null }
+      );
+      await sendWhatsApp(phone, msg('propertySuspendedNoNumberFallback', {
+        propertyName: property.fields['Property Name']
+      }));
+      return;
+    }
+    // msg() does plain string substitution (String(v)) with no null-handling
+    // of its own — an unset 'Guest Redirect Phone' must not leak the literal
+    // text "null" into a guest-facing message, so the fallback is resolved
+    // here, not left to the template. In practice unreachable now that the
+    // check above handles the missing-number case explicitly first — kept as
+    // a defensive second line, not the primary path.
+    const redirectPhoneText = property.fields['Guest Redirect Phone'] || 'our team directly';
+    logToAxiom('info', 'booking_blocked_property_suspended', {
+      phone, propertyId: property.id, sessionState
+    });
+    await sendWhatsApp(phone, msg('propertySuspendedRedirect', {
+      propertyName: property.fields['Property Name'],
+      redirectPhoneText
+    }));
+    return;
+  }
+
   // B13: POPIA consent notice. Notice-only, implied consent (CEO 16 July) — no
   // YES/1 opt-in gate. Sent as message #1 for a genuinely NEW guest conversation:
   // "new" = first-ever contact from this number, i.e. NO existing WS_Guests
