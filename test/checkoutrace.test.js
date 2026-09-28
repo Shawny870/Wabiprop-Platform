@@ -28,7 +28,7 @@ async function send(payload) {
 
 const property = { id: 'recP1', fields: { 'Property Name': 'Test Lodge' } };
 const guest = { id: 'recG1', fields: { 'Guest Name': 'John Smith', 'Phone Number': '27821234567', 'Session State': 'CHECKED_IN' } };
-const room = { id: 'recR1', fields: { 'Room Name': 'Room 1', 'Status': 'Occupied', 'Property': ['recP1'] } };
+const room = { id: 'recR1', fields: { 'Room Name': 'Room 1', 'Status': 'Occupied', 'Property': ['recP1'], 'Active': true } };
 const NOW = new Date('2026-07-22T12:00:00.000Z');
 const minsBefore = m => new Date(NOW.getTime() - m * 60 * 1000).toISOString();
 function booking(fields) {
