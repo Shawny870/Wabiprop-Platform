@@ -3,17 +3,32 @@
   "seed": {
     "WS_Properties": [],
     "WS_Rooms": [
-      { "id": "recR1", "fields": { "Room Name": "Room 1", "Status": "Available" } }
+      {
+        "id": "recR1",
+        "fields": {
+          "Room Name": "Room 1",
+          "Status": "Available",
+          "Active": true
+        }
+      }
     ],
     "WS_Guests": [],
     "WS_Cleaners": []
   },
-  "message": { "from": "27821234567", "text": "Hi" },
+  "message": {
+    "from": "27821234567",
+    "text": "Hi"
+  },
   "expect": {
     "status": 200,
     "writes": [],
     "sends": [
-      { "to": "27821234567", "includes": ["Sorry, this number isn't configured yet. Please contact support."] }
+      {
+        "to": "27821234567",
+        "includes": [
+          "Sorry, this number isn't configured yet. Please contact support."
+        ]
+      }
     ]
   }
 }

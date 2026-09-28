@@ -74,8 +74,8 @@ function seed(overrides = {}) {
     }],
     WS_Rooms: [
       // Dirtied 90 minutes ago by the checkout below.
-      { id: 'recR2', fields: { 'Room Name': 'Room 02', 'Room Number': 2, 'Status': 'Cleaning', 'Property': ['recP1'], 'Cleaning Started At': agoIso(90 * MIN) } },
-      { id: 'recR1', fields: { 'Room Name': 'Room 01', 'Room Number': 1, 'Status': 'Available', 'Property': ['recP1'] } }
+      { id: 'recR2', fields: { 'Room Name': 'Room 02', 'Room Number': 2, 'Status': 'Cleaning', 'Property': ['recP1'], 'Active': true, 'Cleaning Started At': agoIso(90 * MIN) } },
+      { id: 'recR1', fields: { 'Room Name': 'Room 01', 'Room Number': 1, 'Status': 'Available', 'Property': ['recP1'], 'Active': true } }
     ],
     WS_Cleaners: [
       { id: 'recC1', fields: { 'Cleaner Name': 'Rose', 'Phone Number': CLEANER_PHONE, 'Active': true, 'Assigned Property': ['recP1'] } }

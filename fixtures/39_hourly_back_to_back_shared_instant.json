@@ -24,7 +24,8 @@
           "Status": "Occupied",
           "Property": [
             "recP1"
-          ]
+          ],
+          "Active": true
         }
       }
     ],

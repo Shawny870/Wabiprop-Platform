@@ -39,7 +39,7 @@ function baseSeed(overrides = {}) {
       }
     }],
     WS_Rooms: [
-      { id: 'recR1', fields: { 'Room Name': 'Room 01', 'Room Number': 1, 'Status': 'Available', 'Property': ['recP1'] } }
+      { id: 'recR1', fields: { 'Room Name': 'Room 01', 'Room Number': 1, 'Status': 'Available', 'Property': ['recP1'], 'Active': true } }
     ],
     WS_Rates: [
       { id: 'recRateSingle', fields: { 'Rate Name': 'Single', 'Occupancy Type': 'Single', 'Amount': 250, 'Active': true, 'Property': ['recP1'] } },
@@ -295,7 +295,7 @@ function seedCheckedIn(overrides = {}) {
         'Amount Due': 400, 'Checked In At': '2020-01-01T00:00:00.000Z'
       }
     }],
-    WS_Rooms: [{ id: 'recR1', fields: { 'Room Name': 'Room 01', 'Room Number': 1, 'Status': 'Occupied', 'Property': ['recP1'] } }],
+    WS_Rooms: [{ id: 'recR1', fields: { 'Room Name': 'Room 01', 'Room Number': 1, 'Status': 'Occupied', 'Property': ['recP1'], 'Active': true } }],
     ...overrides
   });
 }
@@ -385,7 +385,7 @@ function seedAutoCheckoutDue(overrides = {}) {
   return {
     WS_Properties: [{ id: 'recP1', fields: { 'Property Name': 'Test Lodge' } }],
     WS_Guests: [{ id: 'recG1', fields: { 'Guest Name': 'Jane Doe', 'Phone Number': GUEST_PHONE } }],
-    WS_Rooms: [{ id: 'recR1', fields: { 'Room Name': 'Room 01', 'Status': 'Occupied', 'Property': ['recP1'] } }],
+    WS_Rooms: [{ id: 'recR1', fields: { 'Room Name': 'Room 01', 'Status': 'Occupied', 'Property': ['recP1'], 'Active': true } }],
     WS_Bookings: [{
       id: 'recBook1',
       fields: {
@@ -438,7 +438,7 @@ test('settleAutoCheckout: a successful auto-checkout is unaffected by the new ch
 
 test('cleanerDone: a failed room->Available write is logged loud but the cleaner is still thanked', async () => {
   const ctx = start({
-    WS_Rooms: [{ id: 'recR1', fields: { 'Room Name': 'Room 01', 'Room Number': 1, 'Status': 'Cleaning', 'Property': ['recP1'] } }],
+    WS_Rooms: [{ id: 'recR1', fields: { 'Room Name': 'Room 01', 'Room Number': 1, 'Status': 'Cleaning', 'Property': ['recP1'], 'Active': true } }],
     WS_Cleaners: [{ id: 'recC1', fields: { 'Cleaner Name': 'Thandi', 'Phone Number': '27821110000', 'Active': true, 'Assigned Property': ['recP1'] } }]
   });
   failNextWrite(ctx, { method: 'PATCH', pathIncludes: 'WS_Rooms/recR1', bodyIncludes: 'Available' });
@@ -452,7 +452,7 @@ test('cleanerDone: a failed room->Available write is logged loud but the cleaner
 
 test('cleanerDone: a successful room->Available write is unaffected by the new check', async () => {
   const ctx = start({
-    WS_Rooms: [{ id: 'recR1', fields: { 'Room Name': 'Room 01', 'Room Number': 1, 'Status': 'Cleaning', 'Property': ['recP1'] } }],
+    WS_Rooms: [{ id: 'recR1', fields: { 'Room Name': 'Room 01', 'Room Number': 1, 'Status': 'Cleaning', 'Property': ['recP1'], 'Active': true } }],
     WS_Cleaners: [{ id: 'recC1', fields: { 'Cleaner Name': 'Thandi', 'Phone Number': '27821110000', 'Active': true, 'Assigned Property': ['recP1'] } }]
   });
 
