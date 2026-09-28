@@ -43,7 +43,7 @@ function seed(overrides = {}) {
       fields: { 'Property Name': 'Test Lodge', 'Phone Number ID': '111000111000', 'Notify Phone': '27831112222' }
     }],
     WS_Rooms: [
-      { id: 'recR1', fields: { 'Room Name': 'Room 01', 'Room Number': 1, 'Status': 'Cleaning', 'Property': ['recP1'], 'Cleaning Started At': agoIso(60 * MIN) } }
+      { id: 'recR1', fields: { 'Room Name': 'Room 01', 'Room Number': 1, 'Status': 'Cleaning', 'Property': ['recP1'], 'Active': true, 'Cleaning Started At': agoIso(60 * MIN) } }
     ],
     WS_Cleaners: [
       { id: 'recCA', fields: { 'Cleaner Name': 'Rose', 'Phone Number': CLEANER_A_PHONE, 'Active': true, 'Assigned Property': ['recP1'] } },
@@ -179,7 +179,7 @@ test('Layer 1: a room that flips to Available between cleanerDone\'s fetch and r
   // simulating the race window deterministically rather than hoping for
   // real timing.
   raceOnNextGet(ctx, 'WS_Rooms', 'RECORD_ID', [
-    { id: 'recR1', fields: { 'Room Name': 'Room 01', 'Room Number': 1, 'Status': 'Available', 'Property': ['recP1'] } }
+    { id: 'recR1', fields: { 'Room Name': 'Room 01', 'Room Number': 1, 'Status': 'Available', 'Property': ['recP1'], 'Active': true } }
   ]);
 
   await send(CLEANER_B_PHONE, 'DONE');
