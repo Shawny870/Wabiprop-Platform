@@ -47,7 +47,8 @@
         "id": "recR1",
         "fields": {
           "Room Name": "Room 1",
-          "Status": "Occupied"
+          "Status": "Occupied",
+          "Active": true
         }
       }
     ],

@@ -35,7 +35,8 @@
           "Status": "Cleaning",
           "Property": [
             "recP1"
-          ]
+          ],
+          "Active": true
         }
       }
     ],

@@ -1466,8 +1466,19 @@ async function findAvailableRoom(propertyId, checkInIso, checkOutIso, opts = {})
   const { excludeBookingId = null, preferRoomId = null } = opts;
 
   // F5-style JS-side filter — FIND/ARRAYJOIN on linked records is unreliable.
+  //
+  // Active gate (CEO decision, 2026-09-28): a room with Active !== true is
+  // invisible here, never "shown as unavailable" — it simply never enters
+  // `rooms` at all, so it can't be offered, held, or reassigned by anything
+  // downstream of this function. Deliberately an ALLOWLIST (=== true, not
+  // !== false): Airtable's API omits an unchecked checkbox field entirely
+  // rather than sending `false` (confirmed against Airtable's own docs), so
+  // "field absent" and "explicitly unchecked" are indistinguishable on the
+  // wire — only `=== true` can tell a deliberately-enabled room from
+  // everything else, matching the existing fail-closed posture this function
+  // already uses for Maintenance (comment above BOOKABLE_ROOM_STATUSES).
   const allRooms = await airtableGet('WS_Rooms', orFormula('Status', BOOKABLE_ROOM_STATUSES));
-  const rooms = allRooms.filter(r => (r.fields['Property'] || []).includes(propertyId));
+  const rooms = allRooms.filter(r => (r.fields['Property'] || []).includes(propertyId) && r.fields['Active'] === true);
   if (rooms.length === 0) return null;
 
   // Only statuses that actually block: a Cancelled or Checked Out booking must
@@ -1888,6 +1899,18 @@ const actions = {
     if (!requested) {
       logToAxiom('info', 'walkin_rejected', { phone: ctx.phone, reason: 'no_such_room', roomToken: parsed.roomToken });
       await sendWhatsApp(ctx.phone, msg('walkinNoSuchRoom', { roomToken: parsed.roomToken }));
+      return;
+    }
+    // Active gate (CEO decision, 2026-09-28): blocked here too, same as the
+    // guest-facing path — a disabled room may not be seated by anyone,
+    // including staff. Checked separately from the propertyRooms filter above
+    // (rather than folded into it) so staff get a distinct, honest message —
+    // "this room is disabled" rather than the same "no such room" a genuine
+    // typo produces, which would leave staff hunting for a room number that
+    // does in fact exist.
+    if (requested.fields['Active'] !== true) {
+      logToAxiom('info', 'walkin_rejected', { phone: ctx.phone, reason: 'room_disabled', roomToken: parsed.roomToken, roomId: requested.id });
+      await sendWhatsApp(ctx.phone, msg('walkinRoomDisabled', { roomName: requested.fields['Room Name'] }));
       return;
     }
 
@@ -3237,7 +3260,11 @@ const actions = {
       // dates), or none at all. Falls through to the original F11 behaviour —
       // first physically-available room. Fixtures 06 and 07 hold this path.
       const allAvailableRoomsForArrival = await airtableGet('WS_Rooms', `{Status} = 'Available'`);
-      const availableRooms = allAvailableRoomsForArrival.filter(r => (r.fields['Property'] || []).includes(ctx.property.id));
+      // Active gate (CEO decision, 2026-09-28): same allowlist as
+      // findAvailableRoom — see that function's comment for why === true, not
+      // !== false. A disabled room must never be the "first physically
+      // available room" this legacy fallback hands out.
+      const availableRooms = allAvailableRoomsForArrival.filter(r => (r.fields['Property'] || []).includes(ctx.property.id) && r.fields['Active'] === true);
       room = availableRooms[0] || null;
     }
 
