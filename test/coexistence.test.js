@@ -22,6 +22,10 @@ async function send(payload) {
 const guestState = (ctx, id) => (ctx.airtable.tables['WS_Guests'] || []).find(g => g.id === id).fields['Session State'];
 
 const property = { id: 'recP1', fields: { 'Property Name': 'Test Lodge', 'Phone Number ID': '111000111000', 'Notify Phone': '27831112222' } };
+// Active room needed only by the two tests below that resume into the real
+// greeting (greetAndAskStayType now requires a guest-visible room — CEO
+// decision, 2026-09-28 — or it takes the zero-rooms path instead).
+const activeRoom = { id: 'recR1', fields: { 'Room Name': 'Room 1', 'Status': 'Available', 'Property': ['recP1'], 'Active': true } };
 const GUEST_PHONE = '27821234567';
 const OTHER_PHONE = '27829998888';
 
@@ -51,6 +55,7 @@ test('coexistence: guest messages are fully suppressed while HUMAN_HANDLING — 
 test('coexistence: "bot on" echo while HUMAN_HANDLING hands back to NEW, and normal flow resumes', async () => {
   const ctx = makeCtx({
     WS_Properties: [property],
+    WS_Rooms: [activeRoom],
     WS_Guests: [{ id: 'recG1', fields: { 'Guest Name': 'Shawn', 'Phone Number': GUEST_PHONE, 'Session State': 'HUMAN_HANDLING' } }]
   });
   await send(metaEchoPayload(GUEST_PHONE, 'BOT ON')); // case-insensitive
@@ -82,6 +87,7 @@ test('coexistence: an echo to a phone with no WS_Guests row is a harmless no-op'
 test('coexistence: a guest never taken over is completely unaffected by another guest\'s handoff', async () => {
   const ctx = makeCtx({
     WS_Properties: [property],
+    WS_Rooms: [activeRoom],
     WS_Guests: [
       { id: 'recG1', fields: { 'Guest Name': 'Shawn', 'Phone Number': GUEST_PHONE, 'Session State': 'HUMAN_HANDLING' } },
       { id: 'recG2', fields: { 'Guest Name': 'Other Guest', 'Phone Number': OTHER_PHONE, 'Session State': 'NEW' } }

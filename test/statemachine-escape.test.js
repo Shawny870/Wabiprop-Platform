@@ -25,7 +25,7 @@ const FROM = '27821111111';
 function seedGuestInState(sessionState, overrides = {}) {
   return {
     WS_Properties: [{ id: PROPERTY_ID, fields: { 'Property Name': 'Villa Liza', 'Phone Number ID': '111000111000' } }],
-    WS_Rooms: [{ id: 'recER1', fields: { 'Room Name': 'Room 01', 'Status': 'Available', 'Property': [PROPERTY_ID] } }],
+    WS_Rooms: [{ id: 'recER1', fields: { 'Room Name': 'Room 01', 'Status': 'Available', 'Property': [PROPERTY_ID], 'Active': true } }],
     WS_Guests: [{ id: 'recEGuest1', fields: { 'Guest Name': 'Stuck Guest', 'Phone Number': FROM, 'Session State': sessionState } }],
     WS_Bookings: [],
     WS_Roles: [],

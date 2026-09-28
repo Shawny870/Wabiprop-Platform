@@ -1569,6 +1569,19 @@ function orFormula(field, values) {
   return `OR(${values.map(v => `{${field}} = '${v}'`).join(', ')})`;
 }
 
+// Guest-visible "right now" availability: rooms with Status = Available for
+// this property, gated by Active (CEO decision, 2026-09-28) so a disabled
+// room is never counted, offered, or picked as guest-facing inventory. This
+// is a narrower snapshot than findAvailableRoom's BOOKABLE_ROOM_STATUSES +
+// date-range check below — it answers "what can we show/hand out right now",
+// not "what's free for these dates" — so it is NOT a replacement for that
+// function. Shared by the greeting's room count and the legacy no-date-range
+// gate-arrival fallback so the two can't drift apart again.
+async function getGuestVisibleAvailableRooms(propertyId) {
+  const allAvailableRooms = await airtableGet('WS_Rooms', `{Status} = 'Available'`);
+  return allAvailableRooms.filter(r => (r.fields['Property'] || []).includes(propertyId) && r.fields['Active'] === true);
+}
+
 // Exclusive bounds, strict inequalities — the locked definition. A room checked
 // out of at 10:00 IS available for a 14:00 check-in the same day; inclusive
 // bounds would silently cost every room a sellable night on every turnover.
@@ -2592,11 +2605,10 @@ const actions = {
   // still checked where it already was (hourlyRates() fail-closed in
   // selectStayType/startHourly), just never used to skip asking the question.
   async greetAndAskStayType(ctx) {
-    // F5-style: FIND/ARRAYJOIN confirmed unreliable for this filter (live-tested
-    // 6.4 verification — matched 0 of 3 correctly-linked rooms). Fetch unscoped,
-    // filter by property inclusion in JS, same pattern as airtableGetBookingsByGuestId.
-    const allAvailableRooms = await airtableGet('WS_Rooms', `{Status} = 'Available'`);
-    const availableRooms = allAvailableRooms.filter(r => (r.fields['Property'] || []).includes(ctx.property.id));
+    // Guest-visible count: Status = Available AND Active === true (CEO decision,
+    // 2026-09-28) — a disabled room must never inflate the number shown to a
+    // guest, same allowlist as findAvailableRoom / the gate-arrival fallback.
+    const availableRooms = await getGuestVisibleAvailableRooms(ctx.property.id);
     const roomCount = availableRooms.length;
 
     // Data-quality signal: rows with an empty Property field never match the
@@ -2614,6 +2626,19 @@ const actions = {
         unassignedRoomCount: unassignedRooms.length,
         unassignedRateCount: unassignedRates.length
       });
+    }
+
+    if (roomCount === 0) {
+      // Fully booked (guest-visible sense): no state write either way — a new
+      // guest gets no record created, an existing guest's state is untouched —
+      // and no stay-type menu is offered. Same "no writes, no state change"
+      // posture as the gateTooEarly path above.
+      logToAxiom('info', 'greeting_zero_rooms', { phone: ctx.phone, propertyId: ctx.property.id });
+      await sendWhatsApp(ctx.phone, msg('fullyBooked', {
+        propertyName: ctx.property.fields['Property Name'],
+        propertyCityLine: propertyCityLine(ctx.property)
+      }));
+      return;
     }
 
     if (!ctx.guest) {
@@ -3480,12 +3505,9 @@ const actions = {
       // No range to check against: a booking created before B8 (no hold, no
       // dates), or none at all. Falls through to the original F11 behaviour —
       // first physically-available room. Fixtures 06 and 07 hold this path.
-      const allAvailableRoomsForArrival = await airtableGet('WS_Rooms', `{Status} = 'Available'`);
-      // Active gate (CEO decision, 2026-09-28): same allowlist as
-      // findAvailableRoom — see that function's comment for why === true, not
-      // !== false. A disabled room must never be the "first physically
-      // available room" this legacy fallback hands out.
-      const availableRooms = allAvailableRoomsForArrival.filter(r => (r.fields['Property'] || []).includes(ctx.property.id) && r.fields['Active'] === true);
+      // Shared helper (getGuestVisibleAvailableRooms) — same allowlist as
+      // findAvailableRoom, and now the same one the greeting's room count uses.
+      const availableRooms = await getGuestVisibleAvailableRooms(ctx.property.id);
       room = availableRooms[0] || null;
     }
 
