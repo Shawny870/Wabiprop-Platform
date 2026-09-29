@@ -43,6 +43,18 @@ function receptionPaymentTemplate() {
   return process.env.WABISTAY_RECEPTION_PAYMENT_TEMPLATE || null;
 }
 
+// Ops alert to Shawn (guest-struggle/monitoring build, sub-PR 1, CEO
+// 2026-09-29): alertShawn's destination (WS_Config.'Alert Phone') is not
+// guaranteed to be inside Meta's 24h service window — a cron failure at 3am
+// has no reason to have messaged the bot recently. Same contract as every
+// other template getter here: read at CALL time, unset IS the stub state
+// (falls back to the pre-existing free-form send, see alertShawn below).
+// Draft copy proposed to Shawn, pending Meta submission — see the sub-PR 1
+// report for the exact body text and Utility/Marketing classification.
+function opsAlertTemplate() {
+  return process.env.WABISTAY_OPS_ALERT_TEMPLATE || null;
+}
+
 // Guest-stuck/HELP escalation alert to staff (sendEscalationAlert, sub-PR 2
 // of 4). CEO correction, 2026-09-29: unlike alertShawn's destination, staff
 // (On Duty/Backup) only ever RECEIVE from the bot, they don't message it in
@@ -599,6 +611,36 @@ async function alertShawn(cronName, errorMessage, context = {}) {
     return;
   }
   const extra = Object.keys(context).length ? `\n${JSON.stringify(context)}` : '';
+
+  // Guest-struggle/monitoring build, sub-PR 1 (CEO 2026-09-29): the free-form
+  // send below silently fails outside Meta's 24h window (CLAUDE.md line 30) —
+  // exactly the gap that let a six-week guest_state_write_failed streak go
+  // unnoticed. Prefer the approved template once configured; unset IS the
+  // stub state (see opsAlertTemplate above), so this falls back to the
+  // pre-existing free-form send rather than regressing every call site while
+  // Meta approval is pending — the fallback only works inside the 24h
+  // window, which is the whole reason this sub-PR exists.
+  const templateName = opsAlertTemplate();
+  if (templateName) {
+    const property = context.propertyName || context.propertyId || context.scope || 'N/A';
+    const result = await sendWhatsAppTemplate(
+      to, templateName,
+      [cronName, property, new Date().toISOString(), errorMessage],
+      { site: 'alert_shawn', cronName }
+    ).catch(e => {
+      console.error('[alertShawn template failed]', e.message);
+      return { ok: false, error: { message: e.message } };
+    });
+    if (!result.ok) {
+      logToAxiom('error', 'alert_shawn_template_send_failed', {
+        cronName, errorMessage, error: result.error ? JSON.stringify(result.error) : null
+      });
+    }
+    return;
+  }
+  logToAxiom('warn', 'alert_shawn_template_not_configured', {
+    cronName, reason: 'WABISTAY_OPS_ALERT_TEMPLATE not configured — falling back to free-form, 24h-window-limited send'
+  });
   const msg = `WABISTAY CRON ERROR — ${cronName} failed.\nError: ${errorMessage}${extra}`;
   await sendWhatsApp(to, msg).catch(e => console.error('[alertShawn failed]', e.message));
 }
