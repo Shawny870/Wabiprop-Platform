@@ -1473,13 +1473,25 @@ async function walkinRoleRecordForPhone(phone) {
 // payment, this constant is the single place that changes.
 const PAID_ROLE_TYPES = ['Reception'];
 
+// Payment build (CEO decision, 2026-09-29): On Duty (Jill) can also confirm a
+// PAID (card/EFT) command, as a fallback to Reception, since payment now
+// happens at reception per the finalised design but Jill may be the one
+// physically present. Deliberately a SEPARATE constant from PAID_ROLE_TYPES,
+// not an addition to it: PAID_ROLE_TYPES also gates
+// activeReceptionRolesForProperty below, which drives who receives the
+// "here's what's owed at checkout" push — that notify list is about who
+// collects money at the desk, unrelated to Jill's on-duty/escalation role,
+// and widening it silently would put Jill on a cash-reconciliation
+// notification nobody asked to add him to.
+const PAID_COMMAND_ROLE_TYPES = ['Reception', 'On Duty'];
+
 // Deliberately a sibling of activeWalkinRoleForPhone rather than a
 // generalisation of it: rule 26 — no refactor while adding a feature. The two
 // converge when B18 lands and owns seat resolution properly.
 async function activePaidRoleForPhone(phone) {
   const roles = await airtableGet('WS_Roles', `{Active} = TRUE()`);
   return roles.find(r => {
-    if (!PAID_ROLE_TYPES.includes(r.fields['Role Type'])) return false;
+    if (!PAID_COMMAND_ROLE_TYPES.includes(r.fields['Role Type'])) return false;
     const raw = r.fields['Current Phone'];
     if (!raw) return false;
     return formatPhone(String(raw)) === phone;
