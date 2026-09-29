@@ -113,3 +113,141 @@ test('activeEscalationRolesForProperty with no propertyId returns empty, does no
   const roles = await wh.activeEscalationRolesForProperty(null);
   assert.deepStrictEqual(roles, []);
 });
+
+// ── sendEscalationAlert (guest-struggle/monitoring build, sub-PR 2 of 4) ────
+// The send capability resolveEscalationChain was always missing. No trigger
+// wires to this yet — these tests call it directly, same as sub-PRs 3/4 will.
+// Free-form fallback only, no WABISTAY_GUEST_ESCALATION_TEMPLATE configured
+// in these — the template path is covered separately below.
+
+test('sendEscalationAlert sends to Jill (On Duty) when he is active', async () => {
+  delete process.env.WABISTAY_GUEST_ESCALATION_TEMPLATE;
+  const ctx = ctxWithRoles([
+    { id: 'recOnDuty', fields: { 'Role Type': 'On Duty', 'Property': ['recP1'], 'Current Phone': '27825999001', 'Active': true } },
+    { id: 'recBackup', fields: { 'Role Type': 'Backup', 'Property': ['recP1'], 'Current Phone': '27825999279', 'Active': true } }
+  ]);
+  const result = await wh.sendEscalationAlert('recP1', property({ 'Notify Phone': '27811110099' }), { message: 'A guest needs help.' });
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(result.tier, 'On Duty');
+  assert.strictEqual(ctx.sends.length, 1);
+  assert.strictEqual(ctx.sends[0].to, '27825999001');
+  assert.strictEqual(ctx.sends[0].type, 'text');
+  assert.strictEqual(ctx.sends[0].body, 'A guest needs help.');
+  assert.ok(ctx.axiom.some(e => e.event === 'escalation_alert_template_not_configured'),
+    'the stub-state fallback is logged, not silent');
+});
+
+test('sendEscalationAlert falls to Backup (Reception) when Jill (On Duty) is inactive', async () => {
+  delete process.env.WABISTAY_GUEST_ESCALATION_TEMPLATE;
+  const ctx = ctxWithRoles([
+    { id: 'recOnDuty', fields: { 'Role Type': 'On Duty', 'Property': ['recP1'], 'Current Phone': '27825999001', 'Active': false } },
+    { id: 'recBackup', fields: { 'Role Type': 'Backup', 'Property': ['recP1'], 'Current Phone': '27825999279', 'Active': true } }
+  ]);
+  const result = await wh.sendEscalationAlert('recP1', property({ 'Notify Phone': '27811110099' }), { message: 'A guest needs help.' });
+  assert.strictEqual(result.tier, 'Backup');
+  assert.strictEqual(ctx.sends[0].to, '27825999279');
+});
+
+test('sendEscalationAlert falls to Owner when On Duty and Backup are both inactive', async () => {
+  delete process.env.WABISTAY_GUEST_ESCALATION_TEMPLATE;
+  const ctx = ctxWithRoles([
+    { id: 'recOnDuty', fields: { 'Role Type': 'On Duty', 'Property': ['recP1'], 'Current Phone': '27825999001', 'Active': false } },
+    { id: 'recBackup', fields: { 'Role Type': 'Backup', 'Property': ['recP1'], 'Current Phone': '27825999279', 'Active': false } }
+  ]);
+  const result = await wh.sendEscalationAlert('recP1', property({ 'Notify Phone': '27811110099' }), { message: 'A guest needs help.' });
+  assert.strictEqual(result.tier, 'Owner');
+  assert.strictEqual(ctx.sends[0].to, '27811110099');
+});
+
+test('sendEscalationAlert logs loud and returns ok:false when nobody at all is resolvable (no roles, no Notify Phone, no OWNER_PHONE)', async () => {
+  // OWNER_PHONE is captured once as a module-level const at require time, so
+  // unsetting process.env alone has no effect — a fresh require is needed.
+  delete process.env.WABISTAY_GUEST_ESCALATION_TEMPLATE;
+  const savedOwnerPhone = process.env.OWNER_PHONE;
+  delete process.env.OWNER_PHONE;
+  delete require.cache[require.resolve('../api/wabistay/webhook.js')];
+  const freshWh = require('../api/wabistay/webhook.js');
+  const ctx = ctxWithRoles([]);
+  const result = await freshWh.sendEscalationAlert('recP1', property({}), { message: 'A guest needs help.' });
+  assert.strictEqual(result.ok, false);
+  assert.strictEqual(result.tier, null);
+  assert.strictEqual(ctx.sends.length, 0);
+  assert.ok(ctx.axiom.some(e => e.event === 'escalation_alert_no_recipient'));
+  process.env.OWNER_PHONE = savedOwnerPhone;
+  delete require.cache[require.resolve('../api/wabistay/webhook.js')];
+});
+
+test('sendEscalationAlert logs loud (non-fatal) when the free-form send itself fails', async () => {
+  delete process.env.WABISTAY_GUEST_ESCALATION_TEMPLATE;
+  const ctx = ctxWithRoles([
+    { id: 'recOnDuty', fields: { 'Role Type': 'On Duty', 'Property': ['recP1'], 'Current Phone': '27825999001', 'Active': true } }
+  ]);
+  const realFetch = global.fetch;
+  global.fetch = async (url, opts = {}) => {
+    if (String(url).includes('/messages') && String(opts.body || '').includes('A guest needs help.')) {
+      return { status: 500, ok: false, json: async () => ({ error: { type: 'SERVER_ERROR', message: 'simulated' } }) };
+    }
+    return realFetch(url, opts);
+  };
+  const result = await wh.sendEscalationAlert('recP1', property({ 'Notify Phone': '27811110099' }), { message: 'A guest needs help.' });
+  assert.strictEqual(result.ok, false);
+  assert.strictEqual(result.tier, 'On Duty');
+  assert.ok(ctx.axiom.some(e => e.event === 'escalation_alert_send_failed'));
+  global.fetch = realFetch;
+});
+
+// ── sendEscalationAlert via the approved guest-escalation template ─────────
+// Same reasoning as sub-PR 1's alertShawn fix, but more pressing here: staff
+// only ever receive from the bot, they don't message it first in the normal
+// course of their work, so assuming they're in-window is false far more
+// often than true. These prove the template path is used once configured —
+// not, and can't against this mock, that Meta's real 24h window behaves a
+// particular way.
+
+test('sendEscalationAlert sends the approved guest-escalation template once configured, with guest/step/last-input/time params', async () => {
+  process.env.WABISTAY_GUEST_ESCALATION_TEMPLATE = 'wabistay_guest_escalation';
+  const ctx = ctxWithRoles([
+    { id: 'recOnDuty', fields: { 'Role Type': 'On Duty', 'Property': ['recP1'], 'Current Phone': '27825999001', 'Active': true } }
+  ]);
+  const result = await wh.sendEscalationAlert(
+    'recP1',
+    property({ 'Property Name': 'Canary Street Guest Rooms', 'Notify Phone': '27811110099' }),
+    { guestPhone: '27821234567', step: 'AWAITING_STAY_TYPE', lastInput: '5' }
+  );
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(ctx.sends.length, 1);
+  assert.strictEqual(ctx.sends[0].type, 'template');
+  assert.strictEqual(ctx.sends[0].template, 'wabistay_guest_escalation');
+  assert.deepStrictEqual(ctx.sends[0].params.slice(0, 4), ['27821234567', 'Canary Street Guest Rooms', 'AWAITING_STAY_TYPE', '5']);
+  assert.ok(!Number.isNaN(Date.parse(ctx.sends[0].params[4])), 'the "time" param is a real timestamp');
+  delete process.env.WABISTAY_GUEST_ESCALATION_TEMPLATE;
+});
+
+test('sendEscalationAlert template params fall back to placeholders when guest info is missing', async () => {
+  process.env.WABISTAY_GUEST_ESCALATION_TEMPLATE = 'wabistay_guest_escalation';
+  const ctx = ctxWithRoles([
+    { id: 'recOnDuty', fields: { 'Role Type': 'On Duty', 'Property': ['recP1'], 'Current Phone': '27825999001', 'Active': true } }
+  ]);
+  await wh.sendEscalationAlert('recP1', property({ 'Notify Phone': '27811110099' }), {});
+  assert.deepStrictEqual(ctx.sends[0].params.slice(0, 4), ['unknown', 'Test Lodge', 'unknown', 'N/A']);
+  delete process.env.WABISTAY_GUEST_ESCALATION_TEMPLATE;
+});
+
+test('sendEscalationAlert logs loud when the template send itself fails, still via the template path', async () => {
+  process.env.WABISTAY_GUEST_ESCALATION_TEMPLATE = 'wabistay_guest_escalation';
+  const ctx = ctxWithRoles([
+    { id: 'recOnDuty', fields: { 'Role Type': 'On Duty', 'Property': ['recP1'], 'Current Phone': '27825999001', 'Active': true } }
+  ]);
+  const realFetch = global.fetch;
+  global.fetch = async (url, opts = {}) => {
+    if (String(url).includes('/messages') && String(opts.body || '').includes('wabistay_guest_escalation')) {
+      return { status: 400, ok: false, json: async () => ({ error: { code: 132001, message: 'Template not approved' } }) };
+    }
+    return realFetch(url, opts);
+  };
+  const result = await wh.sendEscalationAlert('recP1', property({ 'Notify Phone': '27811110099' }), { guestPhone: '27821234567', step: 'AWAITING_DETAILS', lastInput: 'blah' });
+  assert.strictEqual(result.ok, false);
+  assert.ok(ctx.axiom.some(e => e.event === 'escalation_alert_send_failed'));
+  global.fetch = realFetch;
+  delete process.env.WABISTAY_GUEST_ESCALATION_TEMPLATE;
+});

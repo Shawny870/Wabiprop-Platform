@@ -43,6 +43,20 @@ function receptionPaymentTemplate() {
   return process.env.WABISTAY_RECEPTION_PAYMENT_TEMPLATE || null;
 }
 
+// Guest-stuck/HELP escalation alert to staff (sendEscalationAlert, sub-PR 2
+// of 4). CEO correction, 2026-09-29: unlike alertShawn's destination, staff
+// (On Duty/Backup) only ever RECEIVE from the bot, they don't message it in
+// the normal course of their work — so assuming they're inside Meta's 24h
+// window is untested and likely false on the very first alert, the same
+// failure shape sub-PR 1 fixed for alertShawn. Different content shape from
+// an ops alert (guest number/step/last input, not a cron name/error), so a
+// second template, not a reuse — see the PR report for the exact body text
+// and Utility/Marketing classification. Same stub-until-configured contract
+// as every other template getter here.
+function guestEscalationTemplate() {
+  return process.env.WABISTAY_GUEST_ESCALATION_TEMPLATE || null;
+}
+
 // ─── AIRTABLE HELPERS ───────────────────────────────────────────────────────
 
 // `opts.throwOnError` (default false): every existing caller relies on the
@@ -1530,6 +1544,73 @@ async function resolveEscalationChain(propertyId, property) {
   }
 
   return chain;
+}
+
+// Guest-struggle/monitoring build, sub-PR 2 of 4 (CEO 2026-09-29): the send
+// capability resolveEscalationChain was always missing. Sends to the FIRST
+// tier in the resolved chain only — no fallback to the next tier on a send
+// failure. An inactive seat never enters the chain in the first place
+// (resolveEscalationChain already filters on {Active} = TRUE()), so "falls
+// to Backup when Jill is inactive" is the resolver's own behaviour, not
+// retry logic here. Non-fatal on failure: checked and logged loud, never
+// throws, matching every other staff/courtesy notify in this file.
+//
+// Prefers the approved guest-escalation template once configured (staff
+// only ever receive from the bot, never message it first, so assuming
+// they're inside Meta's 24h window is false far more often than true);
+// unset IS the stub state (see guestEscalationTemplate above), falling back
+// to free-form text so this is inert (not worse) with no template
+// configured — never a regression, just not yet window-safe.
+//
+// `alert.message` is the free-form fallback body; `alert.guestPhone`,
+// `alert.step`, `alert.lastInput` feed the template's placeholders once one
+// is configured. No trigger wires to this yet (deliberately — CEO
+// instruction). Called directly by tests until later PRs add the
+// guest-stuck/HELP triggers.
+async function sendEscalationAlert(propertyId, property, alert) {
+  const chain = await resolveEscalationChain(propertyId, property);
+  if (chain.length === 0) {
+    logToAxiom('error', 'escalation_alert_no_recipient', { propertyId });
+    return { ok: false, tier: null };
+  }
+  const { tier, roleId, phone } = chain[0];
+  const to = formatPhone(phone);
+
+  const templateName = guestEscalationTemplate();
+  let result;
+  if (templateName) {
+    result = await sendWhatsAppTemplate(
+      to, templateName,
+      [
+        alert.guestPhone || 'unknown',
+        (property && property.fields && property.fields['Property Name']) || 'N/A',
+        alert.step || 'unknown',
+        alert.lastInput || 'N/A',
+        new Date().toISOString()
+      ],
+      { site: 'escalation_alert', propertyId, tier }
+    ).catch(e => {
+      console.error('[sendEscalationAlert template failed]', e.message);
+      return { error: { message: e.message } };
+    });
+  } else {
+    logToAxiom('warn', 'escalation_alert_template_not_configured', {
+      propertyId, tier, reason: 'WABISTAY_GUEST_ESCALATION_TEMPLATE not configured — falling back to free-form, 24h-window-limited send'
+    });
+    result = await sendWhatsApp(to, alert.message).catch(e => {
+      console.error('[sendEscalationAlert failed]', e.message);
+      return { error: { message: e.message } };
+    });
+  }
+
+  if (result && result.error) {
+    logToAxiom('error', 'escalation_alert_send_failed', {
+      propertyId, tier, roleId: roleId || null, error: JSON.stringify(result.error)
+    });
+    return { ok: false, tier };
+  }
+  logToAxiom('info', 'escalation_alert_sent', { propertyId, tier, roleId: roleId || null });
+  return { ok: true, tier };
 }
 
 // Exact match only — never `roomMatchesText`, whose \b<number>\b test would
@@ -6144,6 +6225,7 @@ module.exports.ESCALATION_TIMEOUT_DEFAULT_MINUTES = ESCALATION_TIMEOUT_DEFAULT_M
 module.exports.ESCALATION_TIER_ROLE_TYPES = ESCALATION_TIER_ROLE_TYPES;
 module.exports.activeEscalationRolesForProperty = activeEscalationRolesForProperty;
 module.exports.resolveEscalationChain = resolveEscalationChain;
+module.exports.sendEscalationAlert = sendEscalationAlert;
 module.exports.DORMANT_THRESHOLD_DAYS_DEFAULT = DORMANT_THRESHOLD_DAYS_DEFAULT;
 // CEO manual report-trigger (api/wabistay/cron/manual-report.js) needs these
 // to build the SAME live-data fetch + stubbed-send pipeline the real crons
