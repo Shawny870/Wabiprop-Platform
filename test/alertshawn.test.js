@@ -62,9 +62,10 @@ test('getAlertPhone reads the number from WS_Config when a row exists', async ()
   assert.strictEqual(phone, '27811110000');
 });
 
-test('alertShawn sends free-form text to the WS_Config number', async () => {
+test('alertShawn sends free-form text to the WS_Config number when no ops-alert template is configured', async () => {
   const ctx = setup({ WS_Config: [{ id: 'recCFG1', fields: { 'Alert Phone': '27811110000' } }] });
   delete process.env.ALERT_PHONE_FALLBACK;
+  delete process.env.WABISTAY_OPS_ALERT_TEMPLATE;
   const wh = freshWebhook();
   await wh.alertShawn('owner_summary', 'Airtable timeout', { propertyId: 'recPROP1' });
   assert.strictEqual(ctx.sends.length, 1);
@@ -73,6 +74,67 @@ test('alertShawn sends free-form text to the WS_Config number', async () => {
   assert.ok(ctx.sends[0].body.includes('owner_summary'), 'message names the failing cron');
   assert.ok(ctx.sends[0].body.includes('Airtable timeout'), 'message includes the error');
   assert.ok(ctx.sends[0].body.includes('recPROP1'), 'message includes context');
+  assert.ok(ctx.axiom.some(e => e.event === 'alert_shawn_template_not_configured'),
+    'the stub-state fallback is logged, not silent');
+});
+
+// ── Sub-PR 1: alertShawn via the approved ops-alert template ────────────────
+// The whole point: a template send is not limited to Meta's 24h service
+// window (CLAUDE.md line 30) the way the free-form fallback above is — a
+// cron failure at 3am has no reason to have messaged the bot recently. These
+// tests prove the template path is used once configured; they don't (and
+// can't, against this mock) prove the 24h-window behaviour itself, since
+// MockAirtable/installFetch don't model Meta's re-engagement window at all —
+// that's asserted structurally, by proving sendWhatsAppTemplate (not
+// sendWhatsApp) is the call that goes out.
+
+test('alertShawn sends the approved ops-alert template once WABISTAY_OPS_ALERT_TEMPLATE is configured — reaches Shawn regardless of any 24h window', async () => {
+  const ctx = setup({ WS_Config: [{ id: 'recCFG1', fields: { 'Alert Phone': '27811110000' } }] });
+  delete process.env.ALERT_PHONE_FALLBACK;
+  process.env.WABISTAY_OPS_ALERT_TEMPLATE = 'wabistay_ops_alert';
+  const wh = freshWebhook();
+
+  await wh.alertShawn('owner_summary', 'Airtable timeout', { propertyId: 'recPROP1', propertyName: 'Canary Street' });
+
+  assert.strictEqual(ctx.sends.length, 1);
+  assert.strictEqual(ctx.sends[0].to, '27811110000');
+  assert.strictEqual(ctx.sends[0].type, 'template', 'must be a template send, never free-form, once configured');
+  assert.strictEqual(ctx.sends[0].template, 'wabistay_ops_alert');
+  assert.deepStrictEqual(ctx.sends[0].params, ['owner_summary', 'Canary Street', ctx.sends[0].params[2], 'Airtable timeout']);
+  assert.ok(!Number.isNaN(Date.parse(ctx.sends[0].params[2])), 'the "when" param is a real timestamp');
+  delete process.env.WABISTAY_OPS_ALERT_TEMPLATE;
+});
+
+test('alertShawn template path falls back to propertyId, then scope, when no propertyName is available', async () => {
+  const ctx = setup({ WS_Config: [{ id: 'recCFG1', fields: { 'Alert Phone': '27811110000' } }] });
+  delete process.env.ALERT_PHONE_FALLBACK;
+  process.env.WABISTAY_OPS_ALERT_TEMPLATE = 'wabistay_ops_alert';
+  const wh = freshWebhook();
+
+  await wh.alertShawn('daily_summary_fatal', 'boom', { scope: 'entire run, not a single property' });
+
+  assert.strictEqual(ctx.sends[0].params[1], 'entire run, not a single property');
+  delete process.env.WABISTAY_OPS_ALERT_TEMPLATE;
+});
+
+test('alertShawn logs loud when the template send itself fails, still via the template path', async () => {
+  const ctx = setup({ WS_Config: [{ id: 'recCFG1', fields: { 'Alert Phone': '27811110000' } }] });
+  delete process.env.ALERT_PHONE_FALLBACK;
+  process.env.WABISTAY_OPS_ALERT_TEMPLATE = 'wabistay_ops_alert';
+  const realFetch = global.fetch;
+  global.fetch = async (url, opts = {}) => {
+    if (String(url).includes('/messages') && String(opts.body || '').includes('wabistay_ops_alert')) {
+      return { status: 400, ok: false, json: async () => ({ error: { code: 132001, message: 'Template not approved' } }) };
+    }
+    return realFetch(url, opts);
+  };
+  const wh = freshWebhook();
+
+  await wh.alertShawn('owner_summary', 'Airtable timeout', { propertyId: 'recPROP1' });
+
+  assert.ok(ctx.axiom.some(e => e.event === 'alert_shawn_template_send_failed'));
+  global.fetch = realFetch;
+  delete process.env.WABISTAY_OPS_ALERT_TEMPLATE;
 });
 
 // This is the fallback path required by the task: WS_Config has no usable row
