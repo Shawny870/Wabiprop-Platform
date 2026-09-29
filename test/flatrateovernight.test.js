@@ -61,10 +61,11 @@ test('overnight flow: after name + dates, the guest goes straight to a quote —
 
   await send(GUEST_PHONE, 'Jane Doe\n1 September 2026\n2 September 2026');
 
-  assert.strictEqual(ctx.sends.length, 2, 'owner alert + guest quote, nothing more');
+  assert.strictEqual(ctx.sends.length, 3, 'owner alert + guest quote + guest payment-method menu, nothing more');
   assert.doesNotMatch(texts(ctx, GUEST_PHONE), /how many of you|just me|two of us/i);
   assert.match(texts(ctx, GUEST_PHONE), /R400 per night/i);
-  assert.strictEqual(guestRow(ctx).fields['Session State'], 'AWAITING_ETA');
+  assert.match(texts(ctx, GUEST_PHONE), /cashless property/i, 'the payment-method menu follows the quote');
+  assert.strictEqual(guestRow(ctx).fields['Session State'], 'AWAITING_PAYMENT_METHOD');
 });
 
 test('overnight flow: rate is quoted correctly with only a single active Per Night rate present', async () => {

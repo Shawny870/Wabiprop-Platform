@@ -1319,13 +1319,39 @@ const PAID_KEYWORD = /^(?:paid|collected)\b/i;
 // is NOT in the locked grammar — see the PR — but a reception that types CASH
 // should not be refused for being more specific than required.
 const PAID_BODY = /^room\s*([a-z0-9]{1,4})\s+r?\s*(\d+(?:[.,]\d{1,2})?)\s*(cash|eft|card)?\.?$/i;
+// Payment build (CEO decision, 2026-09-29): a pre-check-in EFT/card
+// confirmation is still Enquiry/Confirmed, not the Checked Out/Checked In
+// PAID ROOM already targets — using ROOM here would need PAID ROOM's own
+// matching rule widened to a different, overlapping status set, which risks
+// two payments (a pre-check-in one and a post-stay one) colliding on the
+// same room/date. PAID REF <ref> is a second, separate grammar, matched by
+// the booking's own {Payment Reference} instead. PROPOSED SYNTAX, not yet
+// confirmed with Shawn — flagged in the PR report, same as PR D's
+// command-syntax asks, since staff need to memorise this alongside PAID ROOM.
+const PAID_REF_BODY = /^ref\s*([a-z0-9]{4})\s+r?\s*(\d+(?:[.,]\d{1,2})?)\s*(cash|eft|card)?\.?$/i;
 const PAID_METHODS = { cash: 'Cash', eft: 'EFT', card: 'Card' };
+// Excludes O, 0, I, 1, L (payment build spec, CEO 2026-09-29) — visually
+// confusable characters a guest reading the reference off a phone screen,
+// or reception typing it back, could misread.
+const PAYMENT_REFERENCE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 
 function parsePaidCommand(text) {
   const t = String(text || '').trim().replace(/\s+/g, ' ');
   if (!PAID_KEYWORD.test(t)) return null;
 
   const body = t.replace(PAID_KEYWORD, '').trim();
+
+  const refMatch = body.match(PAID_REF_BODY);
+  if (refMatch) {
+    const amount = Number(String(refMatch[2]).replace(',', '.'));
+    if (!Number.isFinite(amount) || amount <= 0) return { ok: false, reason: 'bad_amount' };
+    const method = refMatch[3] ? PAID_METHODS[refMatch[3].toLowerCase()] : null;
+    // Accepted case-insensitively on input, normalised to uppercase before
+    // comparing (payment build spec) — the reference itself is generated
+    // uppercase-only, so this is the one normalisation point.
+    return { ok: true, refToken: refMatch[1].toUpperCase(), amount, method };
+  }
+
   const m = body.match(PAID_BODY);
   if (!m) return { ok: false, reason: 'bad_syntax' };
 
@@ -1335,6 +1361,32 @@ function parsePaidCommand(text) {
 
   const method = m[3] ? PAID_METHODS[m[3].toLowerCase()] : null;
   return { ok: true, roomToken: m[1], amount, method };
+}
+
+// 4 characters from PAYMENT_REFERENCE_ALPHABET, unique among pre-check-in
+// bookings' {Payment Reference} at creation (payment build spec) — Enquiry
+// and Confirmed, the same two statuses PAID REF matches against. Once a
+// booking leaves that scope (Checked In or later) the reference has already
+// done its job and a later booking is free to reuse the code — an unbounded
+// uniqueness scope would eventually exhaust a 32^4 (~1M) space for no reason
+// this business needs.
+async function generateUniquePaymentReference() {
+  // Same pre-check-in scope PAID REF matches against — see paidBooking's
+  // comment on why both statuses are live candidates.
+  const existing = await airtableGet('WS_Bookings', orFormula('Status', ['Enquiry', 'Confirmed']));
+  const taken = new Set(existing.map(b => b.fields['Payment Reference']).filter(Boolean).map(r => String(r).toUpperCase()));
+  for (let attempt = 0; attempt < 50; attempt++) {
+    let ref = '';
+    for (let i = 0; i < 4; i++) {
+      ref += PAYMENT_REFERENCE_ALPHABET[Math.floor(Math.random() * PAYMENT_REFERENCE_ALPHABET.length)];
+    }
+    if (!taken.has(ref)) return ref;
+  }
+  // Astronomically unlikely at this business's volume (a few guests/day
+  // against a ~1M-code space) — fail loud rather than silently hand out a
+  // colliding reference if it ever somehow happens.
+  logToAxiom('error', 'payment_reference_generation_exhausted', { existingCount: existing.length });
+  throw new Error('generateUniquePaymentReference: could not find a unique reference after 50 attempts');
 }
 
 // ─── CLEANING TIME (START / DONE) ────────────────────────────────────────────
@@ -2476,38 +2528,71 @@ const actions = {
     }
     const property = ctx.property;
 
-    // Resolve the room within this property, exact match only — the same
-    // matcher WALKIN uses, never roomMatchesText.
-    const allRooms = await airtableGet('WS_Rooms', '');
-    const propertyRooms = allRooms.filter(r => (r.fields['Property'] || []).includes(property.id));
-    const room = propertyRooms.find(r => roomMatchesWalkinToken(r, parsed.roomToken)) || null;
-    if (!room) {
-      logToAxiom('info', 'paid_rejected', { phone: ctx.phone, reason: 'no_such_room', roomToken: parsed.roomToken });
-      await sendWhatsApp(ctx.phone, msg('paidNoSuchRoom', { roomToken: parsed.roomToken }));
-      return;
+    let room, booking;
+
+    if (parsed.refToken) {
+      // Payment build (CEO decision, 2026-09-29): a pre-check-in EFT/card
+      // confirmation happens before check-in, and depending on whether the
+      // guest has given their ETA yet, the booking may still be 'Enquiry'
+      // (overnight, pre-ETA) or already 'Confirmed' (hourly always has a
+      // room by this point; overnight becomes Confirmed once ETA is given)
+      // — so it is matched by the booking's own {Payment Reference} across
+      // both pre-check-in statuses instead of by room or a single status.
+      const preCheckin = await airtableGet('WS_Bookings', orFormula('Status', ['Enquiry', 'Confirmed']));
+      booking = preCheckin.find(b => String(b.fields['Payment Reference'] || '').toUpperCase() === parsed.refToken) || null;
+      if (!booking) {
+        logToAxiom('info', 'paid_rejected', { phone: ctx.phone, reason: 'no_booking_for_reference', refToken: parsed.refToken });
+        await sendWhatsApp(ctx.phone, msg('paidNoBooking', { roomName: `reference ${parsed.refToken}` }));
+        return;
+      }
+      const bookingPropId = bookingPropertyId(booking, null);
+      if (bookingPropId && bookingPropId !== property.id) {
+        logToAxiom('warn', 'paid_property_mismatch', {
+          phone: ctx.phone, roleId: role.id, rolePropertyId: bookingPropId, inboundPropertyId: property.id
+        });
+        await sendWhatsApp(ctx.phone, msg('paidWrongProperty'));
+        return;
+      }
+      const roomId = (booking.fields['Room'] || [])[0];
+      const roomRecords = roomId ? await airtableGet('WS_Rooms', `RECORD_ID() = '${roomId}'`) : [];
+      room = roomRecords[0] || null; // both booking types have a room by this point in practice, but never assumed — falls back to roomNameForCopy below if somehow absent
+    } else {
+      // Resolve the room within this property, exact match only — the same
+      // matcher WALKIN uses, never roomMatchesText.
+      const allRooms = await airtableGet('WS_Rooms', '');
+      const propertyRooms = allRooms.filter(r => (r.fields['Property'] || []).includes(property.id));
+      room = propertyRooms.find(r => roomMatchesWalkinToken(r, parsed.roomToken)) || null;
+      if (!room) {
+        logToAxiom('info', 'paid_rejected', { phone: ctx.phone, reason: 'no_such_room', roomToken: parsed.roomToken });
+        await sendWhatsApp(ctx.phone, msg('paidNoSuchRoom', { roomToken: parsed.roomToken }));
+        return;
+      }
+
+      // Which stay is being paid for. Reception is standing at the desk just after
+      // a checkout, so the target is that room's most recent CLOSED booking:
+      // Checked Out ranks over Checked In (a guest still in the room has not been
+      // billed at the desk yet), and within each, latest Check Out wins. Cancelled
+      // and Enquiry rows can never be paid for through this path — Enquiry is the
+      // REF path's job, above.
+      const PAYABLE_STATUSES = ['Checked Out', 'Checked In'];
+      const all = await airtableGet('WS_Bookings', orFormula('Status', PAYABLE_STATUSES));
+      const candidates = all
+        .filter(b => (b.fields['Room'] || []).includes(room.id))
+        .sort((a, b) => {
+          const rank = s => (s === 'Checked Out' ? 0 : 1);
+          const byStatus = rank(a.fields['Status']) - rank(b.fields['Status']);
+          if (byStatus !== 0) return byStatus;
+          return Date.parse(b.fields['Check Out'] || 0) - Date.parse(a.fields['Check Out'] || 0);
+        });
+      booking = candidates[0] || null;
+      if (!booking) {
+        logToAxiom('info', 'paid_rejected', { phone: ctx.phone, reason: 'no_booking', roomId: room.id });
+        await sendWhatsApp(ctx.phone, msg('paidNoBooking', { roomName: room.fields['Room Name'] }));
+        return;
+      }
     }
 
-    // Which stay is being paid for. Reception is standing at the desk just after
-    // a checkout, so the target is that room's most recent CLOSED booking:
-    // Checked Out ranks over Checked In (a guest still in the room has not been
-    // billed at the desk yet), and within each, latest Check Out wins. Cancelled
-    // and Enquiry rows can never be paid for.
-    const PAYABLE_STATUSES = ['Checked Out', 'Checked In'];
-    const all = await airtableGet('WS_Bookings', orFormula('Status', PAYABLE_STATUSES));
-    const candidates = all
-      .filter(b => (b.fields['Room'] || []).includes(room.id))
-      .sort((a, b) => {
-        const rank = s => (s === 'Checked Out' ? 0 : 1);
-        const byStatus = rank(a.fields['Status']) - rank(b.fields['Status']);
-        if (byStatus !== 0) return byStatus;
-        return Date.parse(b.fields['Check Out'] || 0) - Date.parse(a.fields['Check Out'] || 0);
-      });
-    const booking = candidates[0] || null;
-    if (!booking) {
-      logToAxiom('info', 'paid_rejected', { phone: ctx.phone, reason: 'no_booking', roomId: room.id });
-      await sendWhatsApp(ctx.phone, msg('paidNoBooking', { roomName: room.fields['Room Name'] }));
-      return;
-    }
+    const roomNameForCopy = room ? room.fields['Room Name'] : `reference ${parsed.refToken}`;
 
     // Idempotency (locked): an already-Paid booking is reported, never rewritten.
     // Reception re-sending after a lost reply, or two handsets recording the same
@@ -2519,7 +2604,7 @@ const actions = {
         amountPaid: booking.fields['Amount Paid'] || null
       });
       await sendWhatsApp(ctx.phone, msg('paidAlreadyRecorded', {
-        roomName: room.fields['Room Name'],
+        roomName: roomNameForCopy,
         bookingRef: booking.fields['Booking Ref'] || '',
         amountPaid: formatAmount(booking.fields['Amount Paid'])
       }));
@@ -2552,11 +2637,11 @@ const actions = {
     if (priced && Math.abs(parsed.amount - amountDue) > AMOUNT_EPSILON) {
       logToAxiom('warn', 'payment_amount_mismatch', {
         phone: ctx.phone, bookingId: booking.id, bookingRef: booking.fields['Booking Ref'] || null,
-        roomName: room.fields['Room Name'], amountSent: parsed.amount, amountDue,
+        roomName: roomNameForCopy, amountSent: parsed.amount, amountDue,
         delta: Number((parsed.amount - amountDue).toFixed(2)), written: false
       });
       await sendWhatsApp(ctx.phone, msg('paidAmountMismatch', {
-        roomName: room.fields['Room Name'],
+        roomName: roomNameForCopy,
         amountSent: formatAmount(parsed.amount),
         amountDue: formatAmount(amountDue)
       }));
@@ -2570,7 +2655,11 @@ const actions = {
     }
 
     const status = 'Paid';
-    const method = parsed.method || 'Cash';
+    // A REF-matched confirmation already has its method on the booking (set
+    // by selectPaymentMethod) — reception isn't re-specifying Card/EFT, just
+    // confirming the funds landed, so that stored value wins over the room
+    // path's Cash default.
+    const method = parsed.method || (parsed.refToken && booking.fields['Payment Method']) || 'Cash';
 
     // One instant, written to both sinks. Generating it twice would let the
     // Airtable field and the Axiom event disagree by however long the write
@@ -2608,20 +2697,20 @@ const actions = {
         amountAttempted: parsed.amount, method,
         error: JSON.stringify(result.error)
       });
-      await sendWhatsApp(ctx.phone, msg('paidWriteFailed', { roomName: room.fields['Room Name'] }));
+      await sendWhatsApp(ctx.phone, msg('paidWriteFailed', { roomName: roomNameForCopy }));
       return;
     }
 
     logToAxiom('info', 'payment_recorded', {
       phone: ctx.phone, roleId: role.id, propertyId: property.id,
       bookingId: booking.id, bookingRef: booking.fields['Booking Ref'] || null,
-      roomId: room.id, roomName: room.fields['Room Name'],
+      roomId: room ? room.id : null, roomName: roomNameForCopy,
       amountPaid: parsed.amount, amountDue, method, status,
       recordedAt
     });
 
     await sendWhatsApp(ctx.phone, msg('paidRecorded', {
-      roomName: room.fields['Room Name'],
+      roomName: roomNameForCopy,
       bookingRef: booking.fields['Booking Ref'] || '',
       amountPaid: formatAmount(parsed.amount),
       method
@@ -3142,6 +3231,11 @@ const actions = {
     }
 
     if (!priced) {
+      // Session State was already advanced to AWAITING_PAYMENT_METHOD above
+      // (ctx.next, written before this rate lookup ran) — no price exists to
+      // ask payment for, so this downgrades straight to AWAITING_ETA instead,
+      // same target the priced path reaches after payment method is chosen.
+      await updateGuestState(ctx.guest.id, { 'Session State': 'AWAITING_ETA' });
       await sendWhatsApp(ctx.phone, msg('occupancyContactOwner', { guestName }));
       return;
     }
@@ -3150,6 +3244,7 @@ const actions = {
       guestName, bookingRef, checkIn, checkOut,
       rateLine: `*Rate:* R${rate.fields['Amount']} per night`
     }));
+    await sendWhatsApp(ctx.phone, msg('paymentMethodMenu', { propertyName: ctx.property.fields['Property Name'] }));
   },
 
   // NEW / AWAITING_DETAILS + "HOURLY": enter the short-stay flow (closes F10 —
@@ -3495,6 +3590,110 @@ const actions = {
       }
     }
     await sendWhatsApp(ctx.phone, msg('hourlyBookingReceived', view));
+    await sendWhatsApp(ctx.phone, msg('paymentMethodMenu', { propertyName: ctx.property.fields['Property Name'] }));
+  },
+
+  // AWAITING_PAYMENT_METHOD (payment build, CEO 2026-09-29): guest chooses
+  // Card (paid on SpeedPoint at reception) or Instant EFT (paid at
+  // reception, funds confirmed by reception via PAID). Reached only from a
+  // PRICED quote (bookingReceived / hourlyBookingReceived) — the fail-closed
+  // "owner will finalise price" path has no amount to ask payment for, so it
+  // skips straight to AWAITING_ETA and never reaches this state.
+  //
+  // No room or key is handed over here or anywhere in this handler — that is
+  // the whole point of the design. This only records which method the guest
+  // intends and, for EFT, generates the reference reception will later
+  // confirm via `PAID REF`. The actual confirmation is a separate, later,
+  // staff-only action (paidBooking) — never triggered by anything the guest
+  // says here, including the word "paid" itself.
+  async selectPaymentMethod(ctx) {
+    const CARD_CHOICES = ['1', 'card'];
+    const EFT_CHOICES = ['2', 'eft', 'instant eft'];
+    const guestName = ctx.guest.fields['Guest Name'];
+
+    if (!CARD_CHOICES.includes(ctx.text) && !EFT_CHOICES.includes(ctx.text)) {
+      await sendWhatsApp(ctx.phone, msg('paymentMethodReprompt'));
+      return;
+    }
+
+    // The pending priced booking — collectDetails/selectHourlyDuration both
+    // write Amount Due before advancing here, so its presence is what marks
+    // "the booking this payment step is for" (the fail-closed unpriced case
+    // never reaches this state at all, per the header comment above).
+    // Overnight is still 'Enquiry' at this point; hourly is already
+    // 'Confirmed' (selectHourlyDuration's own write, no intermediate Enquiry
+    // step for hourly — see that handler's P1a comment) — both are checked.
+    const [enquiries, confirmedHourly] = await Promise.all([
+      airtableGetBookingsByGuestId(ctx.guest.id, 'Enquiry'),
+      airtableGetBookingsByGuestId(ctx.guest.id, 'Confirmed')
+    ]);
+    const booking = enquiries.find(b => b.fields['Amount Due'] !== undefined)
+      || confirmedHourly.find(b => b.fields['Booking Type'] === 'Hourly' && b.fields['Amount Due'] !== undefined)
+      || null;
+    if (!booking) {
+      // Flow lost its footing (no pending priced enquiry) — re-prompt rather
+      // than dead-end, zero writes. Mirrors selectOccupancy's old posture.
+      await sendWhatsApp(ctx.phone, msg('paymentMethodReprompt'));
+      return;
+    }
+
+    // Hourly already captured its arrival time in collectHourlyDetails, so it
+    // goes straight to the gate-arrival menu; overnight still needs to ask.
+    const isHourly = booking.fields['Booking Type'] === 'Hourly';
+    const nextState = isHourly ? 'CONFIRMED' : 'AWAITING_ETA';
+
+    if (CARD_CHOICES.includes(ctx.text)) {
+      const write = await airtableUpdate('WS_Bookings', booking.id, { 'Payment Method': 'Card' });
+      if (write && write.error) {
+        logToAxiom('error', 'payment_method_write_failed', {
+          phone: ctx.phone, bookingId: booking.id, method: 'Card', error: JSON.stringify(write.error)
+        });
+      }
+      await updateGuestState(ctx.guest.id, { 'Session State': nextState, 'Last Inbound At': new Date().toISOString() });
+      await sendWhatsApp(ctx.phone, msg('paymentCardChosen'));
+      await sendWhatsApp(ctx.phone, isHourly ? msg('confirmedMenu', { guestName }) : msg('askEta'));
+      return;
+    }
+
+    // EFT: generate the reference reception will later match on via
+    // `PAID REF`. Rule 30 posture — FATAL-ish but not blocking: if the write
+    // fails, the guest is still told a reference (so they can act on it),
+    // but the failure is logged loud since an un-persisted reference can
+    // never be matched by PAID REF later — reception's confirmation would
+    // silently fail to find anything.
+    const reference = await generateUniquePaymentReference();
+    const write = await airtableUpdate('WS_Bookings', booking.id, {
+      'Payment Method': 'EFT',
+      'Payment Reference': reference
+    });
+    if (write && write.error) {
+      logToAxiom('error', 'payment_reference_write_failed', {
+        phone: ctx.phone, bookingId: booking.id, reference, error: JSON.stringify(write.error)
+      });
+    }
+    await updateGuestState(ctx.guest.id, { 'Session State': nextState, 'Last Inbound At': new Date().toISOString() });
+
+    const property = await (async () => {
+      const roomId = (booking.fields['Room'] || [])[0];
+      if (roomId) {
+        const rooms = await airtableGet('WS_Rooms', `RECORD_ID() = '${roomId}'`);
+        const propId = rooms[0] && (rooms[0].fields['Property'] || [])[0];
+        if (propId) {
+          const props = await airtableGet('WS_Properties', `RECORD_ID() = '${propId}'`);
+          if (props[0]) return props[0];
+        }
+      }
+      return ctx.property; // defensive fallback only — both booking types have a room by this point in practice
+    })();
+    const bankDetails = property.fields['EFT Bank Details'];
+    const bankDetailsBlock = bankDetails ? bankDetails : msg('paymentEftBankDetailsFallback');
+
+    await sendWhatsApp(ctx.phone, msg('paymentEftConfirmed', {
+      amount: formatAmount(booking.fields['Amount Due']),
+      reference,
+      bankDetailsBlock
+    }));
+    await sendWhatsApp(ctx.phone, isHourly ? msg('confirmedMenu', { guestName }) : msg('askEta'));
   },
 
   // AWAITING_ETA: record ETA, confirm booking
@@ -3575,6 +3774,26 @@ const actions = {
         }));
         return;
       }
+    }
+
+    // Payment build (CEO decision, 2026-09-29): no room or key until payment
+    // is confirmed by reception via PAID/PAID REF — never on anything the
+    // guest says here, including "I'm at the gate" itself. Gated on the
+    // booking actually being priced: the fail-closed "owner will finalise
+    // price" path (occupancyContactOwner) has no Amount Due to have been
+    // confirmed against, so it is deliberately let through unchanged, same
+    // as it already was before this build.
+    if (booking && Number(booking.fields['Amount Due']) > 0 && booking.fields['Payment Status'] !== 'Paid') {
+      logToAxiom('info', 'gate_arrival_payment_not_confirmed', {
+        phone: ctx.phone, bookingId: booking.id, amountDue: booking.fields['Amount Due']
+      });
+      // PLACEHOLDER COPY — not yet confirmed with Shawn, flagged in the PR
+      // report alongside the other payment-build copy gaps. No writes, no
+      // state change: the guest can simply try again once reception confirms.
+      await sendWhatsApp(ctx.phone, msg('paymentNotYetConfirmed', {
+        guestName: ctx.guest.fields['Guest Name']
+      }));
+      return;
     }
 
     let room = null;
@@ -4317,7 +4536,11 @@ const ENQUIRY_ABANDON_MS = 24 * 60 * 60 * 1000; // 24h since last inbound with n
 // restructured to stop gating it on those differences.
 const ENQUIRY_ABANDON_STATES = [
   'AWAITING_OCCUPANCY', 'AWAITING_ETA', 'AWAITING_HOURLY_DURATION',
-  'AWAITING_DETAILS', 'AWAITING_HOURLY_DETAILS'
+  'AWAITING_DETAILS', 'AWAITING_HOURLY_DETAILS',
+  // Payment build (CEO 2026-09-29): a guest quoted a price who never picks
+  // Card/EFT is exactly the same limbo-guest shape this sweep already exists
+  // to unstick.
+  'AWAITING_PAYMENT_METHOD'
 ];
 
 // Writes exactly one WS_Enquiries row. Property-scoped via property.id (JS-side

@@ -88,7 +88,7 @@
         "table": "WS_Guests",
         "id": "recG1",
         "fields": {
-          "Session State": "CONFIRMED"
+          "Session State": "AWAITING_PAYMENT_METHOD"
         }
       },
       {
@@ -118,8 +118,15 @@
         "includes": [
           "Thanks John Smith",
           "Duration:* 2 hours",
-          "Rate:* R250",
-          "1 - I'm at the gate"
+          "Rate:* R250"
+        ]
+      },
+      {
+        "to": "27821234567",
+        "includes": [
+          "cashless property",
+          "Card",
+          "Instant EFT"
         ]
       }
     ]

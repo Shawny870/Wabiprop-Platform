@@ -60,7 +60,7 @@
         "id": "recG1",
         "fields": {
           "Guest Name": "John Smith",
-          "Session State": "AWAITING_ETA"
+          "Session State": "AWAITING_PAYMENT_METHOD"
         }
       },
       {
@@ -95,6 +95,14 @@
           ],
           "Requested Check In": "re:^2026-12-01T12:00:00\\.000Z$",
           "Requested Check Out": "re:^2026-12-03T08:00:00\\.000Z$"
+        }
+      },
+      {
+        "op": "update",
+        "table": "WS_Guests",
+        "id": "recG1",
+        "fields": {
+          "Session State": "AWAITING_ETA"
         }
       }
     ],
