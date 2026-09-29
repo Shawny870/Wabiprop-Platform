@@ -201,7 +201,30 @@ test('gate arrival: no room is assigned while a priced booking is still Unpaid â
   assert.strictEqual(booking.fields['Status'], 'Confirmed', 'never checked in');
   assert.strictEqual(booking.fields['Room'], undefined, 'no room assigned');
   assert.strictEqual(guestRow(ctx).fields['Session State'], 'CONFIRMED', 'not advanced');
-  assert.match(texts(ctx, GUEST_PHONE), /haven't received confirmation of your payment/i);
+  assert.match(texts(ctx, GUEST_PHONE), /pop into the office/i);
+});
+
+test('gate arrival: reachable more than once â€” a guest nudged to the office can try "I\'m at the gate" again after paying, without restarting the booking', async () => {
+  const ctx = start({
+    WS_Guests: [{ id: 'recG1', fields: { 'Guest Name': 'Jane Doe', 'Phone Number': GUEST_PHONE, 'Session State': 'CONFIRMED' } }],
+    WS_Bookings: [{
+      id: 'recB1', fields: {
+        'Guest': ['recG1'], 'Status': 'Confirmed', 'Booking Type': 'Overnight',
+        'Amount Due': 400, 'Payment Status': 'Unpaid',
+        'Check In': '2020-01-01T12:00:00.000Z', 'Check Out': '2099-01-01T08:00:00.000Z'
+      }
+    }]
+  });
+  await send(GUEST_PHONE, '1'); // nudged to the office, no writes
+  assert.strictEqual(bookingRow(ctx).fields['Status'], 'Confirmed');
+
+  // Reception confirms payment in the meantime (same as PAID ROOM would do).
+  ctx.airtable.tables['WS_Bookings'].find(b => b.id === 'recB1').fields['Payment Status'] = 'Paid';
+
+  await send(GUEST_PHONE, '1'); // same booking, same guest, no restart needed
+  const booking = bookingRow(ctx);
+  assert.strictEqual(booking.fields['Status'], 'Checked In', 'the SAME booking now completes, nothing had to be redone');
+  assert.strictEqual(guestRow(ctx).fields['Session State'], 'CHECKED_IN');
 });
 
 test('gate arrival: proceeds normally once Payment Status is Paid', async () => {

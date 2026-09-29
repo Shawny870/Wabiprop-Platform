@@ -3776,8 +3776,13 @@ const actions = {
       }
     }
 
-    // Payment build (CEO decision, 2026-09-29): no room or key until payment
-    // is confirmed by reception via PAID/PAID REF — never on anything the
+    // Payment build (CEO decision, 2026-09-29, copy corrected 2026-09-29): the
+    // guest is already on the property at this point — this withholds the KEY,
+    // not entry. Nothing here or anywhere else in this codebase models a
+    // physical gate/lock, so there is no separate "entry" mechanism to
+    // withhold in the first place; this gate's only real effect is that no
+    // room gets assigned and the booking doesn't reach Checked In until
+    // reception confirms payment via PAID/PAID REF — never on anything the
     // guest says here, including "I'm at the gate" itself. Gated on the
     // booking actually being priced: the fail-closed "owner will finalise
     // price" path (occupancyContactOwner) has no Amount Due to have been
@@ -3787,9 +3792,9 @@ const actions = {
       logToAxiom('info', 'gate_arrival_payment_not_confirmed', {
         phone: ctx.phone, bookingId: booking.id, amountDue: booking.fields['Amount Due']
       });
-      // PLACEHOLDER COPY — not yet confirmed with Shawn, flagged in the PR
-      // report alongside the other payment-build copy gaps. No writes, no
-      // state change: the guest can simply try again once reception confirms.
+      // No writes, no state change (CEO requirement): the guest can send
+      // "I'm at the gate" again after paying, and this same check re-runs
+      // fresh — nothing about this turn is remembered or needs undoing.
       await sendWhatsApp(ctx.phone, msg('paymentNotYetConfirmed', {
         guestName: ctx.guest.fields['Guest Name']
       }));
