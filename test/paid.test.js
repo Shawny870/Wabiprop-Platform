@@ -347,15 +347,54 @@ test('an inactive seat cannot record payments', async () => {
   assert.doesNotMatch(texts(ctx), /payment recorded/i);
 });
 
-test('a non-Reception seat cannot record payments', async () => {
-  // PAID is Reception-only per the locked refusal rule — narrower than WALKIN,
-  // which also accepts Owner and Manager. Flagged in the PR.
+test('a non-Reception, non-On-Duty seat cannot record payments', async () => {
+  // PAID is Reception-or-On-Duty per the locked refusal rule — narrower than
+  // WALKIN, which also accepts Owner and Manager. Flagged in the PR.
   const s = seed();
   s.WS_Roles[0].fields['Role Type'] = 'Manager';
   const ctx = start({ WS_Roles: s.WS_Roles });
   await send(RECEPTION_PHONE, 'PAID ROOM 2 400');
 
   assert.strictEqual(bookingRow(ctx)['Payment Status'], 'Unpaid');
+});
+
+test('an On Duty seat (Jill) can record payments as a fallback to Reception — payment build, CEO 2026-09-29', async () => {
+  const s = seed();
+  s.WS_Roles[0].fields['Role Type'] = 'On Duty';
+  const ctx = start({ WS_Roles: s.WS_Roles });
+  await send(RECEPTION_PHONE, 'PAID ROOM 2 400');
+
+  const b = bookingRow(ctx);
+  assert.strictEqual(b['Payment Status'], 'Paid');
+  assert.strictEqual(b['Amount Paid'], 400);
+  assert.match(texts(ctx), /Payment recorded/);
+});
+
+test('an On Duty seat does NOT get added to the reception checkout-payment push — that notify list stays Reception-only', async () => {
+  // PAID_COMMAND_ROLE_TYPES (command authorization) is deliberately a
+  // separate constant from PAID_ROLE_TYPES (activeReceptionRolesForProperty's
+  // notify list) — widening the notify list to On Duty was never asked for
+  // and would put Jill on a cash-reconciliation push nobody added him to.
+  // No Reception seat at all here, only On Duty — if the notify list were
+  // widened, Jill would receive the push instead of this "no seat" warning.
+  const s = seed();
+  s.WS_Roles[0].fields['Role Type'] = 'On Duty';
+  const ctx = start({
+    WS_Roles: s.WS_Roles,
+    WS_Guests: [{ id: 'recG1', fields: { 'Guest Name': 'John Smith', 'Phone Number': GUEST_PHONE, 'Session State': 'CHECKED_IN' } }],
+    WS_Bookings: [{
+      id: 'recB2', fields: {
+        'Guest': ['recG1'], 'Room': ['recR1'], 'Status': 'Checked In', 'Booking Type': 'Overnight',
+        'Amount Due': 400, 'Payment Status': 'Unpaid', 'WS_Property': ['recP1'],
+        'Checked In At': '2020-01-01T00:00:00.000Z'
+      }
+    }]
+  });
+  await send(GUEST_PHONE, 'checkout');
+  assert.ok(ctx.axiom.some(e => e.event === 'reception_payment_notify_no_seat'),
+    'no Reception seat is visible for the push — the On Duty seat must not silently satisfy it');
+  assert.ok(!ctx.sends.some(s2 => s2.to === RECEPTION_PHONE && /Payment recorded|owed/i.test(s2.body || '')),
+    'Jill (On Duty) never receives the reception payment-owed push');
 });
 
 // ── Room and booking resolution ─────────────────────────────────────────────
