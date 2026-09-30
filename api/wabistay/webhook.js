@@ -4100,6 +4100,10 @@ const actions = {
 
     const assignedRoomId = room ? room.id : null;
     const assignedRoomName = room ? room.fields['Room Name'] : null;
+    // Captured BEFORE Step 3 flips the room to Occupied, so reception sees the
+    // state the room was actually in when the guest arrived (e.g. Cleaning),
+    // not the Occupied this very check-in is about to write.
+    const assignedRoomStatus = room ? (room.fields['Status'] || 'Unknown') : 'N/A';
 
     // Step 3: room → Occupied. Now it really is occupancy, not a hold.
     // Rule 30 step 2, slice 1: checked but non-fatal — Status is a derived
@@ -4181,6 +4185,7 @@ const actions = {
         roomInfo: assignedRoomName
           ? msg('gateRoomAssignedInfo', { roomName: assignedRoomName })
           : msg('gateNoRoomInfo'),
+        roomStatus: assignedRoomStatus,
         phone: ctx.phone
       }));
       if (ownerSend && ownerSend.error) {

@@ -165,7 +165,7 @@
         "to": "27821234567",
         "includes": [
           "Welcome to Test Lodge!",
-          "assigned *Room 1*",
+          "Your room is *Room 1*",
           "1 - Check out"
         ]
       }
