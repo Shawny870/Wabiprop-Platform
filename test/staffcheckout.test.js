@@ -100,6 +100,19 @@ test('CHECKOUT and PAID are independently composable — PAID before CHECKOUT st
   assert.strictEqual(bookingRow(ctx).fields['Status'], 'Checked Out');
 });
 
+test('CHECKOUT before PAID also works — payment recorded after the stay is already Checked Out', async () => {
+  const ctx = start();
+  await send(STAFF_PHONE, 'CHECKOUT ROOM 1');
+  assert.strictEqual(bookingRow(ctx).fields['Status'], 'Checked Out');
+  assert.strictEqual(roomRow(ctx).fields['Status'], 'Cleaning');
+
+  await send(STAFF_PHONE, 'PAID ROOM 1 400');
+  assert.strictEqual(bookingRow(ctx).fields['Payment Status'], 'Paid');
+  assert.strictEqual(bookingRow(ctx).fields['Status'], 'Checked Out', 'PAID must not reopen the stay');
+  assert.strictEqual(roomRow(ctx).fields['Status'], 'Cleaning', 'PAID must not touch the room');
+  assert.match(texts(ctx), /Payment recorded/);
+});
+
 test('an On Duty seat (Jill) can also run CHECKOUT — same fallback as PAID', async () => {
   const ctx = start({
     WS_Roles: [{ id: 'recRoleOD', fields: { 'Role Label': 'On Duty', 'Role Type': 'On Duty', 'Property': ['recP1'], 'Current Phone': ON_DUTY_PHONE, 'Active': true } }]
