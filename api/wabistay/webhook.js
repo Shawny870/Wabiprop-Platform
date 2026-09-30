@@ -1247,6 +1247,13 @@ const WALKIN_KEYWORD = /^walk\s*-?\s*in\b/i;
 // because `Room A` exists in the fixtures and a number would lose it. Everything
 // after the duration is guest identity — see splitWalkinIdentity.
 const WALKIN_BODY = /^room\s*([a-z0-9]{1,4})\s+(\d{1,2})\s*(?:hrs|hr|hours|hour|h)\b\.?\s*(.*)$/i;
+// PR D (CEO decision, 2026-09-29): `WALKIN ROOM <n> OVERNIGHT <checkin> <checkout>
+// [name] [phone]` — the overnight sibling of the hourly grammar above, same
+// `ROOM <n>` anchor, `OVERNIGHT` playing the disambiguating role `HRS` plays for
+// hourly. Reuses findDateTokens/parseBookingDate (the exact parser collectDetails
+// already uses for guest-typed dates) rather than inventing a second date
+// grammar to maintain.
+const WALKIN_OVERNIGHT_BODY = /^room\s*([a-z0-9]{1,4})\s+overnight\s+(.*)$/i;
 // A trailing SA phone number, in any of the shapes staff actually type. Anchored
 // to the END so it can never eat a digit out of the middle of a name.
 const WALKIN_PHONE = /(?:^|\s)(\+?\d[\d\s-]{7,15})\s*$/;
@@ -1277,6 +1284,35 @@ function parseWalkinCommand(text) {
   if (!WALKIN_KEYWORD.test(t)) return null;
 
   const body = t.replace(WALKIN_KEYWORD, '').trim();
+
+  // PR D: OVERNIGHT checked first — its own keyword makes it unambiguous
+  // against the hourly grammar (a bare "overnight" can never be mistaken for
+  // an hour count the way two numbers could).
+  const om = body.match(WALKIN_OVERNIGHT_BODY);
+  if (om) {
+    const roomToken = om[1];
+    const rest = om[2];
+    const dateTokens = findDateTokens(rest);
+    if (dateTokens.length < 2) return { ok: false, reason: 'bad_dates' };
+
+    const now = new Date();
+    const checkInDate = parseBookingDate(dateTokens[0].text, now);
+    const checkOutDate = parseBookingDate(dateTokens[1].text, now);
+    if (!checkInDate || !checkOutDate || compareYmd(checkOutDate, checkInDate) <= 0) {
+      return { ok: false, reason: 'bad_dates' };
+    }
+
+    // Same identity grammar as hourly — everything after the SECOND date
+    // token is guest name/phone, same optional-trailing-phone rule.
+    const identityText = rest.slice(dateTokens[1].end);
+    const { guestName, guestPhone } = splitWalkinIdentity(identityText);
+    return {
+      ok: true, overnight: true, roomToken,
+      checkInText: dateTokens[0].text, checkOutText: dateTokens[1].text,
+      checkInDate, checkOutDate, guestName, guestPhone
+    };
+  }
+
   const m = body.match(WALKIN_BODY);
   if (!m) return { ok: false, reason: 'bad_syntax' };
 
@@ -1387,6 +1423,29 @@ async function generateUniquePaymentReference() {
   // colliding reference if it ever somehow happens.
   logToAxiom('error', 'payment_reference_generation_exhausted', { existingCount: existing.length });
   throw new Error('generateUniquePaymentReference: could not find a unique reference after 50 attempts');
+}
+
+// PR D (CEO decision, 2026-09-29): `CHECKOUT ROOM <n>` — a staff command to
+// close out a walk-in (in particular one with no phone, or one reception
+// needs to end immediately) rather than relying on the guest's own phone or
+// the auto-checkout cron. Deliberately kept separate from PAID (CEO
+// decision): checkout frees the room only, no amount required — a walk-in
+// may already have been paid via PAID at check-in, or gets paid after via
+// PAID/PAID REF, and forcing an amount into checkout would wrongly assume
+// money always changes hands at that exact moment. Same ROOM <n> shape as
+// WALKIN/PAID, deliberately, so reception has one pattern to remember, not three.
+const CHECKOUT_KEYWORD = /^checkout\b/i;
+const CHECKOUT_BODY = /^room\s*([a-z0-9]{1,4})\.?$/i;
+
+function parseCheckoutCommand(text) {
+  const t = String(text || '').trim().replace(/\s+/g, ' ');
+  if (!CHECKOUT_KEYWORD.test(t)) return null;
+
+  const body = t.replace(CHECKOUT_KEYWORD, '').trim();
+  const m = body.match(CHECKOUT_BODY);
+  if (!m) return { ok: false, reason: 'bad_syntax' };
+
+  return { ok: true, roomToken: m[1] };
 }
 
 // ─── CLEANING TIME (START / DONE) ────────────────────────────────────────────
@@ -1952,6 +2011,25 @@ const guards = {
     return true;
   },
 
+  // PR D: `CHECKOUT ROOM <n>` — same role allowlist as PAID
+  // (PAID_COMMAND_ROLE_TYPES: Reception + On Duty per the payment build's
+  // fallback), reusing activePaidRoleForPhone rather than a third lookup
+  // function for the same seat set.
+  async senderIsAuthorizedCheckout(ctx) {
+    const parsed = parseCheckoutCommand(ctx.messageText);
+    if (!parsed) return false;
+
+    const role = await activePaidRoleForPhone(ctx.phone);
+    if (!role) {
+      logToAxiom('warn', 'checkout_command_unauthorised_sender', { phone: ctx.phone });
+      return false;
+    }
+
+    ctx.staffCheckout = parsed;
+    ctx.staffCheckoutRole = role;
+    return true;
+  },
+
   // `START ROOM <n>` from a registered cleaner. Registered ahead of the
   // cleaner-naming-room global for the now-familiar reason: the command
   // contains a bare room number, and that guard matches \b<number>\b anywhere —
@@ -2248,6 +2326,11 @@ const actions = {
         await sendWhatsApp(ctx.phone, msg('walkinBadDuration', { hours: parsed.hours }));
         return;
       }
+      if (parsed.reason === 'bad_dates') {
+        logToAxiom('info', 'walkin_rejected', { phone: ctx.phone, reason: 'bad_dates' });
+        await sendWhatsApp(ctx.phone, msg('walkinBadDates'));
+        return;
+      }
       logToAxiom('info', 'walkin_rejected', { phone: ctx.phone, reason: parsed.reason });
       await sendWhatsApp(ctx.phone, msg('walkinUsage'));
       return;
@@ -2291,19 +2374,49 @@ const actions = {
       return;
     }
     const property = ctx.property;
+    const isOvernight = !!parsed.overnight;
 
-    // Rates: reuse hourlyRates, which fails closed on any blank or zero. A
-    // walk-in is never quoted R0 and the price is never hardcoded here.
-    const rates = hourlyRates(property);
-    if (!rates) {
-      logToAxiom('warn', 'walkin_rates_unavailable', { phone: ctx.phone, propertyId: property.id });
-      await sendWhatsApp(ctx.phone, msg('walkinRatesUnavailable', { propertyName: property.fields['Property Name'] }));
-      return;
+    // Rates: hourly reuses hourlyRates, which fails closed on any blank or
+    // zero — a walk-in is never quoted R0 and the price is never hardcoded
+    // here. Overnight reuses the SAME flat per-night lookup collectDetails
+    // uses (exactly one active Per Night rate for the property), but does
+    // NOT fail closed on ambiguity/absence the way hourly does: staff are
+    // standing in front of the guest either way, so the walk-in still
+    // proceeds unpriced (same "accepts whatever reception sends" posture
+    // PAID already has for an unpriced booking) rather than blocking the
+    // check-in entirely over a rate-config gap.
+    let rates = null;
+    let nightlyRate = null;
+    if (isOvernight) {
+      const allActiveRates = await airtableGet('WS_Rates', `AND({Active} = TRUE(), {Rate Type} = 'Per Night')`);
+      const nightlyRates = allActiveRates.filter(r => (r.fields['Property'] || []).includes(property.id));
+      nightlyRate = nightlyRates.length === 1 ? nightlyRates[0] : null;
+      if (!nightlyRate) {
+        logToAxiom('warn', 'walkin_overnight_rate_lookup_not_singular', {
+          phone: ctx.phone, propertyId: property.id, matchCount: nightlyRates.length
+        });
+      }
+    } else {
+      rates = hourlyRates(property);
+      if (!rates) {
+        logToAxiom('warn', 'walkin_rates_unavailable', { phone: ctx.phone, propertyId: property.id });
+        await sendWhatsApp(ctx.phone, msg('walkinRatesUnavailable', { propertyName: property.fields['Property Name'] }));
+        return;
+      }
     }
 
-    // The guest is standing at the desk: the stay starts now.
-    const checkInIso = new Date().toISOString();
-    const checkOutIso = addHoursToIso(checkInIso, parsed.hours);
+    // The guest is standing at the desk: the stay starts now either way.
+    // Overnight's Check In/Check Out still carry the DATES reception typed
+    // (the actual availability boundary other bookings check against) —
+    // only the hourly path's checkInIso is literally "this instant", since
+    // its whole stay is timed from now.
+    const checkInIso = isOvernight
+      ? sastToUtcIso(parsed.checkInDate, OVERNIGHT_CHECKIN_HOUR)
+      : new Date().toISOString();
+    const checkOutIso = isOvernight
+      ? sastToUtcIso(parsed.checkOutDate, OVERNIGHT_CHECKOUT_HOUR)
+      : addHoursToIso(checkInIso, parsed.hours);
+    const checkedInAtIso = new Date().toISOString();
 
     const allRooms = await airtableGet('WS_Rooms', orFormula('Status', BOOKABLE_ROOM_STATUSES));
     const propertyRooms = allRooms.filter(r => (r.fields['Property'] || []).includes(property.id));
@@ -2355,7 +2468,7 @@ const actions = {
         checkIn: checkInIso, checkOut: checkOutIso
       });
       await logEnquiry(property, parsed.guestPhone || ctx.phone, 'No Availability', {
-        checkInIso, checkOutIso, bookingType: 'Hourly'
+        checkInIso, checkOutIso, bookingType: isOvernight ? 'Overnight' : 'Hourly'
       });
       await sendWhatsApp(ctx.phone, msg('walkinRoomTaken', { roomName: requested.fields['Room Name'] }));
       return;
@@ -2397,14 +2510,15 @@ const actions = {
       return;
     }
 
-    const booking = await airtableCreate('WS_Bookings', {
+    const walkinBookingFields = {
       'Guest': [guest.id],
       'Room': [requested.id],
-      // Hourly, NOT the 'Walk-in' Booking Type option: Booking Type is read by
-      // EXTENSION_MS, B17's room-night maths and findPendingHourlyBooking, and a
-      // third value would fall silently through all three. Walk-in provenance
-      // lives in Source, which is what that field is for (locked, CEO 6 Aug).
-      'Booking Type': 'Hourly',
+      // Hourly/Overnight, NOT the 'Walk-in' Booking Type option: Booking Type
+      // is read by EXTENSION_MS, B17's room-night maths and
+      // findPendingHourlyBooking, and a third value would fall silently
+      // through all three. Walk-in provenance lives in Source, which is what
+      // that field is for (locked, CEO 6 Aug).
+      'Booking Type': isOvernight ? 'Overnight' : 'Hourly',
       'Source': 'Walk-in',
       'Logged By': 'Manual',
       // Checked In on creation (locked): the guest is physically in the room, so
@@ -2414,13 +2528,23 @@ const actions = {
       'Status': 'Checked In',
       'Check In': checkInIso,
       'Check Out': checkOutIso,
-      'Checked In At': checkInIso,
+      'Checked In At': checkedInAtIso,
       'Payment Status': 'Unpaid',
-      'Amount Due': rates[parsed.hours],
       // B10.5 Bug 2: both checkout paths scope cleaner dispatch off this link.
       'WS_Property': [property.id],
-      'Notes': `Walk-in: ${durationText(parsed.hours)} from ${formatSastDateTime(checkInIso)}`
-    });
+      'Notes': isOvernight
+        ? `Walk-in (overnight): ${parsed.checkInText} to ${parsed.checkOutText}`
+        : `Walk-in: ${durationText(parsed.hours)} from ${formatSastDateTime(checkInIso)}`
+    };
+    if (isOvernight) {
+      if (nightlyRate) {
+        walkinBookingFields['Rate Applied'] = [nightlyRate.id];
+        walkinBookingFields['Amount Due'] = nightlyRate.fields['Amount'];
+      } // else left unpriced — reception settles the amount manually via PAID, same as an unpriced guest booking.
+    } else {
+      walkinBookingFields['Amount Due'] = rates[parsed.hours];
+    }
+    const booking = await airtableCreate('WS_Bookings', walkinBookingFields);
 
     if (!booking || !booking.id) {
       // Same reason as the guest guard above. Nothing has been written to the
@@ -2487,25 +2611,36 @@ const actions = {
     }
 
     logToAxiom('info', 'booking_create', {
-      phone: ctx.phone, guestName: parsed.guestName, bookingRef, bookingType: 'Hourly',
-      source: 'Walk-in', hours: parsed.hours, roomId: requested.id, airtableId: booking.id,
+      phone: ctx.phone, guestName: parsed.guestName, bookingRef, bookingType: isOvernight ? 'Overnight' : 'Hourly',
+      source: 'Walk-in', hours: parsed.hours || null, roomId: requested.id, airtableId: booking.id,
       roleId: role.id, propertyId: property.id, guestPhone: parsed.guestPhone || null
     });
     // B19: a walk-in is a booking that happened — logged as Booked so the owner
     // summary's demand picture includes it. Keyed on the guest's number when
     // there is one, otherwise the staff number that logged it.
     await logEnquiry(property, parsed.guestPhone || ctx.phone, 'Booked', {
-      checkInIso, checkOutIso, bookingType: 'Hourly', bookingId: booking.id
+      checkInIso, checkOutIso, bookingType: isOvernight ? 'Overnight' : 'Hourly', bookingId: booking.id
     });
 
-    await sendWhatsApp(ctx.phone, msg('walkinConfirmed', {
-      guestName: parsed.guestName,
-      roomName: requested.fields['Room Name'],
-      durationText: durationText(parsed.hours),
-      checkOutText: formatSastDateTime(checkOutIso),
-      amount: rates[parsed.hours],
-      bookingRef
-    }));
+    if (isOvernight) {
+      await sendWhatsApp(ctx.phone, msg('walkinOvernightConfirmed', {
+        guestName: parsed.guestName,
+        roomName: requested.fields['Room Name'],
+        checkInText: parsed.checkInText,
+        checkOutText: parsed.checkOutText,
+        amountLine: nightlyRate ? `R${nightlyRate.fields['Amount']}` : 'to be confirmed — no active nightly rate found, set the rate or price manually via PAID',
+        bookingRef
+      }));
+    } else {
+      await sendWhatsApp(ctx.phone, msg('walkinConfirmed', {
+        guestName: parsed.guestName,
+        roomName: requested.fields['Room Name'],
+        durationText: durationText(parsed.hours),
+        checkOutText: formatSastDateTime(checkOutIso),
+        amount: rates[parsed.hours],
+        bookingRef
+      }));
+    }
   },
 
   // B8 (PAID): reception records cash taken at the desk. Reached only through
@@ -2726,6 +2861,126 @@ const actions = {
       bookingRef: booking.fields['Booking Ref'] || '',
       amountPaid: formatAmount(parsed.amount),
       method
+    }));
+  },
+
+  // PR D (CEO decision, 2026-09-29): `CHECKOUT ROOM <n>` — staff closes out a
+  // walk-in (or any Checked In stay) directly, rather than relying on the
+  // guest's own phone or the auto-checkout cron. Deliberately reuses the same
+  // downstream effects the guest-driven `checkout` handler already has
+  // (Status -> Checked Out, room -> Cleaning, cleaner dispatch, reception
+  // payment-owed notify) rather than inventing a second set of side effects
+  // for the same event — only the trigger and the reply differ.
+  //
+  // No amount here, on purpose (CEO decision): checkout and payment stay two
+  // separate, composable commands. A walk-in may already be paid (via PAID
+  // at check-in) or gets paid after (via PAID/PAID REF) — forcing an amount
+  // into CHECKOUT would wrongly assume money always changes hands at that
+  // exact moment.
+  async staffCheckout(ctx) {
+    const parsed = ctx.staffCheckout;
+    const role = ctx.staffCheckoutRole;
+
+    if (!parsed.ok) {
+      logToAxiom('info', 'checkout_command_rejected', { phone: ctx.phone, reason: parsed.reason });
+      await sendWhatsApp(ctx.phone, msg('checkoutUsage'));
+      return;
+    }
+
+    const rolePropertyId = (role.fields['Property'] || [])[0] || null;
+    if (!rolePropertyId) {
+      logToAxiom('error', 'checkout_command_role_without_property', { phone: ctx.phone, roleId: role.id });
+      await sendWhatsApp(ctx.phone, msg('paidNotConfigured'));
+      return;
+    }
+    if (rolePropertyId !== ctx.property.id) {
+      logToAxiom('warn', 'checkout_command_property_mismatch', {
+        phone: ctx.phone, roleId: role.id, rolePropertyId, inboundPropertyId: ctx.property.id
+      });
+      await sendWhatsApp(ctx.phone, msg('paidWrongProperty'));
+      return;
+    }
+    const property = ctx.property;
+
+    const allRooms = await airtableGet('WS_Rooms', '');
+    const propertyRooms = allRooms.filter(r => (r.fields['Property'] || []).includes(property.id));
+    const room = propertyRooms.find(r => roomMatchesWalkinToken(r, parsed.roomToken)) || null;
+    if (!room) {
+      logToAxiom('info', 'checkout_command_rejected', { phone: ctx.phone, reason: 'no_such_room', roomToken: parsed.roomToken });
+      await sendWhatsApp(ctx.phone, msg('paidNoSuchRoom', { roomToken: parsed.roomToken }));
+      return;
+    }
+
+    const checkedIn = await airtableGet('WS_Bookings', `{Status} = 'Checked In'`);
+    const booking = checkedIn.find(b => (b.fields['Room'] || []).includes(room.id)) || null;
+    if (!booking) {
+      logToAxiom('info', 'checkout_command_rejected', { phone: ctx.phone, reason: 'no_booking', roomId: room.id });
+      await sendWhatsApp(ctx.phone, msg('paidNoBooking', { roomName: room.fields['Room Name'] }));
+      return;
+    }
+
+    // Same FATAL-on-failure posture as the guest-driven checkout: this write
+    // is what closes out the stay and feeds notifyReceptionOfPayment below.
+    const checkoutWrite = await airtableUpdate('WS_Bookings', booking.id, {
+      'Status': 'Checked Out',
+      'Checkout Confirmed': true
+    });
+    if (checkoutWrite && checkoutWrite.error) {
+      logToAxiom('error', 'checkout_command_write_failed', {
+        phone: ctx.phone, bookingId: booking.id, error: JSON.stringify(checkoutWrite.error)
+      });
+      await sendWhatsApp(ctx.phone, msg('checkoutWriteFailed'));
+      return;
+    }
+
+    // Same non-fatal room-status pattern as the guest-driven checkout —
+    // Status is a derived display field, cleaner dispatch below is a direct
+    // message, not gated on this write succeeding.
+    const cleaningWrite = await airtableUpdate('WS_Rooms', room.id, { 'Status': 'Cleaning' });
+    if (cleaningWrite && cleaningWrite.error) {
+      logToAxiom('error', 'checkout_command_room_status_write_failed', {
+        phone: ctx.phone, roomId: room.id, error: JSON.stringify(cleaningWrite.error)
+      });
+    }
+    await airtableUpdate('WS_Rooms', room.id, { 'Cleaning Started At': new Date().toISOString() });
+
+    const scopePropertyId = bookingPropertyId(booking, property.id);
+    const cleaners = await activeCleanersForProperty(scopePropertyId);
+    for (const cleaner of cleaners) {
+      const cleanerPhone = cleaner.fields['Phone Number'];
+      const cleanerName = cleaner.fields['Cleaner Name'];
+      if (cleanerPhone) {
+        const dispatchSend = await sendWhatsApp(formatPhone(cleanerPhone), msg('cleanerDispatch', {
+          cleanerName, roomName: room.fields['Room Name']
+        }));
+        if (dispatchSend && dispatchSend.error) {
+          logToAxiom('error', 'cleaner_dispatch_failed', {
+            bookingId: booking.id, cleanerId: cleaner.id, roomName: room.fields['Room Name'],
+            error: JSON.stringify(dispatchSend.error)
+          });
+        }
+      }
+    }
+
+    // Same "tell reception what to collect" push the guest-driven checkout
+    // sends — deliberately not gated on payment, same as that path.
+    await notifyReceptionOfPayment({
+      propertyId: scopePropertyId,
+      bookingId: booking.id,
+      bookingRef: booking.fields['Booking Ref'] || null,
+      roomName: room.fields['Room Name'],
+      guestName: null,
+      amountDue: booking.fields['Amount Due'],
+      source: 'staff_checkout_command'
+    });
+
+    logToAxiom('info', 'checkout_command_recorded', {
+      phone: ctx.phone, roleId: role.id, propertyId: property.id,
+      bookingId: booking.id, bookingRef: booking.fields['Booking Ref'] || null, roomId: room.id
+    });
+    await sendWhatsApp(ctx.phone, msg('checkoutCommandConfirmed', {
+      roomName: room.fields['Room Name'],
+      bookingRef: booking.fields['Booking Ref'] || ''
     }));
   },
 
@@ -6439,6 +6694,7 @@ module.exports.parseWalkinCommand = parseWalkinCommand;
 // B8 (PAID): the command grammar is pure and Airtable-free, so it is unit-tested
 // directly — see test/paid.test.js.
 module.exports.parsePaidCommand = parsePaidCommand;
+module.exports.parseCheckoutCommand = parseCheckoutCommand;
 // Cleaning time: the START grammar is pure, and the bare-`START` case is the one
 // that must never regress (it is B14's opt-back-in keyword). Unit-tested in
 // test/cleaningtime.test.js alongside the derived metrics.
