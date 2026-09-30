@@ -99,7 +99,8 @@ test('hourly: completing the booking sets Status to Confirmed, matching an overn
 
 test('hourly → cancel: the booking is really cancelled and its room stops blocking', async () => {
   const ctx = startSession();
-  await send(ctx, '1');  // book 1 hour  → session CONFIRMED
+  await send(ctx, '1');  // book 1 hour  → session AWAITING_PAYMENT_METHOD
+  await send(ctx, '1');  // "1 - Card"    → session CONFIRMED (payment build, CEO 2026-09-29)
   await send(ctx, '2');  // "2 - Cancel my booking"
 
   const booking = bookingRow(ctx);
@@ -124,6 +125,11 @@ test('hourly → cancel: the booking is really cancelled and its room stops bloc
 test('hourly → gate arrival: the guest matches their own booking, not the legacy first-available fallback', async () => {
   const ctx = startSession();
   await send(ctx, '1');  // books recR1
+  await send(ctx, '1');  // "1 - Card" (payment build, CEO 2026-09-29) → session CONFIRMED
+  // Payment build gates gate arrival on Payment Status = 'Paid' — simulates
+  // reception having already confirmed via PAID before the guest arrives,
+  // orthogonal to what this test actually checks (room matching).
+  bookingRow(ctx).fields['Payment Status'] = 'Paid';
   ctx.airtable.log.length = 0;
   ctx.sends.length = 0;
   await send(ctx, '1');  // "1 - I'm at the gate"

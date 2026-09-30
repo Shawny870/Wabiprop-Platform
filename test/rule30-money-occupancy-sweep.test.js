@@ -125,7 +125,7 @@ test('collectDetails: a successful rate write applies the flat per-night rate an
   const booking = ctx.airtable.tables['WS_Bookings'].find(b => b.fields['Guest'] && b.fields['Guest'].includes('recG1'));
   assert.strictEqual(booking.fields['Amount Due'], 250);
   assert.deepStrictEqual(booking.fields['Rate Applied'], ['recRateSingle']);
-  assert.strictEqual(guestRow(ctx, GUEST_PHONE).fields['Session State'], 'AWAITING_ETA');
+  assert.strictEqual(guestRow(ctx, GUEST_PHONE).fields['Session State'], 'AWAITING_PAYMENT_METHOD');
   assert.match(texts(ctx, GUEST_PHONE), /R250 per night/i);
 });
 

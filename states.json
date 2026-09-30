@@ -21,13 +21,16 @@
     ],
     "AWAITING_DETAILS": [
       { "inputs": ["hourly"], "action": "startHourly", "next": "AWAITING_HOURLY_DETAILS" },
-      { "inputs": "*", "action": "collectDetails", "next": "AWAITING_ETA" }
+      { "inputs": "*", "action": "collectDetails", "next": "AWAITING_PAYMENT_METHOD" }
     ],
     "AWAITING_HOURLY_DETAILS": [
       { "inputs": "*", "action": "collectHourlyDetails", "next": "AWAITING_HOURLY_DURATION" }
     ],
     "AWAITING_HOURLY_DURATION": [
-      { "inputs": "*", "action": "selectHourlyDuration", "next": "CONFIRMED" }
+      { "inputs": "*", "action": "selectHourlyDuration", "next": "AWAITING_PAYMENT_METHOD" }
+    ],
+    "AWAITING_PAYMENT_METHOD": [
+      { "inputs": "*", "action": "selectPaymentMethod", "next": "AWAITING_ETA" }
     ],
     "AWAITING_ETA": [
       { "inputs": "*", "action": "recordEta", "next": "CONFIRMED" }
@@ -66,26 +69,33 @@
     "fullyBooked": "Hi! 👋 Welcome to {propertyName}{propertyCityLine}.\n\nSorry, we're fully booked right now. 😔 Please check back again soon, or contact us directly to check availability.",
     "stayTypeReprompt": "Sorry, I didn't quite get that. Please reply with a number:\n1 - Short stay\n2 - Multiple days",
     "hourlyRatesMenu": "*Short stay rates at {propertyName}:*\n{hourlyRateText}",
-    "overnightRatesMenu": "*Overnight rates at {propertyName}:*\n{rateText}\n\nTo make your booking, please send:\n1. Your full name\n2. Check-in date (e.g. 25 June)\n3. Check-out date (e.g. 27 June)\n\nSend all three, each on a new line.",
-    "detailsReprompt": "Sorry, I didn't quite get that. Please reply with your:\n1. Full name\n2. Check-in date (e.g. 25 June)\n3. Check-out date (e.g. 27 June)\n\nSend each on a new line.",
+    "overnightRatesMenu": "*Overnight rates at {propertyName}:*\n{rateText}\n\nTo make your booking, please send:\n1. Your full name\n2. Check-in date (e.g. 25 June)\n3. Check-out date (e.g. 27 June)\n\nSend all three, each on a new line.\n\nPlease type your details exactly as shown, one item per line, with nothing extra. If the format is different, we may not be able to read it.",
+    "detailsReprompt": "Sorry, I didn't quite get that. Please reply with your:\n1. Full name\n2. Check-in date (e.g. 25 June)\n3. Check-out date (e.g. 27 June)\n\nSend each on a new line.\n\nPlease type your details exactly as shown, one item per line, with nothing extra. If the format is different, we may not be able to read it.",
     "noAvailability": "Sorry {guestName}, we're fully booked from *{checkIn}* to *{checkOut}*. 😔\n\nWe'd still love to host you — would you like to try different dates? Please reply with your:\n1. Full name\n2. Check-in date (e.g. 25 June)\n3. Check-out date (e.g. 27 June)\n\nSend each on a new line.",
     "bookingCreateFailed": "Sorry {guestName}, something went wrong on our end and we couldn't save your booking. Nothing was charged. Please resend your details:\n1. Full name\n2. Check-in date (e.g. 25 June)\n3. Check-out date (e.g. 27 June)\n\nSend each on a new line.",
     "ownerNewBooking": "📋 New booking enquiry from {guestName}\nPhone: {phone}\nRef: {bookingRef}\nCheck-in: {checkIn}\nCheck-out: {checkOut}",
-    "hourlyAskDetails": "Great — let's set up your *short stay* at {propertyName}. 🕐\n\nPlease send:\n1. Your full name\n2. What time you'll arrive (e.g. 2pm or 14:00)\n\nSend both, each on a new line.",
-    "hourlyDetailsReprompt": "Sorry, I didn't quite get that. Please reply with your:\n1. Full name\n2. Arrival time (e.g. 2pm or 14:00)\n\nSend each on a new line.",
+    "hourlyAskDetails": "Great — let's set up your *short stay* at {propertyName}. 🕐\n\nPlease send:\n1. Your full name\n2. What time you'll arrive (e.g. 2pm or 14:00)\n\nSend both, each on a new line.\n\nPlease type your details exactly as shown, one item per line, with nothing extra. If the format is different, we may not be able to read it.",
+    "hourlyDetailsReprompt": "Sorry, I didn't quite get that. Please reply with your:\n1. Full name\n2. Arrival time (e.g. 2pm or 14:00)\n\nSend each on a new line.\n\nPlease type your details exactly as shown, one item per line, with nothing extra. If the format is different, we may not be able to read it.",
     "hourlyTimeAmbiguous": "Just to be sure — did you mean *{value}am* or *{value}pm*?\n\nPlease reply with the full time, e.g. \"{value}pm\".",
     "hourlyDurationMenu": "Great {guestName}! 🕐 Arriving *{arrivalText}*.\n\nHow long do you need? Reply with a number:\n1 - 1 hour (R{rate1})\n2 - 2 hours (R{rate2})\n3 - 3 hours (R{rate3})\n\n_Staying longer than 3 hours? Reply 4 and we'll set up an overnight booking instead._",
-    "hourlyBookingReceived": "Thanks {guestName}! 🙏\n\nYour *short stay* is booked.\n\n*Ref:* {bookingRef}\n*Arriving:* {checkInText}\n*Until:* {checkOutText}\n*Duration:* {durationText}\n*Rate:* R{amount}\n\nWhen you arrive, reply with a number:\n1 - I'm at the gate\n2 - Cancel my booking",
+    "hourlyBookingReceived": "Thanks {guestName}! 🙏\n\nYour *short stay* is booked.\n\n*Ref:* {bookingRef}\n*Arriving:* {checkInText}\n*Until:* {checkOutText}\n*Duration:* {durationText}\n*Rate:* R{amount}",
     "hourlyOwnerNewBooking": "📋 New *short stay* booking from {guestName}\nPhone: {phone}\nRef: {bookingRef}\nArriving: {checkInText}\nUntil: {checkOutText}\nDuration: {durationText}\nRate: R{amount}",
     "hourlyNoAvailability": "Sorry {guestName}, we're fully booked from *{checkInText}* to *{checkOutText}*. 😔\n\nWould you like to try a different time? Please reply with your:\n1. Full name\n2. Arrival time (e.g. 2pm or 14:00)\n\nSend each on a new line.",
     "hourlyBookingCreateFailed": "Sorry {guestName}, something went wrong on our end and we couldn't save your short stay. Nothing was charged. Please resend your details:\n1. Full name\n2. Arrival time (e.g. 2pm or 14:00)\n\nSend each on a new line.",
     "hourlyTooLong": "No problem — for stays longer than 3 hours we'll book you overnight instead. 🛏️\n\nPlease send:\n1. Your full name\n2. Check-in date (e.g. 25 June)\n3. Check-out date (e.g. 27 June)\n\nSend all three, each on a new line.",
     "hourlyUnavailable": "Sorry, short stays aren't available at {propertyName} at the moment. 😔\n\nWe'd be happy to book you overnight instead. Please send:\n1. Your full name\n2. Check-in date (e.g. 25 June)\n3. Check-out date (e.g. 27 June)\n\nSend all three, each on a new line.",
     "gateTooEarly": "Hi {guestName}! Your booking is for *{bookingDate}*, not today. 📅\n\nWe'll see you then! If you need to change your booking, just let us know.",
+    "paymentNotYetConfirmed": "Almost there! Pop into the office to sort payment — card or EFT — and reception will get you your keys.",
     "occupancyMenu": "Thanks {guestName}! 🛏️ One more thing so we can quote the right rate.\n\nHow many of you are staying? Reply with a number:\n1 - Just me\n2 - Two of us",
     "occupancyWriteFailed": "Sorry {guestName}, something went wrong on our end and we couldn't save that. Please reply with your answer again.",
     "occupancyContactOwner": "Thanks {guestName}! 🙏 We've got your dates.\n\nWe couldn't confirm a rate for that just yet — the owner will be in touch shortly to finalise the price. Your room is being held in the meantime.\n\nWhat time do you expect to arrive? (e.g. \"around 2pm\" or \"after 5\")",
-    "bookingReceived": "Thanks {guestName}! 🙏\n\nYour booking enquiry has been received.\n\n*Ref:* {bookingRef}\n*Check-in:* {checkIn}\n*Check-out:* {checkOut}\n{rateLine}\n\nWhat time do you expect to arrive? (e.g. \"around 2pm\" or \"after 5\")",
+    "bookingReceived": "Thanks {guestName}! 🙏\n\nYour booking enquiry has been received.\n\n*Ref:* {bookingRef}\n*Check-in:* {checkIn}\n*Check-out:* {checkOut}\n{rateLine}",
+    "paymentMethodMenu": "{propertyName} is a cashless property. Payment happens at reception when you arrive:\n1 - Card (tap on our SpeedPoint machine)\n2 - Instant EFT (paid at reception; once funds reflect, you'll be assigned your room)\nReply with a number.",
+    "paymentMethodReprompt": "Sorry, I didn't quite get that. Please reply with a number:\n1 - Card\n2 - Instant EFT",
+    "paymentCardChosen": "Great — head on in! Please tap your card on the SpeedPoint machine in the office, and reception will hand you your keys.",
+    "paymentEftConfirmed": "Please pay R{amount} at reception using {reference} as your reference. Once reception confirms the funds have reflected, you'll be assigned your room.\n\n{bankDetailsBlock}",
+    "paymentEftBankDetailsFallback": "Please ask reception for the bank details when you arrive.",
+    "askEta": "What time do you expect to arrive? (e.g. \"around 2pm\" or \"after 5\")",
     "etaConfirmed": "Perfect! We'll have your room ready for you. 🛏️\n\nSee you at *{eta}*.\n\nWhen you arrive, reply with a number:\n1 - I'm at the gate\n2 - Cancel my booking\n\nWe look forward to hosting you at {propertyName}! 🌟",
     "etaWriteFailed": "Sorry, something went wrong on our end and we couldn't confirm your booking yet. Please send your arrival time again.",
     "gateNotify": "🔔 {guestName} is at the gate. {roomInfo}\nPhone: {phone}",
@@ -137,7 +147,7 @@
     "walkinNotConfigured": "Your staff profile isn't linked to a property yet, so a walk-in can't be created. Please contact the owner.",
     "walkinFailed": "Something went wrong saving that walk-in — nothing was booked. Please try again.",
     "walkinConfirmed": "✅ Walk-in recorded\n\n*Ref:* {bookingRef}\n*Guest:* {guestName}\n*Room:* {roomName}\n*Duration:* {durationText}\n*Checkout:* {checkOutText}\n*Amount due:* R{amount}\n\n{roomName} is now marked occupied.",
-    "paidUsage": "Payment format:\n\n*PAID ROOM 2 500*\n\nRoom, then the amount received. Add CASH, EFT or CARD at the end if it wasn't cash.",
+    "paidUsage": "Payment format:\n\n*PAID ROOM 2 500*\n\nRoom, then the amount received. Add CASH, EFT or CARD at the end if it wasn't cash.\n\nConfirming a card/EFT booking before check-in? Use the reference instead:\n\n*PAID REF AB3D 500*",
     "paidNoSuchRoom": "No room matching \"{roomToken}\" at this property.\n\nUse the room number, like *PAID ROOM 2 500*",
     "paidNoBooking": "No booking found for {roomName} to record a payment against.",
     "paidNotConfigured": "Your staff profile isn't linked to a property yet, so a payment can't be recorded. Please contact the owner.",

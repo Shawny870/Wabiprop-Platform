@@ -75,7 +75,7 @@
         "id": "recG1",
         "fields": {
           "Guest Name": "May Ndlovu",
-          "Session State": "AWAITING_ETA"
+          "Session State": "AWAITING_PAYMENT_METHOD"
         }
       },
       {
@@ -137,6 +137,14 @@
         "includes": [
           "Thanks May Ndlovu",
           "R250 per night"
+        ]
+      },
+      {
+        "to": "27821234567",
+        "includes": [
+          "cashless property",
+          "Card",
+          "Instant EFT"
         ]
       }
     ]
