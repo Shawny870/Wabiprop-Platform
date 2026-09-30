@@ -33,6 +33,13 @@ function cleanerGateTemplate() {
   return process.env.WABISTAY_CLEANER_GATE_TEMPLATE || null;
 }
 
+// Gate-arrival alert to every Active Reception seat. Same contract as the
+// getters around it: read at CALL time, unset IS the stub state (the existing
+// free-form Notify Phone alert is unaffected either way).
+function receptionGateArrivalTemplate() {
+  return process.env.WABISTAY_GATE_ARRIVAL_TEMPLATE || null;
+}
+
 // B8 (PAID): the checkout push to the Reception seat. Same contract as the
 // cleaner gate template above and B17's owner summary — read at CALL time, unset
 // IS the stub state, and the stub logs the full payload rather than downgrading
@@ -418,6 +425,47 @@ async function notifyReceptionOfPayment({ propertyId, bookingId, bookingRef, roo
   }
 }
 
+// Gate arrival → tell every Active Reception seat for the property. IN ADDITION
+// to the free-form Notify Phone alert, never instead of it: that send is
+// unchanged. Template-only by design — Reception has not messaged us at the
+// moment a guest arrives, so free-form would 200 and vanish outside the 24h
+// window. Params are positional and fixed by the approved template:
+// {{1}} property, {{2}} guest, {{3}} room, {{4}} room status, {{5}} guest phone.
+async function notifyReceptionOfArrival({ propertyId, propertyName, guestName, roomName, roomStatus, guestPhone }) {
+  const correlation = { site: 'gate_arrival_reception', propertyId, guestPhone };
+  const seats = await activeReceptionRolesForProperty(propertyId);
+
+  if (seats.length === 0) {
+    logToAxiom('warn', 'reception_gate_notify_no_seat', {
+      ...correlation, reason: 'no active Reception seat for property'
+    });
+    return;
+  }
+
+  const templateName = receptionGateArrivalTemplate();
+  const params = [propertyName, guestName, roomName, roomStatus, guestPhone];
+
+  for (const seat of seats) {
+    const to = formatPhone(String(seat.fields['Current Phone']));
+    const perSeat = { ...correlation, roleId: seat.id, roleLabel: seat.fields['Role Label'] || null };
+
+    if (!templateName) {
+      logToAxiom('warn', 'reception_gate_notify_stubbed', {
+        ...perSeat, to, params,
+        reason: 'WABISTAY_GATE_ARRIVAL_TEMPLATE not configured'
+      });
+      continue;
+    }
+
+    const result = await sendWhatsAppTemplate(to, templateName, params, perSeat);
+    if (!result.ok) {
+      logToAxiom('error', 'reception_gate_notify_failed', {
+        ...perSeat, to, template: templateName, error: JSON.stringify(result.error || null)
+      });
+    }
+  }
+}
+
 // Rands, two decimals, no currency symbol — the symbol belongs to the template
 // copy, not the parameter, so it cannot end up doubled ("RR400.00").
 function formatAmount(value) {
@@ -476,8 +524,17 @@ async function sendWhatsApp(to, message) {
 // The success log carries the wamid, which is the join key to B3's
 // `whatsapp_status_callback` events (they log `wamid` too) — so a template that
 // Meta accepts but never delivers is still traceable to its booking.
-async function sendWhatsAppTemplate(to, templateName, params = [], meta = {}) {
+function sanitizeTemplateParam(value) {
+  return String(value).replace(/[\r\n\t]+/g, ' ').replace(/ {4,}/g, ' ').trim();
+}
+
+async function sendWhatsAppTemplate(to, templateName, rawParams = [], meta = {}) {
   const { languageCode = TEMPLATE_LANGUAGE_CODE, ...correlation } = meta;
+  // Meta rejects a template send whose text parameter contains a newline, a
+  // tab, or four or more consecutive spaces (error 132018). Params carry
+  // free-form text (alertShawn's error message, a guest's name), so flatten
+  // them here rather than trusting every caller to.
+  const params = rawParams.map(sanitizeTemplateParam);
   console.log(`[WhatsApp TEMPLATE SEND] to: ${to} | template: ${templateName} | params: ${JSON.stringify(params)}`);
 
   const components = params.length > 0
@@ -4195,6 +4252,17 @@ const actions = {
       }
     }
 
+    // Step 6a: Reception seats, by template. Outside the notifyPhone branch on
+    // purpose — a property with no Notify Phone still has Reception to tell.
+    await notifyReceptionOfArrival({
+      propertyId: ctx.property.id,
+      propertyName: ctx.property.fields['Property Name'],
+      guestName: ctx.guest.fields['Guest Name'],
+      roomName: assignedRoomName || 'an unassigned room',
+      roomStatus: assignedRoomStatus,
+      guestPhone: ctx.phone
+    });
+
     // Step 6b: notify the property's cleaner. IN ADDITION to the owner send
     // above, never instead of it — the owner still gets `gateNotify` unchanged.
     // Scoped by ctx.property.id, which IS this booking's WS_Property: Step 4 above
@@ -6753,6 +6821,7 @@ module.exports.airtableUpdate = airtableUpdate;
 module.exports.sendWhatsApp = sendWhatsApp;
 module.exports.alertShawn = alertShawn;
 module.exports.getAlertPhone = getAlertPhone;
+module.exports.sanitizeTemplateParam = sanitizeTemplateParam;
 module.exports.bumpPropertyActivity = bumpPropertyActivity;
 module.exports.dormantProperties = dormantProperties;
 module.exports.inactiveByMessageActivity = inactiveByMessageActivity;
