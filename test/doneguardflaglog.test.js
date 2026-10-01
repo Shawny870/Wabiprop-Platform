@@ -13,6 +13,7 @@ const assert = require('node:assert');
 const { installEnv, installFetch, makeRes, metaTextPayload, MockAirtable } = require('./harness');
 
 installEnv();
+const savedOwnerPhone = process.env.OWNER_PHONE;
 
 const DUAL_PHONE = '27780384989';   // cleaner AND guest
 const CLEANER_ONLY = '27820000111';
@@ -22,7 +23,12 @@ const FLAG_ENV = [
   'WABISTAY_CLEANER_GATE_TEMPLATE', 'WABISTAY_GATE_ARRIVAL_TEMPLATE', 'WABISTAY_RECEPTION_PAYMENT_TEMPLATE',
   'WABISTAY_SOMETHING_NEW'
 ];
-afterEach(() => { for (const k of FLAG_ENV) delete process.env[k]; });
+const OTHER_ENV = ['REPORT_TEST_MODE_PHONE', 'WA_TEMPLATE_LANGUAGE'];
+afterEach(() => {
+  for (const k of FLAG_ENV) delete process.env[k];
+  for (const k of OTHER_ENV) delete process.env[k];
+  if (savedOwnerPhone === undefined) delete process.env.OWNER_PHONE; else process.env.OWNER_PHONE = savedOwnerPhone;
+});
 
 function freshWebhook() {
   delete require.cache[require.resolve('../api/wabistay/webhook.js')];
@@ -156,4 +162,52 @@ test('the first request of a process logs wabistay_flags once, with no values an
   assert.ok(!JSON.stringify(ctx.axiom).includes(SECRET), 'no value in the Axiom events');
   assert.ok(!logged.join('\n').includes(SECRET), 'no value in the console log');
   assert.ok(logged.some(l => l.startsWith('[WABISTAY FLAGS]')));
+});
+
+// ── (b2) non-WABISTAY switches: phones set/unset only, language with its value ─
+
+test('otherSwitchState: REPORT_TEST_MODE_PHONE and OWNER_PHONE are set/unset only; WA_TEMPLATE_LANGUAGE shows its value and source', () => {
+  delete process.env.OWNER_PHONE;
+  delete process.env.REPORT_TEST_MODE_PHONE;
+  delete process.env.WA_TEMPLATE_LANGUAGE;
+  let wh = freshWebhook();
+  assert.deepStrictEqual(wh.otherSwitchState(), {
+    REPORT_TEST_MODE_PHONE: 'unset', OWNER_PHONE: 'unset',
+    WA_TEMPLATE_LANGUAGE: 'en', WA_TEMPLATE_LANGUAGE_source: 'default'
+  });
+
+  process.env.OWNER_PHONE = '27999000111';
+  process.env.REPORT_TEST_MODE_PHONE = '27999000222';
+  process.env.WA_TEMPLATE_LANGUAGE = 'en_US';
+  wh = freshWebhook();
+  assert.deepStrictEqual(wh.otherSwitchState(), {
+    REPORT_TEST_MODE_PHONE: 'set', OWNER_PHONE: 'set',
+    WA_TEMPLATE_LANGUAGE: 'en_US', WA_TEMPLATE_LANGUAGE_source: 'env'
+  });
+});
+
+test('the logged event carries the language value but neither phone number, in Axiom or the console', async () => {
+  process.env.OWNER_PHONE = '27999000111';
+  process.env.REPORT_TEST_MODE_PHONE = '27999000222';
+  process.env.WA_TEMPLATE_LANGUAGE = 'en_US';
+
+  const logged = [];
+  const realLog = console.log;
+  console.log = (...args) => { logged.push(args.join(' ')); };
+  let ctx;
+  try {
+    const wh = freshWebhook();
+    ctx = start({});
+    await send(wh, CLEANER_ONLY, 'done');
+  } finally {
+    console.log = realLog;
+  }
+
+  const event = events(ctx, 'wabistay_flags')[0];
+  assert.deepStrictEqual(event.others, {
+    REPORT_TEST_MODE_PHONE: 'set', OWNER_PHONE: 'set', WA_TEMPLATE_LANGUAGE: 'en_US', WA_TEMPLATE_LANGUAGE_source: 'env'
+  });
+  const everything = JSON.stringify(ctx.axiom) + logged.filter(l => l.startsWith('[WABISTAY FLAGS]')).join('\n');
+  assert.ok(!everything.includes('27999000111'), 'OWNER_PHONE value must not be logged');
+  assert.ok(!everything.includes('27999000222'), 'REPORT_TEST_MODE_PHONE value must not be logged');
 });

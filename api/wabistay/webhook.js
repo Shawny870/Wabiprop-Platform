@@ -315,17 +315,32 @@ function wabistayFlagState() {
   return flags;
 }
 
+// Switches that are not WABISTAY_* but change what gets sent where. The two
+// phone numbers are reported set/unset ONLY (they are real numbers); the
+// template language is not sensitive, so its effective value is logged — "en"
+// by default, which is what every template is sent under.
+function otherSwitchState() {
+  const isSet = name => !!(process.env[name] && String(process.env[name]).trim());
+  return {
+    REPORT_TEST_MODE_PHONE: isSet('REPORT_TEST_MODE_PHONE') ? 'set' : 'unset',
+    OWNER_PHONE: isSet('OWNER_PHONE') ? 'set' : 'unset',
+    WA_TEMPLATE_LANGUAGE: TEMPLATE_LANGUAGE_CODE,
+    WA_TEMPLATE_LANGUAGE_source: isSet('WA_TEMPLATE_LANGUAGE') ? 'env' : 'default'
+  };
+}
+
 let _flagsLogged = false;
 function logFlagsOnce() {
   if (_flagsLogged) return null;
   _flagsLogged = true;
   const flags = wabistayFlagState();
+  const others = otherSwitchState();
   const where = {
     commit: (process.env.VERCEL_GIT_COMMIT_SHA || '').slice(0, 7) || null,
     deploymentId: process.env.VERCEL_DEPLOYMENT_ID || null
   };
-  console.log(`[WABISTAY FLAGS] ${JSON.stringify(flags)}`);
-  logToAxiom('info', 'wabistay_flags', { flags, ...where });
+  console.log(`[WABISTAY FLAGS] ${JSON.stringify({ flags, others })}`);
+  logToAxiom('info', 'wabistay_flags', { flags, others, ...where });
   return flags;
 }
 
@@ -6939,6 +6954,7 @@ module.exports.sendWhatsApp = sendWhatsApp;
 module.exports.alertShawn = alertShawn;
 module.exports.getAlertPhone = getAlertPhone;
 module.exports.wabistayFlagState = wabistayFlagState;
+module.exports.otherSwitchState = otherSwitchState;
 module.exports.sanitizeTemplateParam = sanitizeTemplateParam;
 module.exports.bumpPropertyActivity = bumpPropertyActivity;
 module.exports.dormantProperties = dormantProperties;
