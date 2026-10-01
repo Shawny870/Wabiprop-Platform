@@ -241,6 +241,49 @@ async function updateGuestState(guestId, fields, logContext = {}) {
   return result;
 }
 
+// State-write guard (Doc 1b, 01 Oct 2026). The comment above assumes a failed
+// Session State write "self-corrects on the next message". It does not once the
+// bot has moved on: on 30 Sep a missing select option made every
+// AWAITING_PAYMENT_METHOD write fail, the guest stayed in the old state while
+// the bot sent the next prompt, and the guest looped for a day with no alert.
+// advanceGuestState is for the booking-flow transitions where the bot is about
+// to send the NEXT prompt: if the advance fails it stops BEFORE that prompt,
+// tells the guest to speak to reception, and alerts Shawn. Off unless
+// WABISTAY_STATE_WRITE_GUARD is '1' or 'true' — unset keeps today's behaviour
+// exactly (the failure is logged, the flow carries on). Returns true when the
+// caller should continue, false when it must stop.
+function stateWriteGuardEnabled() {
+  return /^(1|true)$/i.test(String(process.env.WABISTAY_STATE_WRITE_GUARD || '').trim());
+}
+
+async function advanceGuestState(ctx, fields, extra = {}) {
+  const result = await updateGuestState(ctx.guest.id, fields, { phone: ctx.phone, ...extra });
+  const failed = !!(result && result.error);
+  if (!failed || !stateWriteGuardEnabled()) return true;
+
+  const property = ctx.property;
+  const propertyFields = (property && property.fields) || {};
+  // Same number the suspended-property redirect shows a guest. Falls back to
+  // Notify Phone; with neither, no guest message is sent rather than inventing
+  // one, and the alert says so.
+  const redirectPhone = propertyFields['Guest Redirect Phone'] || propertyFields['Notify Phone'] || null;
+  const errorType = (result.error && (result.error.type || result.error.error)) || 'unknown';
+  logToAxiom('error', 'guest_state_write_guard_tripped', {
+    phone: ctx.phone, guestId: ctx.guest.id, targetState: fields['Session State'] || null,
+    errorType: String(errorType), guestMessageSent: !!redirectPhone, ...extra
+  });
+  if (redirectPhone) {
+    await sendWhatsApp(ctx.phone, msg('stateWriteFailed', { redirectPhone }));
+  }
+  await alertShawn(
+    'guest_state_write_failed',
+    `Guest ${ctx.phone} could not be moved to ${fields['Session State'] || 'a new state'} (${errorType}). ` +
+      (redirectPhone ? 'They were told to speak to reception.' : 'No redirect phone is set, so they were told nothing.'),
+    { propertyId: property && property.id, propertyName: propertyFields['Property Name'] || null }
+  );
+  return false;
+}
+
 // B9: the guest's half-built hourly booking — Check In recorded, duration not
 // yet chosen, so Check Out is still blank. Blank Check Out is exactly what makes
 // it inert to B8's overlap check while the guest is mid-conversation.
@@ -3198,7 +3241,7 @@ const actions = {
         });
       }
     } else {
-      await updateGuestState(ctx.guest.id, { 'Session State': ctx.next });
+      if (!(await advanceGuestState(ctx, { 'Session State': ctx.next }))) return;
     }
 
     await sendWhatsApp(ctx.phone, msg('greeting', {
@@ -3369,11 +3412,11 @@ const actions = {
       return;
     }
 
-    await updateGuestState(ctx.guest.id, {
+    if (!(await advanceGuestState(ctx, {
       'Guest Name': guestName,
       'Session State': ctx.next,
       'Last Inbound At': now.toISOString() // B19: staleness anchor for the abandonment sweep
-    }, { phone: ctx.phone });
+    }))) return;
 
     // Flat per-night rate (CEO decision, 2026-09-28): rooms are all the same
     // size, so occupancy is no longer asked — every guest gets the one active
@@ -3559,7 +3602,7 @@ const actions = {
       // (ctx.next, written before this rate lookup ran) — no price exists to
       // ask payment for, so this downgrades straight to AWAITING_ETA instead,
       // same target the priced path reaches after payment method is chosen.
-      await updateGuestState(ctx.guest.id, { 'Session State': 'AWAITING_ETA' });
+      if (!(await advanceGuestState(ctx, { 'Session State': 'AWAITING_ETA' }))) return;
       await sendWhatsApp(ctx.phone, msg('occupancyContactOwner', { guestName }));
       return;
     }
@@ -3607,7 +3650,7 @@ const actions = {
     }
 
     if (ctx.guest) {
-      await updateGuestState(ctx.guest.id, { 'Session State': ctx.next, 'Last Inbound At': new Date().toISOString() });
+      if (!(await advanceGuestState(ctx, { 'Session State': ctx.next, 'Last Inbound At': new Date().toISOString() }))) return;
     } else {
       // Rule 30 step 2, slice 2: same NON-FATAL class, same reasoning as
       // greetAndAskStayType's equivalent first-contact create.
@@ -3687,11 +3730,11 @@ const actions = {
       return;
     }
 
-    await updateGuestState(ctx.guest.id, {
+    if (!(await advanceGuestState(ctx, {
       'Guest Name': guestName,
       'Session State': ctx.next,
       'Last Inbound At': new Date().toISOString() // B19: staleness anchor for the abandonment sweep
-    }, { phone: ctx.phone });
+    }))) return;
 
     // The duration menu arrives as a separate WhatsApp message — a separate
     // serverless invocation with no shared memory — so the arrival time has to
@@ -3891,7 +3934,10 @@ const actions = {
       hours: choice, airtableId: pending.id
     });
 
-    await updateGuestState(ctx.guest.id, { 'Session State': ctx.next });
+    // The booking is already Confirmed and holding its room at this point, so a
+    // tripped guard here leaves a hold the guest was never told about — the
+    // alert carries the booking id so reception can finish or cancel it.
+    if (!(await advanceGuestState(ctx, { 'Session State': ctx.next }, { bookingId: pending.id, bookingRef }))) return;
     // B19: Booked, Hourly. Completed in one handler, so this is the single log site.
     await logEnquiry(ctx.property, ctx.phone, 'Booked', {
       checkInIso, checkOutIso, bookingType: 'Hourly', bookingId: pending.id
@@ -3973,7 +4019,7 @@ const actions = {
           phone: ctx.phone, bookingId: booking.id, method: 'Card', error: JSON.stringify(write.error)
         });
       }
-      await updateGuestState(ctx.guest.id, { 'Session State': nextState, 'Last Inbound At': new Date().toISOString() });
+      if (!(await advanceGuestState(ctx, { 'Session State': nextState, 'Last Inbound At': new Date().toISOString() }, { bookingId: booking.id }))) return;
       await sendWhatsApp(ctx.phone, msg('paymentCardChosen'));
       await sendWhatsApp(ctx.phone, isHourly ? msg('confirmedMenu', { guestName }) : msg('askEta'));
       return;
@@ -3995,7 +4041,7 @@ const actions = {
         phone: ctx.phone, bookingId: booking.id, reference, error: JSON.stringify(write.error)
       });
     }
-    await updateGuestState(ctx.guest.id, { 'Session State': nextState, 'Last Inbound At': new Date().toISOString() });
+    if (!(await advanceGuestState(ctx, { 'Session State': nextState, 'Last Inbound At': new Date().toISOString() }, { bookingId: booking.id }))) return;
 
     const property = await (async () => {
       const roomId = (booking.fields['Room'] || [])[0];
@@ -4046,7 +4092,7 @@ const actions = {
         return;
       }
     }
-    await updateGuestState(ctx.guest.id, { 'Session State': ctx.next });
+    if (!(await advanceGuestState(ctx, { 'Session State': ctx.next }))) return;
     // B19: Booked, re-affirmed on confirmation — deduped by booking id, so this is
     // a no-op when collectDetails already logged it at creation, and the single
     // logging site when the booking reached AWAITING_ETA another way.

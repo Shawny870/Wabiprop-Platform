@@ -108,6 +108,7 @@
     "cancelled": "Your booking has been cancelled. No problem at all — we hope to see you another time. 👋",
     "cancelWriteFailed": "Sorry, something went wrong on our end and we couldn't cancel your booking. Please try again.",
     "confirmedMenu": "Hi {guestName}! Your booking is confirmed. 🛏️\n\nReply with a number:\n1 - I'm at the gate\n2 - Cancel my booking",
+    "stateWriteFailed": "Sorry, something went wrong on our side. Please speak to reception on {redirectPhone} and they will help you straight away.",
     "gateCooldownMenu": "Just checked you in — give it a minute before checking out. Reply 1 again in a bit if you still need to leave.",
     "checkedInMenu": "Hi {guestName}! You're checked in. 🛏️\n\nReply with a number:\n1 - Check out",
     "cleanerDispatch": "Hi {cleanerName} 🧹 {roomName} has just been vacated. Please prepare it with fresh linen immediately.\n\nReply *DONE* when complete.",
