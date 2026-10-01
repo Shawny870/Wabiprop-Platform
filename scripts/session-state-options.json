@@ -1,0 +1,20 @@
+{
+  "_comment": "WS_Guests.'Session State' select options that exist in the LIVE Airtable base. Source: Claude.ai live-schema check, 01 Oct 2026 (Doc 1b). The app's Airtable token cannot create select options, so a state the code writes that is not listed here WILL fail silently in production (30 Sep outage: AWAITING_PAYMENT_METHOD). To add a state: Claude.ai creates the option in Airtable first, then this list is updated, then the code ships. test/sessionstateoptions.test.js fails the build if the code writes a state that is not listed.",
+  "checkedAt": "2026-10-01",
+  "options": [
+    "NEW",
+    "AWAITING_DETAILS",
+    "AWAITING_ETA",
+    "CONFIRMED",
+    "CHECKED_IN",
+    "CHECKOUT",
+    "AWAITING_OCCUPANCY",
+    "AWAITING_HOURLY_DETAILS",
+    "AWAITING_HOURLY_DURATION",
+    "HUMAN_HANDLING",
+    "AWAITING_STAY_TYPE",
+    "AWAITING_RATING",
+    "AWAITING_RATING_FEEDBACK",
+    "AWAITING_PAYMENT_METHOD"
+  ]
+}
