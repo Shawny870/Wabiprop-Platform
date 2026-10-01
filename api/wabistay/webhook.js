@@ -1205,6 +1205,32 @@ function propertyCityLine(property) {
   return city ? `, ${city}` : '';
 }
 
+// Doc 1b PR 3 (01 Oct 2026). A guest is never told the lodge is "fully booked"
+// or "full": a room can be unavailable to the bot for reasons the guest cannot
+// act on (every room mid-clean, or the availability check itself failing
+// closed on an Airtable error), and reception can usually sort it out. Every
+// guest-facing "no room" path sends the same sentence, pointing at the number
+// the suspended-property redirect already uses (Guest Redirect Phone, falling
+// back to Notify Phone). With neither set the sentence is sent without the
+// number — no new words — and the gap is logged loudly.
+function noRoomMessage(property) {
+  const fields = (property && property.fields) || {};
+  const redirectPhone = fields['Guest Redirect Phone'] || fields['Notify Phone'] || null;
+  if (!redirectPhone) {
+    logToAxiom('error', 'no_room_message_missing_redirect_phone', { propertyId: property && property.id });
+    return msg('noRoomSpeakToReceptionNoPhone');
+  }
+  return msg('noRoomSpeakToReception', { redirectPhone });
+}
+
+// Room count in the greeting is opt-in per property: the checkbox
+// 'Show Room Count To Guests' must be ticked. Airtable omits an unticked box
+// entirely, so only === true shows it (same allowlist reading as 'Active').
+function roomCountLine(property, roomCount) {
+  if (!property || !property.fields || property.fields['Show Room Count To Guests'] !== true) return '';
+  return `We currently have *${roomCount} room${roomCount !== 1 ? 's' : ''}* available.\n\n`;
+}
+
 // F19 (Rate-fix): the occupancy step confirms the booking a turn after
 // collectDetails created it, so it no longer has the guest's raw date strings in
 // hand. They are recovered from the Notes line collectDetails wrote
@@ -3216,10 +3242,7 @@ const actions = {
       // and no stay-type menu is offered. Same "no writes, no state change"
       // posture as the gateTooEarly path above.
       logToAxiom('info', 'greeting_zero_rooms', { phone: ctx.phone, propertyId: ctx.property.id });
-      await sendWhatsApp(ctx.phone, msg('fullyBooked', {
-        propertyName: ctx.property.fields['Property Name'],
-        propertyCityLine: propertyCityLine(ctx.property)
-      }));
+      await sendWhatsApp(ctx.phone, noRoomMessage(ctx.property));
       return;
     }
 
@@ -3247,7 +3270,7 @@ const actions = {
     await sendWhatsApp(ctx.phone, msg('greeting', {
       propertyName: ctx.property.fields['Property Name'],
       propertyCityLine: propertyCityLine(ctx.property),
-      roomCountText: `${roomCount} room${roomCount !== 1 ? 's' : ''}`
+      roomCountLine: roomCountLine(ctx.property, roomCount)
     }));
   },
 
@@ -3408,7 +3431,7 @@ const actions = {
       await logEnquiry(ctx.property, ctx.phone, 'No Availability', {
         checkInIso, checkOutIso, bookingType: 'Overnight'
       });
-      await sendWhatsApp(ctx.phone, msg('noAvailability', { guestName, checkIn, checkOut }));
+      await sendWhatsApp(ctx.phone, noRoomMessage(ctx.property));
       return;
     }
 
@@ -3487,7 +3510,7 @@ const actions = {
         await logEnquiry(ctx.property, ctx.phone, 'No Availability', {
           checkInIso, checkOutIso, bookingType: 'Overnight'
         });
-        await sendWhatsApp(ctx.phone, msg('noAvailability', { guestName, checkIn, checkOut }));
+        await sendWhatsApp(ctx.phone, noRoomMessage(ctx.property));
         return;
       }
 
@@ -3845,11 +3868,7 @@ const actions = {
       await logEnquiry(ctx.property, ctx.phone, 'No Availability', {
         checkInIso, checkOutIso, bookingType: 'Hourly'
       });
-      await sendWhatsApp(ctx.phone, msg('hourlyNoAvailability', {
-        guestName,
-        checkInText: formatSastDateTime(checkInIso),
-        checkOutText: formatSastDateTime(checkOutIso)
-      }));
+      await sendWhatsApp(ctx.phone, noRoomMessage(ctx.property));
       return;
     }
 
@@ -3921,11 +3940,7 @@ const actions = {
       await logEnquiry(ctx.property, ctx.phone, 'No Availability', {
         checkInIso, checkOutIso, bookingType: 'Hourly'
       });
-      await sendWhatsApp(ctx.phone, msg('hourlyNoAvailability', {
-        guestName,
-        checkInText: formatSastDateTime(checkInIso),
-        checkOutText: formatSastDateTime(checkOutIso)
-      }));
+      await sendWhatsApp(ctx.phone, noRoomMessage(ctx.property));
       return;
     }
 

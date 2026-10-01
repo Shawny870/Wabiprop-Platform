@@ -140,7 +140,7 @@ test('overnight: a competing booking that lands between the pre-check and create
   assert.strictEqual(asRecord.fields['Status'], 'Cancelled', 'but rolled back, not left Confirmed');
 
   assert.strictEqual(guestRow(ctx, GUEST_A_PHONE).fields['Session State'], 'AWAITING_DETAILS', 'guest reset, not stuck in AWAITING_ETA with no valid booking');
-  assert.match(texts(ctx, GUEST_A_PHONE), /fully booked/i, 'told no availability, not "booking received"');
+  assert.match(texts(ctx, GUEST_A_PHONE), /speak to reception/i, 'told no availability, not "booking received"');
   assert.ok(axiomEvents(ctx).includes('booking_race_lost'));
 });
 
@@ -185,7 +185,7 @@ test('overnight: a rollback write that itself fails is logged loudly, not silent
   // Per Rule 30's spirit: even though the rollback write failed, the guest is
   // still told the truth (no availability) rather than a false confirmation —
   // this is the one thing that must not silently become "booking received".
-  assert.match(texts(ctx, GUEST_A_PHONE), /fully booked/i);
+  assert.match(texts(ctx, GUEST_A_PHONE), /speak to reception/i);
 });
 
 // ── P1a: hourly race ─────────────────────────────────────────────────────────
@@ -229,7 +229,7 @@ test('hourly: a competing booking landing between the pre-check and the room-ass
   const competitor = bookings(ctx).find(b => b.id !== 'recPending');
   assert.strictEqual(competitor.fields['Status'], 'Confirmed', 'the competing booking stands');
   assert.strictEqual(guestRow(ctx, GUEST_A_PHONE).fields['Session State'], 'AWAITING_HOURLY_DETAILS');
-  assert.match(texts(ctx, GUEST_A_PHONE), /fully booked/i);
+  assert.match(texts(ctx, GUEST_A_PHONE), /speak to reception/i);
   assert.ok(axiomEvents(ctx).includes('booking_race_lost'));
 });
 
@@ -257,7 +257,7 @@ test('a failed blocking-bookings read refuses the room instead of treating it as
   await send(GUEST_A_PHONE, 'Jane Doe\n1 September 2026\n2 September 2026');
 
   assert.strictEqual(bookings(ctx).length, 0, 'no booking created on a failed availability read — fails closed, not open');
-  assert.match(texts(ctx, GUEST_A_PHONE), /fully booked/i, 'the guest is told no availability, not offered a room the check could not verify');
+  assert.match(texts(ctx, GUEST_A_PHONE), /speak to reception/i, 'the guest is told no availability, not offered a room the check could not verify');
   assert.ok(axiomEvents(ctx).includes('availability_check_failed_closed'));
 });
 
