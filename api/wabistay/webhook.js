@@ -295,6 +295,7 @@ async function advanceGuestState(ctx, fields, extra = {}) {
 // deployment this log line belongs to.
 const WABISTAY_KNOWN_FLAGS = [
   'WABISTAY_CLEANER_GATE_TEMPLATE',
+  'WABISTAY_ENQUIRY_TRACKING',
   'WABISTAY_GATE_ALERT_UNPAID',
   'WABISTAY_GATE_ARRIVAL_TEMPLATE',
   'WABISTAY_GUEST_ESCALATION_TEMPLATE',
@@ -308,7 +309,7 @@ const WABISTAY_KNOWN_FLAGS = [
 
 // Switches the code only treats as on for 1/true; for these, 'on' means that,
 // not merely 'set'.
-const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD'];
+const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD'];
 
 function wabistayFlagState() {
   const names = new Set([...WABISTAY_KNOWN_FLAGS, ...Object.keys(process.env).filter(k => k.startsWith('WABISTAY_'))]);
@@ -1341,6 +1342,21 @@ function escalationTimeoutMs(property) {
     ? parsed
     : globalDefaultMinutes;
   return minutes * 60 * 1000;
+}
+
+// Written with the greeting (tracking on, not a test phone): 'Last Inbound At' so
+// the abandonment sweep can see the greeting step, and, when this starts a fresh
+// attempt (guest new or back at NEW), the attempt's start and property. A restart
+// from mid-flow ("hi"/"menu") keeps the original start.
+function greetingTrackingFields(ctx) {
+  if (!enquiryTrackingEnabled() || isTestGuest(ctx.guest)) return {};
+  const now = new Date().toISOString();
+  const state = ctx.guest && ctx.guest.fields['Session State'];
+  const fresh = !ctx.guest || !state || state === 'NEW';
+  return {
+    'Last Inbound At': now,
+    ...(fresh ? { 'Attempt Started At': now, 'Attempt Property': [ctx.property.id] } : {})
+  };
 }
 
 function propertyCityLine(property) {
@@ -3455,7 +3471,8 @@ const actions = {
         'Phone Number': ctx.phone,
         'Guest Type': 'WhatsApp',
         'Session State': ctx.next,
-        'First Visit': new Date().toISOString().split('T')[0]
+        'First Visit': new Date().toISOString().split('T')[0],
+        ...greetingTrackingFields(ctx)
       });
       if (guestCreate && guestCreate.error) {
         logToAxiom('error', 'guest_state_write_failed', {
@@ -3463,7 +3480,7 @@ const actions = {
         });
       }
     } else {
-      if (!(await advanceGuestState(ctx, { 'Session State': ctx.next }))) return;
+      if (!(await advanceGuestState(ctx, { 'Session State': ctx.next, ...greetingTrackingFields(ctx) }))) return;
     }
 
     await sendWhatsApp(ctx.phone, msg('greeting', {
@@ -3580,7 +3597,7 @@ const actions = {
       // B19: the parser rejected this input (bot re-prompted) → Invalid Input.
       // Partial row: dates blank if not given. Deduped so repeated fumbles in one
       // attempt collapse to a single Invalid Input row.
-      await logEnquiry(ctx.property, ctx.phone, 'Invalid Input', { bookingType: 'Overnight' });
+      await logEnquiry(ctx.property, ctx.phone, 'Invalid Input', { ...enquiryTrackingOpts(ctx), bookingType: 'Overnight' });
       // Stay in AWAITING_DETAILS — reprompt only
       await sendWhatsApp(ctx.phone, msg('detailsReprompt'));
       return;
@@ -3605,7 +3622,7 @@ const actions = {
         checkInText: checkIn,
         checkOutText: checkOut || null
       });
-      await logEnquiry(ctx.property, ctx.phone, 'Invalid Input', { bookingType: 'Overnight' });
+      await logEnquiry(ctx.property, ctx.phone, 'Invalid Input', { ...enquiryTrackingOpts(ctx), bookingType: 'Overnight' });
       await sendWhatsApp(ctx.phone, msg('detailsReprompt'));
       return;
     }
@@ -3627,7 +3644,7 @@ const actions = {
       });
       // B19: the revenue-relevant one — a real request refused by B8. Captures the
       // dates so the weekly summary can say "turned away, no room free".
-      await logEnquiry(ctx.property, ctx.phone, 'No Availability', {
+      await logEnquiry(ctx.property, ctx.phone, 'No Availability', { ...enquiryTrackingOpts(ctx),
         checkInIso, checkOutIso, bookingType: 'Overnight'
       });
       await sendWhatsApp(ctx.phone, noRoomMessage(ctx.property));
@@ -3709,7 +3726,7 @@ const actions = {
           checkIn: checkInIso, checkOut: checkOutIso,
           reason: 'room taken by a concurrent booking between the pre-check and this create'
         });
-        await logEnquiry(ctx.property, ctx.phone, 'No Availability', {
+        await logEnquiry(ctx.property, ctx.phone, 'No Availability', { ...enquiryTrackingOpts(ctx),
           checkInIso, checkOutIso, bookingType: 'Overnight'
         });
         await sendWhatsApp(ctx.phone, noRoomMessage(ctx.property));
@@ -3799,7 +3816,7 @@ const actions = {
     // price existed, so an abandoning guest was already marked Booked with no
     // quote ever sent. recordEta re-affirms on confirmation but the booking-id
     // dedup keeps it to one row.
-    await logEnquiry(ctx.property, ctx.phone, 'Booked', {
+    await logEnquiry(ctx.property, ctx.phone, 'Booked', { ...enquiryTrackingOpts(ctx),
       checkInIso, checkOutIso, bookingType: 'Overnight', bookingId: booking.id
     });
 
@@ -4067,7 +4084,7 @@ const actions = {
       // guest offers a different time.
       await updateGuestState(ctx.guest.id, { 'Session State': 'AWAITING_HOURLY_DETAILS', 'Last Inbound At': new Date().toISOString() });
       // B19: B9's hourly availability check refused — turned away, Hourly.
-      await logEnquiry(ctx.property, ctx.phone, 'No Availability', {
+      await logEnquiry(ctx.property, ctx.phone, 'No Availability', { ...enquiryTrackingOpts(ctx),
         checkInIso, checkOutIso, bookingType: 'Hourly'
       });
       await sendWhatsApp(ctx.phone, noRoomMessage(ctx.property));
@@ -4141,7 +4158,7 @@ const actions = {
         checkIn: checkInIso, checkOut: checkOutIso,
         reason: 'room taken by a concurrent booking between the pre-check and this update'
       });
-      await logEnquiry(ctx.property, ctx.phone, 'No Availability', {
+      await logEnquiry(ctx.property, ctx.phone, 'No Availability', { ...enquiryTrackingOpts(ctx),
         checkInIso, checkOutIso, bookingType: 'Hourly'
       });
       await sendWhatsApp(ctx.phone, noRoomMessage(ctx.property));
@@ -4158,7 +4175,7 @@ const actions = {
     // alert carries the booking id so reception can finish or cancel it.
     if (!(await advanceGuestState(ctx, { 'Session State': ctx.next }, { bookingId: pending.id, bookingRef }))) return;
     // B19: Booked, Hourly. Completed in one handler, so this is the single log site.
-    await logEnquiry(ctx.property, ctx.phone, 'Booked', {
+    await logEnquiry(ctx.property, ctx.phone, 'Booked', { ...enquiryTrackingOpts(ctx),
       checkInIso, checkOutIso, bookingType: 'Hourly', bookingId: pending.id
     });
 
@@ -4313,12 +4330,15 @@ const actions = {
         return;
       }
     }
-    if (!(await advanceGuestState(ctx, { 'Session State': ctx.next }))) return;
+    if (!(await advanceGuestState(ctx, {
+      'Session State': ctx.next,
+      ...(enquiryTrackingEnabled() && !isTestGuest(ctx.guest) ? { 'Last Inbound At': new Date().toISOString() } : {})
+    }))) return;
     // B19: Booked, re-affirmed on confirmation — deduped by booking id, so this is
     // a no-op when collectDetails already logged it at creation, and the single
     // logging site when the booking reached AWAITING_ETA another way.
     if (confirmedBooking) {
-      await logEnquiry(ctx.property, ctx.phone, 'Booked', {
+      await logEnquiry(ctx.property, ctx.phone, 'Booked', { ...enquiryTrackingOpts(ctx),
         bookingType: confirmedBooking.fields['Booking Type'] || 'Overnight',
         bookingId: confirmedBooking.id
       });
@@ -4380,6 +4400,7 @@ const actions = {
     // confirmed against, so it is deliberately let through unchanged, same
     // as it already was before this build.
     if (booking && Number(booking.fields['Amount Due']) > 0 && booking.fields['Payment Status'] !== 'Paid') {
+      const tapAt = new Date().toISOString();
       logToAxiom('info', 'gate_arrival_payment_not_confirmed', {
         phone: ctx.phone, bookingId: booking.id, amountDue: booking.fields['Amount Due']
       });
@@ -4396,6 +4417,20 @@ const actions = {
           await alertUnpaidGateArrival(ctx, booking, heldRoomId, notifyPhone);
         } catch (err) {
           logToAxiom('error', 'gate_alert_unpaid_failed', { phone: ctx.phone, bookingId: booking.id, message: err.message });
+        }
+      }
+      // Lost-enquiry tracking: remember the FIRST unpaid tap on this booking, so
+      // the sweep can tell when nobody has dealt with the guest 15 minutes later.
+      // One non-fatal timestamp write, after the guest's reply and the alert, in its
+      // own try/catch: it can never block or delay either. Not for test phones.
+      if (enquiryTrackingEnabled() && !isTestGuest(ctx.guest) && !booking.fields['Gate Tap At']) {
+        try {
+          const tapWrite = await airtableUpdate('WS_Bookings', booking.id, { 'Gate Tap At': tapAt });
+          if (tapWrite && tapWrite.error) {
+            logToAxiom('error', 'gate_tap_stamp_write_failed', { bookingId: booking.id, error: JSON.stringify(tapWrite.error) });
+          }
+        } catch (err) {
+          logToAxiom('error', 'gate_tap_stamp_write_failed', { bookingId: booking.id, message: err.message });
         }
       }
       return;
@@ -4586,6 +4621,14 @@ const actions = {
     }
     await updateGuestState(ctx.guest.id, { 'Session State': ctx.next });
     logToAxiom('info', 'state_transition', { phone: ctx.phone, guestId: ctx.guest.id, from: 'CONFIRMED', to: ctx.next, reason: 'cancel' });
+    // Lost-enquiry tracking: a guest who cancels their own booking is an outcome.
+    if (bookings.length > 0 && enquiryTrackingEnabled()) {
+      await logEnquiry(ctx.property, ctx.phone, 'Cancelled', {
+        ...enquiryTrackingOpts(ctx),
+        checkInIso: bookings[0].fields['Check In'], checkOutIso: bookings[0].fields['Check Out'],
+        bookingType: bookings[0].fields['Booking Type'], bookingId: bookings[0].id
+      });
+    }
     await sendWhatsApp(ctx.phone, msg('cancelled'));
   },
 
@@ -5177,10 +5220,31 @@ async function runHoldRelease(now = new Date(), opts = {}) {
 
     // Reset the guest, but only if no other live hold of theirs remains.
     const guestId = (hold.fields['Guest'] || [])[0];
+    const holdGuest = guestId ? (await airtableGet('WS_Guests', `RECORD_ID() = '${guestId}'`))[0] || null : null;
+
+    // Lost-enquiry tracking: a hold the timer released is an outcome ('Hold
+    // Expired', not 'Cancelled' — nobody cancelled it). Logged before the guest is
+    // reset so 'Last Step' is where they actually stopped.
+    if (enquiryTrackingEnabled()) {
+      const holdRoomId = (hold.fields['Room'] || [])[0];
+      const holdRoom = holdRoomId ? (await airtableGet('WS_Rooms', `RECORD_ID() = '${holdRoomId}'`))[0] || null : null;
+      const holdPropertyId = (holdRoom && (holdRoom.fields['Property'] || [])[0]) || (holdGuest && (holdGuest.fields['Attempt Property'] || [])[0]) || null;
+      if (holdPropertyId && holdGuest) {
+        await logEnquiry({ id: holdPropertyId }, formatPhone(String(holdGuest.fields['Phone Number'] || '')), 'Hold Expired', {
+          checkInIso: hold.fields['Check In'], checkOutIso: hold.fields['Check Out'],
+          bookingType: hold.fields['Booking Type'], bookingId: hold.id,
+          firstMessageAt: holdGuest.fields['Attempt Started At'], lastMessageAt: holdGuest.fields['Last Inbound At'],
+          lastStep: holdGuest.fields['Session State'], testPhone: isTestGuest(holdGuest)
+        });
+      } else {
+        logToAxiom('warn', 'hold_expired_enquiry_not_logged', { bookingId: hold.id, reason: 'no property or guest to scope the row' });
+      }
+    }
+
     if (guestId) {
       const otherLive = holds.some(h => h.id !== hold.id && !released.has(h.id) && (h.fields['Guest'] || []).includes(guestId));
       if (!otherLive) {
-        const guest = (await airtableGet('WS_Guests', `RECORD_ID() = '${guestId}'`))[0] || null;
+        const guest = holdGuest;
         if (guest && HOLD_SESSION_STATES.includes(guest.fields['Session State'])) {
           // No message to the guest: what to say is Shawn's wording, and a guest
           // who has been silent past their arrival time is likely outside the
@@ -5253,6 +5317,62 @@ async function runOverdueAlerts(now = new Date(), opts = {}) {
       logToAxiom('info', 'overdue_alert_sent', { ...correlation, checkOut });
       summary.overdueAlerts++;
     }
+  }
+  return summary;
+}
+
+// Unattended gate arrivals (WABISTAY_ENQUIRY_TRACKING). A guest tapped "I'm at the
+// gate" before payment (first tap stamped in 'Gate Tap At'); 15 minutes on, the
+// payment is still not confirmed and they are not checked in. Nobody dealt with
+// them in time, which is what Shawn wants counted while nobody covers the phone
+// at night. Writes 'Unattended Gate Arrival At' once and logs
+// unattended_gate_arrival. Resolution is judged at the 15-minute mark, from
+// 'Paid At' / 'Checked In At', not from the moment this 5-minute sweep happens
+// to run — a payment at minute 17 is still unattended.
+async function runUnattendedGateSweep(now = new Date(), opts = {}) {
+  const { deadline = Infinity } = opts;
+  const summary = { unattendedGateArrivals: 0 };
+  if (!enquiryTrackingEnabled()) return summary;
+
+  const nowMs = now.getTime();
+  const candidates = (await airtableGet('WS_Bookings', orFormula('Status', ['Confirmed', 'Checked In']))).filter(b => {
+    const tap = b.fields['Gate Tap At'];
+    if (!tap || b.fields['Unattended Gate Arrival At']) return false;
+    const limit = Date.parse(tap) + UNATTENDED_GATE_AFTER_MS;
+    if (nowMs < limit) return false;
+    const paidInTime = b.fields['Payment Status'] === 'Paid' && (!b.fields['Paid At'] || Date.parse(b.fields['Paid At']) <= limit);
+    const inInTime = b.fields['Checked In At'] && Date.parse(b.fields['Checked In At']) <= limit;
+    return !paidInTime && !inInTime;
+  });
+
+  for (const candidate of candidates) {
+    if (Date.now() > deadline) {
+      summary.truncated = true;
+      logToAxiom('warn', 'cron_time_budget_hit', { cron: 'auto_checkout', stage: 'unattended_gate', leftFrom: candidate.id });
+      break;
+    }
+    const fresh = (await airtableGet('WS_Bookings', `RECORD_ID() = '${candidate.id}'`))[0] || null;
+    if (!fresh || fresh.fields['Unattended Gate Arrival At']) continue;
+
+    const guestId = (fresh.fields['Guest'] || [])[0];
+    const guest = guestId ? (await airtableGet('WS_Guests', `RECORD_ID() = '${guestId}'`))[0] || null : null;
+    const tap = fresh.fields['Gate Tap At'];
+    const event = {
+      bookingId: fresh.id, bookingRef: fresh.fields['Booking Ref'] || null, gateTapAt: tap,
+      gateTapHourSast: sastHourOf(tap), minutesWaited: Math.round((nowMs - Date.parse(tap)) / 60000),
+      amountDue: fresh.fields['Amount Due'] || null, phone: guest ? guest.fields['Phone Number'] : null
+    };
+    if (isTestGuest(guest)) {
+      logToAxiom('info', 'unattended_gate_arrival', { ...event, testPhone: true });   // logged, never marked
+      continue;
+    }
+    const write = await airtableUpdate('WS_Bookings', fresh.id, { 'Unattended Gate Arrival At': now.toISOString() });
+    if (write && write.error) {
+      logToAxiom('error', 'unattended_gate_marker_write_failed', { bookingId: fresh.id, error: JSON.stringify(write.error) });
+      continue;
+    }
+    logToAxiom('info', 'unattended_gate_arrival', { ...event, testPhone: false });
+    summary.unattendedGateArrivals++;
   }
   return summary;
 }
@@ -5373,6 +5493,45 @@ const ENQUIRY_ABANDON_STATES = [
   'AWAITING_PAYMENT_METHOD'
 ];
 
+// ─── LOST-ENQUIRY TRACKING (WABISTAY_ENQUIRY_TRACKING) ───────────────────────
+// Shawn's decision: nobody answers the phone at night for now, so we record lost
+// enquiries and when they happen, and review after a month. Each enquiry row
+// carries the time of the first message, the last step reached and an outcome
+// (Booked / Abandoned / Cancelled / Hold Expired, plus the existing
+// No Availability / Invalid Input). A separate marker, 'Unattended Gate Arrival At',
+// is written on a booking when a gate tap sees no payment confirmation and no
+// check-in within 15 minutes. All of it sits behind WABISTAY_ENQUIRY_TRACKING
+// (1/true, off by default). A guest with 'Test Phone' ticked gets no enquiry row
+// and no marker, whatever the flag — their Axiom events carry testPhone: true.
+const UNATTENDED_GATE_AFTER_MS = 15 * 60 * 1000;
+
+function enquiryTrackingEnabled() {
+  return /^(1|true)$/i.test(String(process.env.WABISTAY_ENQUIRY_TRACKING || '').trim());
+}
+
+function isTestGuest(guest) {
+  return !!(guest && guest.fields && guest.fields['Test Phone'] === true);
+}
+
+// SAST hour of day (0-23) of an ISO instant, for Axiom's by-hour views.
+function sastHourOf(iso) {
+  const ms = iso ? Date.parse(iso) : NaN;
+  return Number.isFinite(ms) ? new Date(ms + SAST_OFFSET_MS).getUTCHours() : null;
+}
+
+// What a handler passes to logEnquiry about the attempt: when it began, where the
+// guest was, and whether they are a test phone. 'Last Step' is the guest's Session
+// State on arrival of the message being handled (the step they were answering).
+function enquiryTrackingOpts(ctx) {
+  const g = ctx && ctx.guest;
+  return {
+    firstMessageAt: ctx.attemptStartedAt || (g && g.fields['Attempt Started At']) || null,
+    lastMessageAt: new Date().toISOString(),
+    lastStep: ctx.stepOnArrival || (g && g.fields['Session State']) || null,
+    testPhone: isTestGuest(g)
+  };
+}
+
 // Writes exactly one WS_Enquiries row. Property-scoped via property.id (JS-side
 // record-id link, same idiom as B11). Partial rows are allowed — an attempt that
 // dies before dates are given logs with blank date fields.
@@ -5385,9 +5544,28 @@ const ENQUIRY_ABANDON_STATES = [
 //   · Invalid Input — never a second OPEN (booking-less) Invalid-Input row for the
 //     same phone, so repeated fumbles in one attempt collapse to one row.
 async function logEnquiry(property, phone, outcome, opts = {}) {
-  const { checkInIso, checkOutIso, bookingType, bookingId } = opts;
+  const { checkInIso, checkOutIso, bookingType, bookingId, firstMessageAt, lastMessageAt, lastStep, testPhone } = opts;
+  const tracking = enquiryTrackingEnabled();
+  const closed = {
+    phone, outcome, lastStep: lastStep || null, firstMessageAt: firstMessageAt || null, lastMessageAt: lastMessageAt || null,
+    firstMessageHourSast: sastHourOf(firstMessageAt), lastMessageHourSast: sastHourOf(lastMessageAt),
+    bookingType: bookingType || null, bookingId: bookingId || null, propertyId: property.id
+  };
+
+  // A test phone never produces an enquiry row. The event still goes to Axiom
+  // (flagged), so a tester can watch their own flow.
+  if (testPhone) {
+    logToAxiom('info', 'enquiry_skipped_test_phone', { phone, outcome });
+    if (tracking) logToAxiom('info', 'enquiry_closed', { ...closed, testPhone: true });
+    return false;
+  }
+
   const existing = await airtableGet('WS_Enquiries', '');
-  if (bookingId && existing.some(e => (e.fields['Booking'] || []).includes(bookingId))) return false;
+  // One row per booking per outcome. A Booked row used to be the only kind that
+  // carried a booking id, so any row for the booking counted; Cancelled and Hold
+  // Expired also carry it, so they must be allowed to follow a Booked row.
+  if (bookingId && existing.some(e => (e.fields['Booking'] || []).includes(bookingId) &&
+        (outcome === 'Booked' || e.fields['Outcome'] === outcome))) return false;
   if (outcome === 'Invalid Input' && existing.some(e =>
         e.fields['Phone Number'] === phone &&
         e.fields['Outcome'] === 'Invalid Input' &&
@@ -5403,6 +5581,11 @@ async function logEnquiry(property, phone, outcome, opts = {}) {
   if (checkOutIso) fields['Requested Check Out'] = checkOutIso;
   if (bookingType) fields['Booking Type'] = bookingType;
   if (bookingId) fields['Booking'] = [bookingId];
+  if (tracking) {
+    if (firstMessageAt) fields['First Message At'] = firstMessageAt;
+    if (lastMessageAt) fields['Last Message At'] = lastMessageAt;
+    if (lastStep) fields['Last Step'] = lastStep;
+  }
   // Rule 30 step 2, slice 2: NON-FATAL — WS_Enquiries is a one-way reporting
   // sink, nothing in the live guest/booking flow reads it back. The dedup
   // guards above (lines 3069-3073) re-query fresh on each future call, so a
@@ -5417,6 +5600,7 @@ async function logEnquiry(property, phone, outcome, opts = {}) {
     return false;
   }
   logToAxiom('info', 'enquiry_logged', { phone, propertyId: property.id, outcome, bookingType: bookingType || null });
+  if (tracking) logToAxiom('info', 'enquiry_closed', { ...closed, testPhone: false });
   return true;
 }
 
@@ -5448,17 +5632,32 @@ async function logEnquiry(property, phone, outcome, opts = {}) {
 // gates — the guest would never actually get reset. Splitting the reset out
 // from these three (still-correct, still-necessary) log preconditions is
 // what actually closes the gap.
+// With tracking on the sweep also covers the greeting step (AWAITING_STAY_TYPE),
+// which it used to be blind to: a guest who says hi and then goes quiet is the
+// commonest lost enquiry there is. CONFIRMED stays out: those are bookings, and
+// the hold release (Hold Expired) deals with them.
+function abandonStates() {
+  return enquiryTrackingEnabled() ? [...ENQUIRY_ABANDON_STATES, 'AWAITING_STAY_TYPE'] : ENQUIRY_ABANDON_STATES;
+}
+
+// When the guest was last heard from. Tracking falls back to the attempt's start
+// for a guest whose 'Last Inbound At' was never written (the greeting didn't).
+function lastActivityIso(guest) {
+  return guest.fields['Last Inbound At'] || (enquiryTrackingEnabled() ? guest.fields['Attempt Started At'] : null) || null;
+}
+
 async function runEnquiryAbandonment(now = new Date(), opts = {}) {
   const { deadline = Infinity } = opts;
   const nowMs = now.getTime();
   const summary = { abandoned: 0 };
-  const guests = await airtableGet('WS_Guests', orFormula('Session State', ENQUIRY_ABANDON_STATES));
+  const tracking = enquiryTrackingEnabled();
+  const guests = await airtableGet('WS_Guests', orFormula('Session State', abandonStates()));
 
   // Most ticks have nobody stale. The whole WS_Enquiries table (which only ever
   // grows) used to be read on every one of them, every 5 minutes; now it is read
   // only when there is at least one stale guest to process.
   const stale = guests.filter(g => {
-    const li = g.fields['Last Inbound At'];
+    const li = lastActivityIso(g);
     return li && (nowMs - Date.parse(li)) >= ENQUIRY_ABANDON_MS;
   });
   if (stale.length === 0) return summary;
@@ -5470,8 +5669,9 @@ async function runEnquiryAbandonment(now = new Date(), opts = {}) {
       logToAxiom('warn', 'cron_time_budget_hit', { cron: 'auto_checkout', stage: 'abandonment', leftFrom: guest.id });
       break;
     }
-    const lastInbound = guest.fields['Last Inbound At'];
+    const lastInbound = lastActivityIso(guest);
     if (!lastInbound || (nowMs - Date.parse(lastInbound)) < ENQUIRY_ABANDON_MS) continue;
+    const stepWhenStopped = guest.fields['Session State'];   // before the reset below
 
     // 1. RESET — see function comment. No proactive WhatsApp send: a guest
     // silent 24h+ is outside Meta's free-form service window, so this only
@@ -5487,7 +5687,9 @@ async function runEnquiryAbandonment(now = new Date(), opts = {}) {
     // will usually (not always) skip the log — see function comment — which
     // is fine: the reset above already happened regardless.
     const name = guest.fields['Guest Name'];
-    if (!name || name === 'Unknown') continue;                 // "provided at least a name"
+    // Tracking drops the "gave a name" gate: a guest who never got as far as a
+    // name is exactly the lost enquiry we want to count.
+    if (!tracking && (!name || name === 'Unknown')) continue;  // "provided at least a name"
 
     const phone = formatPhone(String(guest.fields['Phone Number'] || ''));
     // One-write guard: skip if an enquiry row for this phone already exists for
@@ -5501,13 +5703,19 @@ async function runEnquiryAbandonment(now = new Date(), opts = {}) {
     const roomId = pending && (pending.fields['Room'] || [])[0];
     const room = roomId ? (await airtableGet('WS_Rooms', `RECORD_ID() = '${roomId}'`))[0] : null;
     const propId = room && (room.fields['Property'] || [])[0];
-    const property = propId ? (await airtableGet('WS_Properties', `RECORD_ID() = '${propId}'`))[0] : null;
+    let property = propId ? (await airtableGet('WS_Properties', `RECORD_ID() = '${propId}'`))[0] : null;
+    // No booking to walk to a property from: use the property the attempt began at.
+    const attemptPropId = (guest.fields['Attempt Property'] || [])[0];
+    if (!property && tracking && attemptPropId) property = { id: attemptPropId };
     if (!property) continue; // cannot scope without a property — leave the log for a later run
 
     await logEnquiry(property, phone, 'Abandoned', {
       checkInIso: pending && pending.fields['Check In'],
       checkOutIso: pending && pending.fields['Check Out'],
-      bookingType: pending && pending.fields['Booking Type']
+      bookingType: pending && pending.fields['Booking Type'],
+      // When they went quiet, not when this sweep noticed 24 hours later.
+      firstMessageAt: guest.fields['Attempt Started At'], lastMessageAt: lastInbound, lastStep: stepWhenStopped,
+      testPhone: isTestGuest(guest)
     });
   }
   return summary;
@@ -5526,7 +5734,7 @@ async function autoCheckoutHandler(req, res) {
     // sweeps across properties rather than per property, so the count is the number
     // of properties in the base, read once (one extra call, included in the total).
     const propertyCountRef = { value: 0 };
-    const { summary, enquiry, holds, overdue } = await withAirtableCallCount('auto_checkout', propertyCountRef, async () => {
+    const { summary, enquiry, holds, overdue, unattended } = await withAirtableCallCount('auto_checkout', propertyCountRef, async () => {
       propertyCountRef.value = (await airtableGet('WS_Properties', '')).length;
       const summary = await runAutoCheckout(new Date(), { deadline });
       // B19: reuse this cron for the enquiry-abandonment staleness sweep.
@@ -5535,16 +5743,17 @@ async function autoCheckoutHandler(req, res) {
       // the same deadline, so they only get the time the sweeps above left.
       const holds = await runHoldRelease(new Date(), { deadline });
       const overdue = await runOverdueAlerts(new Date(), { deadline });
-      return { summary, enquiry, holds, overdue };
+      const unattended = await runUnattendedGateSweep(new Date(), { deadline });
+      return { summary, enquiry, holds, overdue, unattended };
     });
     logToAxiom('info', 'cron_duration', {
       cron: 'auto_checkout', ms: Date.now() - startedAt,
-      truncated: !!(summary.truncated || enquiry.truncated || holds.truncated || overdue.truncated)
+      truncated: !!(summary.truncated || enquiry.truncated || holds.truncated || overdue.truncated || unattended.truncated)
     });
     res.status(200).json({
       ok: true, ...summary, ...enquiry,
-      holdsReleased: holds.holdsReleased, overdueAlerts: overdue.overdueAlerts,
-      ...(holds.truncated || overdue.truncated ? { truncated: true } : {})
+      holdsReleased: holds.holdsReleased, overdueAlerts: overdue.overdueAlerts, unattendedGateArrivals: unattended.unattendedGateArrivals,
+      ...(holds.truncated || overdue.truncated || unattended.truncated ? { truncated: true } : {})
     });
   } catch (err) {
     console.error('[AUTO-CHECKOUT FATAL]', err.message, err.stack);
@@ -6927,13 +7136,13 @@ async function handleMessage(from, messageText, phoneNumberId, wamid) {
   const phone = formatPhone(from);
   const text = messageText.trim().toLowerCase();
   console.log(`[handleMessage] from: ${phone} | text: ${text}`);
-  logToAxiom('info', 'message_received', { phone, text: messageText.slice(0, 100) });
 
   // 6.4: resolve property before anything else — no action may run for an
   // unconfigured number, and no property's data may leak to another's guest.
   const property = await resolveProperty(phoneNumberId);
   if (!property) {
     console.error(`[Dispatch] no WS_Properties match for phone_number_id: ${phoneNumberId} — refusing dispatch`);
+    logToAxiom('info', 'message_received', { phone, text: messageText.slice(0, 100), sessionState: null });
     await sendWhatsApp(phone, msg('numberNotConfigured'));
     return;
   }
@@ -6944,6 +7153,12 @@ async function handleMessage(from, messageText, phoneNumberId, wamid) {
   const guest = guestRecords[0] || null;
   const sessionState = guest ? guest.fields['Session State'] : null;
   console.log(`[State] guest: ${guest ? guest.id : 'none'} | state: ${sessionState}`);
+  // Logged here rather than first thing so it can carry the step the guest was on
+  // (the last step reached, for lost-enquiry reporting). A test phone is flagged,
+  // not hidden: Axiom logging stays on for them.
+  logToAxiom('info', 'message_received', {
+    phone, text: messageText.slice(0, 100), sessionState: sessionState || null, ...(isTestGuest(guest) ? { testPhone: true } : {})
+  });
 
   // ── B14: STOP opt-out (two-tier) ───────────────────────────────────────────
   // Evaluated before consent and before dispatch, so an opting-out or already
@@ -7137,7 +7352,14 @@ async function handleMessage(from, messageText, phoneNumberId, wamid) {
     }
   }
 
-  const ctx = { phone, text, messageText, wamid, guest, next: null, cleaner: null, property };
+  // stepOnArrival / attemptStartedAt are snapshots taken before any handler writes: the
+  // lost-enquiry rows report the step the guest was answering and when the attempt began,
+  // however far the handler has moved the guest on by the time it logs.
+  const ctx = {
+    phone, text, messageText, wamid, guest, next: null, cleaner: null, property,
+    stepOnArrival: sessionState || null,
+    attemptStartedAt: (guest && guest.fields['Attempt Started At']) || null
+  };
 
   // Global transitions (cleaner DONE) — guard decides, any state
   for (const t of STATES.global) {
@@ -7367,6 +7589,7 @@ module.exports.alertShawn = alertShawn;
 module.exports.getAlertPhone = getAlertPhone;
 module.exports.cronTimeBudgetMs = cronTimeBudgetMs;
 module.exports.runHoldRelease = runHoldRelease;
+module.exports.runUnattendedGateSweep = runUnattendedGateSweep;
 module.exports.runOverdueAlerts = runOverdueAlerts;
 module.exports.overnightHoldExpiryIso = overnightHoldExpiryIso;
 module.exports.holdExpiryIso = holdExpiryIso;
