@@ -4843,7 +4843,19 @@ async function settleAutoCheckout(booking, room, guest, propertyName, propertyId
   return true;
 }
 
-async function runAutoCheckout(now = new Date()) {
+// Cron time budget (Doc 1b PR 5). Every function is cut at maxDuration and the
+// 5-minute auto-checkout was being cut at 10s (504) near the top of the hour. The
+// sweeps are idempotent, so the safe response to running long is to stop
+// starting new work and let the next tick pick up what is left, rather than be
+// killed mid-write. Default 8s keeps clear of the old 10s ceiling; raise it
+// with CRON_TIME_BUDGET_MS only together with a larger maxDuration.
+function cronTimeBudgetMs() {
+  const v = Number(process.env.CRON_TIME_BUDGET_MS);
+  return Number.isFinite(v) && v > 0 ? v : 8000;
+}
+
+async function runAutoCheckout(now = new Date(), opts = {}) {
+  const { deadline = Infinity } = opts;
   const nowMs = now.getTime();
   const summary = { warnings: 0, autoCheckouts: 0 };
 
@@ -4853,12 +4865,25 @@ async function runAutoCheckout(now = new Date()) {
     if (!checkOut) continue;                 // date-less legacy row — cron can't manage it
     if (nowMs < Date.parse(checkOut)) continue; // not past checkout (incl. extended bookings)
 
+    // About to do the expensive part (lookups, writes, sends) for an overdue
+    // booking. Out of time: leave this one and the rest for the next tick.
+    if (Date.now() > deadline) {
+      summary.truncated = true;
+      logToAxiom('warn', 'cron_time_budget_hit', { cron: 'auto_checkout', stage: 'checkout', leftFrom: booking.id });
+      break;
+    }
+
     // Resolve guest, room and property for copy / dispatch (RECORD_ID lookups,
-    // the same idiom the manual checkout uses for the room).
+    // the same idiom the manual checkout uses for the room). Guest and room are
+    // independent, so they are read together.
     const guestId = (booking.fields['Guest'] || [])[0];
-    const guest = guestId ? (await airtableGet('WS_Guests', `RECORD_ID() = '${guestId}'`))[0] : null;
     const roomId = (booking.fields['Room'] || [])[0];
-    const room = roomId ? (await airtableGet('WS_Rooms', `RECORD_ID() = '${roomId}'`))[0] : null;
+    const [guestRows, roomRows] = await Promise.all([
+      guestId ? airtableGet('WS_Guests', `RECORD_ID() = '${guestId}'`) : [],
+      roomId ? airtableGet('WS_Rooms', `RECORD_ID() = '${roomId}'`) : []
+    ]);
+    const guest = guestRows[0] || null;
+    const room = roomRows[0] || null;
     const propId = room && (room.fields['Property'] || [])[0];
     const property = propId ? (await airtableGet('WS_Properties', `RECORD_ID() = '${propId}'`))[0] : null;
     const propertyName = property ? property.fields['Property Name'] : '';
@@ -5009,13 +5034,28 @@ async function logEnquiry(property, phone, outcome, opts = {}) {
 // gates — the guest would never actually get reset. Splitting the reset out
 // from these three (still-correct, still-necessary) log preconditions is
 // what actually closes the gap.
-async function runEnquiryAbandonment(now = new Date()) {
+async function runEnquiryAbandonment(now = new Date(), opts = {}) {
+  const { deadline = Infinity } = opts;
   const nowMs = now.getTime();
   const summary = { abandoned: 0 };
   const guests = await airtableGet('WS_Guests', orFormula('Session State', ENQUIRY_ABANDON_STATES));
+
+  // Most ticks have nobody stale. The whole WS_Enquiries table (which only ever
+  // grows) used to be read on every one of them, every 5 minutes; now it is read
+  // only when there is at least one stale guest to process.
+  const stale = guests.filter(g => {
+    const li = g.fields['Last Inbound At'];
+    return li && (nowMs - Date.parse(li)) >= ENQUIRY_ABANDON_MS;
+  });
+  if (stale.length === 0) return summary;
   const enquiries = await airtableGet('WS_Enquiries', '');
 
-  for (const guest of guests) {
+  for (const guest of stale) {
+    if (Date.now() > deadline) {
+      summary.truncated = true;
+      logToAxiom('warn', 'cron_time_budget_hit', { cron: 'auto_checkout', stage: 'abandonment', leftFrom: guest.id });
+      break;
+    }
     const lastInbound = guest.fields['Last Inbound At'];
     if (!lastInbound || (nowMs - Date.parse(lastInbound)) < ENQUIRY_ABANDON_MS) continue;
 
@@ -5061,9 +5101,20 @@ async function runEnquiryAbandonment(now = new Date()) {
 
 async function autoCheckoutHandler(req, res) {
   try {
-    const summary = await runAutoCheckout();
-    // B19: reuse this cron for the enquiry-abandonment staleness sweep.
-    const enquiry = await runEnquiryAbandonment();
+    // A 'cron_started' with no matching 'cron_duration' in Axiom is a run that
+    // was killed (504) before it could finish.
+    const startedAt = Date.now();
+    logToAxiom('info', 'cron_started', { cron: 'auto_checkout' });
+    const deadline = startedAt + cronTimeBudgetMs();
+    const { summary, enquiry } = await withAirtableCallCount('auto_checkout', { value: 0 }, async () => {
+      const summary = await runAutoCheckout(new Date(), { deadline });
+      // B19: reuse this cron for the enquiry-abandonment staleness sweep.
+      const enquiry = await runEnquiryAbandonment(new Date(), { deadline });
+      return { summary, enquiry };
+    });
+    logToAxiom('info', 'cron_duration', {
+      cron: 'auto_checkout', ms: Date.now() - startedAt, truncated: !!(summary.truncated || enquiry.truncated)
+    });
     res.status(200).json({ ok: true, ...summary, ...enquiry });
   } catch (err) {
     console.error('[AUTO-CHECKOUT FATAL]', err.message, err.stack);
@@ -5648,10 +5699,14 @@ async function runMonthlyReport(opts = {}) {
   // repeat-guest counting and the prior-month window both see bookings
   // outside the current 30 days — same status filter as every other report,
   // just not date-filtered at the query level.
-  const properties = await airtableGet('WS_Properties', '');
-  const allRooms = await airtableGet('WS_Rooms', orFormula('Status', BOOKABLE_ROOM_STATUSES));
-  const allBookings = await airtableGet('WS_Bookings', orFormula('Status', BLOCKING_BOOKING_STATUSES.concat(['Checked Out'])));
-  const allGuests = await airtableGet('WS_Guests', '');
+  // Four independent table reads, run together (they used to run one after the
+  // other, and each walks Airtable's 100-record pages in turn).
+  const [properties, allRooms, allBookings, allGuests] = await Promise.all([
+    airtableGet('WS_Properties', ''),
+    airtableGet('WS_Rooms', orFormula('Status', BOOKABLE_ROOM_STATUSES)),
+    airtableGet('WS_Bookings', orFormula('Status', BLOCKING_BOOKING_STATUSES.concat(['Checked Out']))),
+    airtableGet('WS_Guests', '')
+  ]);
   const guestsById = new Map(allGuests.map(g => [g.id, g.fields['Guest Name'] || null]));
 
   const sent = [];
@@ -5683,7 +5738,15 @@ async function runMonthlyReport(opts = {}) {
 
 async function monthlyReportHandler(req, res) {
   try {
-    const sent = await runMonthlyReport();
+    const startedAt = Date.now();
+    logToAxiom('info', 'cron_started', { cron: 'monthly_report' });
+    const propertyCountRef = { value: 0 };
+    const sent = await withAirtableCallCount('monthly_report', propertyCountRef, async () => {
+      const result = await runMonthlyReport();
+      propertyCountRef.value = result.length + (result.failed ? result.failed.length : 0);
+      return result;
+    });
+    logToAxiom('info', 'cron_duration', { cron: 'monthly_report', ms: Date.now() - startedAt });
     res.status(200).json({ ok: true, count: sent.length, sent, failed: sent.failed || [] });
   } catch (err) {
     console.error('[MONTHLY-REPORT FATAL]', err.message, err.stack);
@@ -6867,6 +6930,7 @@ module.exports.airtableUpdate = airtableUpdate;
 module.exports.sendWhatsApp = sendWhatsApp;
 module.exports.alertShawn = alertShawn;
 module.exports.getAlertPhone = getAlertPhone;
+module.exports.cronTimeBudgetMs = cronTimeBudgetMs;
 module.exports.sanitizeTemplateParam = sanitizeTemplateParam;
 module.exports.bumpPropertyActivity = bumpPropertyActivity;
 module.exports.dormantProperties = dormantProperties;

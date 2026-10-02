@@ -4,15 +4,38 @@
     "api/**/*.js": {
       "memory": 256,
       "maxDuration": 10
+    },
+    "api/wabistay/cron/auto-checkout.js": {
+      "memory": 256,
+      "maxDuration": 30
+    },
+    "api/wabistay/cron/monthly-report.js": {
+      "memory": 256,
+      "maxDuration": 60
     }
   },
   "rewrites": [
-    { "source": "/dashboard", "destination": "/api/dashboard" }
+    {
+      "source": "/dashboard",
+      "destination": "/api/dashboard"
+    }
   ],
   "crons": [
-    { "path": "/api/wabistay/cron/auto-checkout", "schedule": "*/5 * * * *" },
-    { "path": "/api/wabistay/cron/owner-summary", "schedule": "0 6 * * 1" },
-    { "path": "/api/wabistay/cron/weekly-recap", "schedule": "0 6 * * 4" },
-    { "path": "/api/wabistay/cron/monthly-report", "schedule": "0 7 1 * *" }
+    {
+      "path": "/api/wabistay/cron/auto-checkout",
+      "schedule": "2-57/5 * * * *"
+    },
+    {
+      "path": "/api/wabistay/cron/owner-summary",
+      "schedule": "0 6 * * 1"
+    },
+    {
+      "path": "/api/wabistay/cron/weekly-recap",
+      "schedule": "0 6 * * 4"
+    },
+    {
+      "path": "/api/wabistay/cron/monthly-report",
+      "schedule": "15 7 1 * *"
+    }
   ]
 }
