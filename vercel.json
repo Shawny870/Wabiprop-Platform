@@ -1,7 +1,15 @@
 {
   "version": 2,
   "functions": {
-    "api/**/*.js": {
+    "api/*.js": {
+      "memory": 256,
+      "maxDuration": 10
+    },
+    "api/wabiprop/**/*.js": {
+      "memory": 256,
+      "maxDuration": 10
+    },
+    "api/wabistay/*.js": {
       "memory": 256,
       "maxDuration": 10
     },
@@ -12,6 +20,18 @@
     "api/wabistay/cron/monthly-report.js": {
       "memory": 256,
       "maxDuration": 60
+    },
+    "api/wabistay/cron/daily-summary.js": {
+      "memory": 256,
+      "maxDuration": 10
+    },
+    "api/wabistay/cron/owner-summary.js": {
+      "memory": 256,
+      "maxDuration": 10
+    },
+    "api/wabistay/cron/weekly-recap.js": {
+      "memory": 256,
+      "maxDuration": 10
     }
   },
   "rewrites": [

@@ -149,12 +149,30 @@ test('CRON_TIME_BUDGET_MS: default 8000, honoured when valid, junk or non-positi
 
 const vercel = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'vercel.json'), 'utf8'));
 
-test('vercel.json: the two slow routes get a longer maxDuration, inside the 60s cap every plan allows', () => {
-  const auto = vercel.functions['api/wabistay/cron/auto-checkout.js'];
-  const monthly = vercel.functions['api/wabistay/cron/monthly-report.js'];
-  assert.ok(auto.maxDuration > 10 && auto.maxDuration <= 60);
-  assert.ok(monthly.maxDuration > 10 && monthly.maxDuration <= 60);
-  assert.strictEqual(vercel.functions['api/**/*.js'].maxDuration, 10, 'every other route is unchanged');
+test('vercel.json: the two slow routes get a longer maxDuration, inside the 60s cap every plan allows; everything else stays at 10s', () => {
+  const fn = vercel.functions;
+  assert.ok(fn['api/wabistay/cron/auto-checkout.js'].maxDuration > 10 && fn['api/wabistay/cron/auto-checkout.js'].maxDuration <= 60);
+  assert.ok(fn['api/wabistay/cron/monthly-report.js'].maxDuration > 10 && fn['api/wabistay/cron/monthly-report.js'].maxDuration <= 60);
+  for (const [pattern, cfg] of Object.entries(fn)) {
+    if (pattern.endsWith('auto-checkout.js') || pattern.endsWith('monthly-report.js')) continue;
+    assert.strictEqual(cfg.maxDuration, 10, pattern);
+  }
+});
+
+// Vercel refuses to deploy when one function file matches TWO patterns in the
+// "functions" block (found the hard way on this PR: a specific entry next to the
+// api/**/*.js catch-all failed the deployment even at an identical duration).
+// So the patterns must partition api/: every function file matched exactly once.
+test('vercel.json: every api/ function file is matched by exactly one functions pattern (Vercel rejects overlaps)', { skip: typeof path.matchesGlob !== 'function' }, () => {
+  const walk = dir => fs.readdirSync(dir, { withFileTypes: true }).flatMap(e =>
+    e.isDirectory() ? walk(path.join(dir, e.name)) : (e.name.endsWith('.js') ? [path.join(dir, e.name)] : []));
+  const root = path.join(__dirname, '..');
+  const files = walk(path.join(root, 'api')).map(f => path.relative(root, f).split(path.sep).join('/'));
+  assert.ok(files.length > 10, 'found the api files');
+  for (const file of files) {
+    const matches = Object.keys(vercel.functions).filter(p => path.posix.matchesGlob(file, p));
+    assert.strictEqual(matches.length, 1, file + ' matched by: ' + JSON.stringify(matches));
+  }
 });
 
 test('vercel.json: every cron path has a route file', () => {
