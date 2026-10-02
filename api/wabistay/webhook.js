@@ -2036,6 +2036,39 @@ function bookingBlocksRange(booking, checkInIso, checkOutIso) {
   return rangesOverlap(checkInIso, checkOutIso, bookedIn, bookedOut);
 }
 
+// Room selection order (Doc 1b PR 4, 01 Oct 2026). Until now the room offered was
+// simply the first free row Airtable listed, which is why 04 and 05 won every
+// booking. With WABISTAY_ROOM_ORDER on, free rooms are ranked by what is true
+// of the room right now — Available, then Cleaning, then Occupied — and ties
+// go to the lowest room number, so a guest is not handed a room still being
+// cleaned while clean ones are free. Off (unset) keeps Airtable's order.
+function roomOrderEnabled() {
+  return /^(1|true)$/i.test(String(process.env.WABISTAY_ROOM_ORDER || '').trim());
+}
+
+const ROOM_STATUS_RANK = { Available: 0, Cleaning: 1, Occupied: 2 };
+
+// Numeric room number: the 'Room Number' field when it holds one, otherwise the
+// first run of digits in 'Room Name' ("Room 04" -> 4). A room with neither
+// sorts after every numbered room and then by name, so ordering is total.
+function roomNumberOf(room) {
+  const raw = room.fields['Room Number'];
+  if (raw !== undefined && raw !== null && raw !== '' && Number.isFinite(Number(raw))) return Number(raw);
+  const m = String(room.fields['Room Name'] || '').match(/\d+/);
+  return m ? Number(m[0]) : Infinity;
+}
+
+function orderFreeRooms(rooms) {
+  return [...rooms].sort((a, b) => {
+    const rank = r => (r.fields['Status'] in ROOM_STATUS_RANK ? ROOM_STATUS_RANK[r.fields['Status']] : 3);
+    const byStatus = rank(a) - rank(b);
+    if (byStatus !== 0) return byStatus;
+    const byNumber = roomNumberOf(a) - roomNumberOf(b);
+    if (byNumber !== 0 && !Number.isNaN(byNumber)) return byNumber;
+    return String(a.fields['Room Name'] || '').localeCompare(String(b.fields['Room Name'] || ''));
+  });
+}
+
 // Returns the room record to use for this range, or null if the property is full.
 // `preferRoomId` re-verifies an existing hold: it returns that room when it is
 // still free, and silently re-offers a different one when it is not.
@@ -2091,11 +2124,14 @@ async function findAvailableRoom(propertyId, checkInIso, checkOutIso, opts = {})
     for (const roomId of booking.fields['Room'] || []) takenRoomIds.add(roomId);
   }
 
-  const free = rooms.filter(r => !takenRoomIds.has(r.id));
+  let free = rooms.filter(r => !takenRoomIds.has(r.id));
+  // preferRoomId (re-verifying a held room) still wins over any ordering: a
+  // guest keeps the room they were given unless it is genuinely gone.
   if (preferRoomId) {
     const held = free.find(r => r.id === preferRoomId);
     if (held) return held;
   }
+  if (roomOrderEnabled()) free = orderFreeRooms(free);
   return free[0] || null;
 }
 
@@ -7037,6 +7073,7 @@ module.exports.sendWhatsApp = sendWhatsApp;
 module.exports.alertShawn = alertShawn;
 module.exports.getAlertPhone = getAlertPhone;
 module.exports.cronTimeBudgetMs = cronTimeBudgetMs;
+module.exports.orderFreeRooms = orderFreeRooms;
 module.exports.wabistayFlagState = wabistayFlagState;
 module.exports.otherSwitchState = otherSwitchState;
 module.exports.sanitizeTemplateParam = sanitizeTemplateParam;
