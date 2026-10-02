@@ -207,3 +207,14 @@ test('monthlyReportHandler: logs start and duration, reads the four tables toget
   assert.ok(calls && calls.breakdown.get >= 4, 'the four table reads were counted');
   for (const table of ['WS_Properties', 'WS_Rooms', 'WS_Bookings', 'WS_Guests']) assert.ok(ctx.gets.includes(table), table);
 });
+
+test('auto-checkout logs the real property count (it logged 0 on every run before)', async () => {
+  const ctx = setup({
+    WS_Bookings: [], WS_Guests: [], WS_Enquiries: [], WS_Rooms: [], WS_Cleaners: [],
+    WS_Properties: [property, { id: 'recP2', fields: { 'Property Name': 'Other Lodge' } }]
+  });
+  await wh.autoCheckoutHandler({}, jsonRes());
+  const counted = events(ctx, 'airtable_call_count').find(e => e.cronName === 'auto_checkout');
+  assert.strictEqual(counted.propertyCount, 2);
+  assert.ok(counted.callsPerProperty > 0);
+});

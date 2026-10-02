@@ -295,6 +295,7 @@ async function advanceGuestState(ctx, fields, extra = {}) {
 // deployment this log line belongs to.
 const WABISTAY_KNOWN_FLAGS = [
   'WABISTAY_CLEANER_GATE_TEMPLATE',
+  'WABISTAY_GATE_ALERT_UNPAID',
   'WABISTAY_GATE_ARRIVAL_TEMPLATE',
   'WABISTAY_GUEST_ESCALATION_TEMPLATE',
   'WABISTAY_HOLD_RELEASE',
@@ -307,7 +308,7 @@ const WABISTAY_KNOWN_FLAGS = [
 
 // Switches the code only treats as on for 1/true; for these, 'on' means that,
 // not merely 'set'.
-const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_HOLD_RELEASE', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD'];
+const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD'];
 
 function wabistayFlagState() {
   const names = new Set([...WABISTAY_KNOWN_FLAGS, ...Object.keys(process.env).filter(k => k.startsWith('WABISTAY_'))]);
@@ -549,11 +550,12 @@ async function notifyReceptionOfArrival({ propertyId, propertyName, guestName, r
     logToAxiom('warn', 'reception_gate_notify_no_seat', {
       ...correlation, reason: 'no active Reception seat for property'
     });
-    return;
+    return { sent: 0 };
   }
 
   const templateName = receptionGateArrivalTemplate();
   const params = [propertyName, guestName, roomName, roomStatus, guestPhone];
+  let sent = 0;
 
   for (const seat of seats) {
     const to = formatPhone(String(seat.fields['Current Phone']));
@@ -572,7 +574,81 @@ async function notifyReceptionOfArrival({ propertyId, propertyName, guestName, r
       logToAxiom('error', 'reception_gate_notify_failed', {
         ...perSeat, to, template: templateName, error: JSON.stringify(result.error || null)
       });
+    } else {
+      sent++;
     }
+  }
+  return { sent };
+}
+
+// Unpaid gate arrival (Doc 1b follow-up, 02 Oct 2026). Until now a guest who
+// tapped "I'm at the gate" before payment was confirmed was told to go to the
+// office and nobody in the office was told: the alerts all sit after the payment
+// gate. With WABISTAY_GATE_ALERT_UNPAID on, reception (template) and the
+// Notify Phone owner copy (free-form) are alerted, with no room assigned and
+// nothing written to the guest or the room. Repeat taps are suppressed for 10
+// minutes via WS_Bookings 'Gate Alert Sent At', written only after an alert has
+// actually gone out; a paid tap always alerts (it takes the normal path).
+const GATE_ALERT_SUPPRESS_MS = 10 * 60 * 1000;
+
+function gateAlertUnpaidEnabled() {
+  return /^(1|true)$/i.test(String(process.env.WABISTAY_GATE_ALERT_UNPAID || '').trim());
+}
+
+async function alertUnpaidGateArrival(ctx, booking, heldRoomId, notifyPhone) {
+  const lastAlert = booking.fields['Gate Alert Sent At'];
+  if (lastAlert && (Date.now() - Date.parse(lastAlert)) < GATE_ALERT_SUPPRESS_MS) {
+    logToAxiom('info', 'gate_alert_unpaid_suppressed', {
+      phone: ctx.phone, bookingId: booking.id, lastAlert
+    });
+    return;
+  }
+
+  // The room the booking holds, if any: its real name and status. Otherwise the
+  // placeholders agreed for an unpaid guest with no room.
+  const heldRoom = heldRoomId ? (await airtableGet('WS_Rooms', `RECORD_ID() = '${heldRoomId}'`))[0] || null : null;
+  const roomName = heldRoom ? heldRoom.fields['Room Name'] : 'not assigned yet';
+  const roomStatus = heldRoom ? (heldRoom.fields['Status'] || 'Unknown') : 'payment not confirmed';
+
+  let anySent = false;
+
+  const reception = await notifyReceptionOfArrival({
+    propertyId: ctx.property.id,
+    propertyName: ctx.property.fields['Property Name'],
+    guestName: ctx.guest.fields['Guest Name'],
+    roomName,
+    roomStatus,
+    guestPhone: ctx.phone
+  });
+  if (reception && reception.sent > 0) anySent = true;
+
+  if (notifyPhone) {
+    logOwnerSendWindow('gate_arrival_unpaid', notifyPhone, ctx.phone);
+    const ownerSend = await sendWhatsApp(notifyPhone, msg('gateNotifyUnpaid', {
+      guestName: ctx.guest.fields['Guest Name'],
+      guestPhone: ctx.phone,
+      ref: booking.fields['Booking Ref'] || `WS-${booking.id.slice(-6).toUpperCase()}`,
+      amountDue: booking.fields['Amount Due']
+    }));
+    if (ownerSend && ownerSend.error) {
+      logToAxiom('error', 'gate_alert_unpaid_owner_send_failed', {
+        bookingId: booking.id, error: JSON.stringify(ownerSend.error)
+      });
+    } else {
+      anySent = true;
+    }
+  }
+
+  // Only a delivered alert starts the 10-minute quiet period. A failed stamp
+  // never undoes or blocks the alert that already went out.
+  if (anySent) {
+    const stamp = await airtableUpdate('WS_Bookings', booking.id, { 'Gate Alert Sent At': new Date().toISOString() });
+    if (stamp && stamp.error) {
+      logToAxiom('error', 'gate_alert_stamp_write_failed', {
+        bookingId: booking.id, error: JSON.stringify(stamp.error)
+      });
+    }
+    logToAxiom('info', 'gate_alert_unpaid_sent', { phone: ctx.phone, bookingId: booking.id });
   }
 }
 
@@ -4313,6 +4389,15 @@ const actions = {
       await sendWhatsApp(ctx.phone, msg('paymentNotYetConfirmed', {
         guestName: ctx.guest.fields['Guest Name']
       }));
+      // Tell the office the guest is on their way to it. After the guest's reply
+      // and fenced off, so an alert problem can never cost the guest their answer.
+      if (gateAlertUnpaidEnabled()) {
+        try {
+          await alertUnpaidGateArrival(ctx, booking, heldRoomId, notifyPhone);
+        } catch (err) {
+          logToAxiom('error', 'gate_alert_unpaid_failed', { phone: ctx.phone, bookingId: booking.id, message: err.message });
+        }
+      }
       return;
     }
 
@@ -5436,7 +5521,13 @@ async function autoCheckoutHandler(req, res) {
     const startedAt = Date.now();
     logToAxiom('info', 'cron_started', { cron: 'auto_checkout' });
     const deadline = startedAt + cronTimeBudgetMs();
-    const { summary, enquiry, holds, overdue } = await withAirtableCallCount('auto_checkout', { value: 0 }, async () => {
+    // propertyCount used to be a fresh { value: 0 } that nothing ever set, so every run
+    // logged propertyCount 0 and callsPerProperty null even with work done. This cron
+    // sweeps across properties rather than per property, so the count is the number
+    // of properties in the base, read once (one extra call, included in the total).
+    const propertyCountRef = { value: 0 };
+    const { summary, enquiry, holds, overdue } = await withAirtableCallCount('auto_checkout', propertyCountRef, async () => {
+      propertyCountRef.value = (await airtableGet('WS_Properties', '')).length;
       const summary = await runAutoCheckout(new Date(), { deadline });
       // B19: reuse this cron for the enquiry-abandonment staleness sweep.
       const enquiry = await runEnquiryAbandonment(new Date(), { deadline });
