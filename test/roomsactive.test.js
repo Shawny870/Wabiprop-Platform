@@ -56,7 +56,8 @@ test('guest overnight booking: ALL rooms disabled looks exactly like "no availab
   await send(FROM, 'John Smith\n1 Dec 2026\n3 Dec 2026');
   assert.strictEqual(ctx.airtable.tables['WS_Bookings'].length, 0, 'no booking — every room is disabled or never activated');
   assert.strictEqual(ctx.sends.length, 1);
-  assert.ok(ctx.sends[0].body.includes('fully booked'), 'guest sees the ordinary fully-booked copy, never a "disabled" mention');
+  assert.ok(ctx.sends[0].body.includes('Please speak to reception'), 'guest is pointed to reception, never given a "disabled" mention');
+  assert.ok(!/fully booked|\bfull\b/i.test(ctx.sends[0].body), 'a guest is never told the lodge is full');
   assert.ok(!ctx.sends[0].body.toLowerCase().includes('disabled'), 'a disabled room must never be described as such to a guest');
 });
 
