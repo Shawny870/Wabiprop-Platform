@@ -284,6 +284,71 @@ async function advanceGuestState(ctx, fields, extra = {}) {
   return false;
 }
 
+// Cold-start flag log (01 Oct 2026). Which WABISTAY_* switches a given
+// deployment actually has is otherwise invisible: on 01 Oct the guard variable
+// was added after a deploy and nothing showed that the running code did not yet
+// have it. Logs the NAME and on/off of every WABISTAY_* variable, never a value.
+// "on" means set and non-empty; for WABISTAY_STATE_WRITE_GUARD it means the
+// value the code actually treats as on (1/true). Known flags are listed even
+// when unset so an absent flag reads "off" rather than missing. The commit and
+// deployment id are Vercel system variables, not secrets, and say which
+// deployment this log line belongs to.
+const WABISTAY_KNOWN_FLAGS = [
+  'WABISTAY_CLEANER_GATE_TEMPLATE',
+  'WABISTAY_GATE_ARRIVAL_TEMPLATE',
+  'WABISTAY_GUEST_ESCALATION_TEMPLATE',
+  'WABISTAY_OPS_ALERT_TEMPLATE',
+  'WABISTAY_RECEPTION_PAYMENT_TEMPLATE',
+  'WABISTAY_ROOM_ORDER',
+  'WABISTAY_STATE_WRITE_GUARD'
+];
+
+// Switches the code only treats as on for 1/true; for these, 'on' means that,
+// not merely 'set'.
+const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD'];
+
+function wabistayFlagState() {
+  const names = new Set([...WABISTAY_KNOWN_FLAGS, ...Object.keys(process.env).filter(k => k.startsWith('WABISTAY_'))]);
+  const flags = {};
+  for (const name of [...names].sort()) {
+    const raw = process.env[name];
+    const on = WABISTAY_BOOLEAN_FLAGS.includes(name)
+      ? /^(1|true)$/i.test(String(raw || '').trim())
+      : !!(raw && String(raw).trim());
+    flags[name] = on ? 'on' : 'off';
+  }
+  return flags;
+}
+
+// Switches that are not WABISTAY_* but change what gets sent where. The two
+// phone numbers are reported set/unset ONLY (they are real numbers); the
+// template language is not sensitive, so its effective value is logged — "en"
+// by default, which is what every template is sent under.
+function otherSwitchState() {
+  const isSet = name => !!(process.env[name] && String(process.env[name]).trim());
+  return {
+    REPORT_TEST_MODE_PHONE: isSet('REPORT_TEST_MODE_PHONE') ? 'set' : 'unset',
+    OWNER_PHONE: isSet('OWNER_PHONE') ? 'set' : 'unset',
+    WA_TEMPLATE_LANGUAGE: TEMPLATE_LANGUAGE_CODE,
+    WA_TEMPLATE_LANGUAGE_source: isSet('WA_TEMPLATE_LANGUAGE') ? 'env' : 'default'
+  };
+}
+
+let _flagsLogged = false;
+function logFlagsOnce() {
+  if (_flagsLogged) return null;
+  _flagsLogged = true;
+  const flags = wabistayFlagState();
+  const others = otherSwitchState();
+  const where = {
+    commit: (process.env.VERCEL_GIT_COMMIT_SHA || '').slice(0, 7) || null,
+    deploymentId: process.env.VERCEL_DEPLOYMENT_ID || null
+  };
+  console.log(`[WABISTAY FLAGS] ${JSON.stringify({ flags, others })}`);
+  logToAxiom('info', 'wabistay_flags', { flags, others, ...where });
+  return flags;
+}
+
 // B9: the guest's half-built hourly booking — Check In recorded, duration not
 // yet chosen, so Check Out is still blank. Blank Check Out is exactly what makes
 // it inert to B8's overlap check while the guest is mid-conversation.
@@ -2188,10 +2253,30 @@ const guards = {
     return true;
   },
 
+  // Doc 1b PR 2 (01 Oct 2026): `done` is a cleaner command, but one number can
+  // be a cleaner AND a guest (Shawn's test phone is both). If no room is in
+  // Cleaning, DONE has nothing to mean, so a sender who is mid-way through a
+  // guest session (any Session State other than NEW / HUMAN_HANDLING) is left to
+  // the guest flow instead of being told "nothing to clean". A cleaner with no
+  // live guest session is still claimed, so they keep getting
+  // cleanerNothingToClean rather than a guest greeting. When a room IS in
+  // Cleaning the sender is always claimed, exactly as before.
   async senderIsCleaner(ctx) {
     const cleanerRecords = await airtableGet('WS_Cleaners', `{Phone Number} = '${ctx.phone}'`);
     ctx.cleaner = cleanerRecords[0] || null;
-    return cleanerRecords.length > 0;
+    if (cleanerRecords.length === 0) return false;
+
+    const state = ctx.guest && ctx.guest.fields['Session State'];
+    const midGuestSession = !!state && state !== 'NEW' && state !== 'HUMAN_HANDLING';
+    if (midGuestSession) {
+      const cleaning = await airtableGet('WS_Rooms', `{Status} = 'Cleaning'`);
+      if (cleaning.length === 0) {
+        logToAxiom('info', 'done_left_to_guest_flow', { phone: ctx.phone, sessionState: state });
+        ctx.cleaner = null;
+        return false;
+      }
+    }
+    return true;
   },
 
   // Room-ambiguity fix: catches a cleaner's reply naming a specific room (any
@@ -5096,6 +5181,7 @@ async function runEnquiryAbandonment(now = new Date()) {
 }
 
 async function autoCheckoutHandler(req, res) {
+  logFlagsOnce();
   try {
     const summary = await runAutoCheckout();
     // B19: reuse this cron for the enquiry-abandonment staleness sweep.
@@ -5718,6 +5804,7 @@ async function runMonthlyReport(opts = {}) {
 }
 
 async function monthlyReportHandler(req, res) {
+  logFlagsOnce();
   try {
     const sent = await runMonthlyReport();
     res.status(200).json({ ok: true, count: sent.length, sent, failed: sent.failed || [] });
@@ -5801,6 +5888,7 @@ async function runOwnerSummary(opts = {}) {
 }
 
 async function ownerSummaryHandler(req, res) {
+  logFlagsOnce();
   try {
     const summaries = await runOwnerSummary();
     res.status(200).json({ ok: true, count: summaries.length, summaries, failed: summaries.failed || [] });
@@ -6296,6 +6384,7 @@ async function runWeeklyRecap(opts = {}) {
 }
 
 async function weeklyRecapHandler(req, res) {
+  logFlagsOnce();
   try {
     const sent = await runWeeklyRecap();
     res.status(200).json({ ok: true, count: sent.length, sent, failed: sent.failed || [] });
@@ -6389,6 +6478,7 @@ async function runDailySummary(opts = {}) {
 }
 
 async function dailySummaryHandler(req, res) {
+  logFlagsOnce();
   try {
     const result = await runDailySummary();
     res.status(200).json({ ok: true, ...result });
@@ -6702,6 +6792,7 @@ async function handleMessage(from, messageText, phoneNumberId, wamid) {
 // ─── MAIN HANDLER ────────────────────────────────────────────────────────────
 
 module.exports = async function handler(req, res) {
+  logFlagsOnce();
   if (req.method === 'GET') {
     const mode = req.query['hub.mode'];
     const token = req.query['hub.verify_token'];
@@ -6904,6 +6995,8 @@ module.exports.sendWhatsApp = sendWhatsApp;
 module.exports.alertShawn = alertShawn;
 module.exports.getAlertPhone = getAlertPhone;
 module.exports.orderFreeRooms = orderFreeRooms;
+module.exports.wabistayFlagState = wabistayFlagState;
+module.exports.otherSwitchState = otherSwitchState;
 module.exports.sanitizeTemplateParam = sanitizeTemplateParam;
 module.exports.bumpPropertyActivity = bumpPropertyActivity;
 module.exports.dormantProperties = dormantProperties;
