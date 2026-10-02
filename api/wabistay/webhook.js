@@ -299,16 +299,21 @@ const WABISTAY_KNOWN_FLAGS = [
   'WABISTAY_GUEST_ESCALATION_TEMPLATE',
   'WABISTAY_OPS_ALERT_TEMPLATE',
   'WABISTAY_RECEPTION_PAYMENT_TEMPLATE',
+  'WABISTAY_ROOM_ORDER',
   'WABISTAY_STATE_WRITE_GUARD'
 ];
+
+// Switches the code only treats as on for 1/true; for these, 'on' means that,
+// not merely 'set'.
+const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD'];
 
 function wabistayFlagState() {
   const names = new Set([...WABISTAY_KNOWN_FLAGS, ...Object.keys(process.env).filter(k => k.startsWith('WABISTAY_'))]);
   const flags = {};
   for (const name of [...names].sort()) {
     const raw = process.env[name];
-    const on = name === 'WABISTAY_STATE_WRITE_GUARD'
-      ? stateWriteGuardEnabled()
+    const on = WABISTAY_BOOLEAN_FLAGS.includes(name)
+      ? /^(1|true)$/i.test(String(raw || '').trim())
       : !!(raw && String(raw).trim());
     flags[name] = on ? 'on' : 'off';
   }

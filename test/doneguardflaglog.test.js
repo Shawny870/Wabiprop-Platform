@@ -21,7 +21,7 @@ const CLEANER_ONLY = '27820000111';
 const FLAG_ENV = [
   'WABISTAY_STATE_WRITE_GUARD', 'WABISTAY_OPS_ALERT_TEMPLATE', 'WABISTAY_GUEST_ESCALATION_TEMPLATE',
   'WABISTAY_CLEANER_GATE_TEMPLATE', 'WABISTAY_GATE_ARRIVAL_TEMPLATE', 'WABISTAY_RECEPTION_PAYMENT_TEMPLATE',
-  'WABISTAY_SOMETHING_NEW'
+  'WABISTAY_ROOM_ORDER', 'WABISTAY_SOMETHING_NEW'
 ];
 const OTHER_ENV = ['REPORT_TEST_MODE_PHONE', 'WA_TEMPLATE_LANGUAGE'];
 afterEach(() => {
@@ -115,7 +115,7 @@ test('wabistayFlagState: every known flag is listed, unset ones read "off"', () 
   const flags = wh.wabistayFlagState();
   assert.deepStrictEqual(Object.keys(flags), [
     'WABISTAY_CLEANER_GATE_TEMPLATE', 'WABISTAY_GATE_ARRIVAL_TEMPLATE', 'WABISTAY_GUEST_ESCALATION_TEMPLATE',
-    'WABISTAY_OPS_ALERT_TEMPLATE', 'WABISTAY_RECEPTION_PAYMENT_TEMPLATE', 'WABISTAY_STATE_WRITE_GUARD'
+    'WABISTAY_OPS_ALERT_TEMPLATE', 'WABISTAY_RECEPTION_PAYMENT_TEMPLATE', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD'
   ]);
   assert.ok(Object.values(flags).every(v => v === 'off'));
 });
@@ -210,4 +210,12 @@ test('the logged event carries the language value but neither phone number, in A
   const everything = JSON.stringify(ctx.axiom) + logged.filter(l => l.startsWith('[WABISTAY FLAGS]')).join('\n');
   assert.ok(!everything.includes('27999000111'), 'OWNER_PHONE value must not be logged');
   assert.ok(!everything.includes('27999000222'), 'REPORT_TEST_MODE_PHONE value must not be logged');
+});
+
+test('WABISTAY_ROOM_ORDER shows off when unset, and on only for 1/true (like the state-write guard)', () => {
+  assert.strictEqual(freshWebhook().wabistayFlagState().WABISTAY_ROOM_ORDER, 'off');
+  for (const [value, expected] of [['1', 'on'], ['true', 'on'], ['TRUE', 'on'], ['yes', 'off'], ['0', 'off'], ['', 'off']]) {
+    process.env.WABISTAY_ROOM_ORDER = value;
+    assert.strictEqual(freshWebhook().wabistayFlagState().WABISTAY_ROOM_ORDER, expected, 'value ' + JSON.stringify(value));
+  }
 });
