@@ -297,7 +297,9 @@ const WABISTAY_KNOWN_FLAGS = [
   'WABISTAY_CLEANER_GATE_TEMPLATE',
   'WABISTAY_GATE_ARRIVAL_TEMPLATE',
   'WABISTAY_GUEST_ESCALATION_TEMPLATE',
+  'WABISTAY_HOLD_RELEASE',
   'WABISTAY_OPS_ALERT_TEMPLATE',
+  'WABISTAY_OVERDUE_ALERT_TEMPLATE',
   'WABISTAY_RECEPTION_PAYMENT_TEMPLATE',
   'WABISTAY_ROOM_ORDER',
   'WABISTAY_STATE_WRITE_GUARD'
@@ -305,7 +307,7 @@ const WABISTAY_KNOWN_FLAGS = [
 
 // Switches the code only treats as on for 1/true; for these, 'on' means that,
 // not merely 'set'.
-const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD'];
+const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_HOLD_RELEASE', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD'];
 
 function wabistayFlagState() {
   const names = new Set([...WABISTAY_KNOWN_FLAGS, ...Object.keys(process.env).filter(k => k.startsWith('WABISTAY_'))]);
@@ -3584,6 +3586,9 @@ const actions = {
     // B8: hold the room from this moment. Room Status deliberately stays as it
     // is — the guest is not in the room yet, and a hold is not occupancy.
     bookingData['Room'] = [room.id];
+    // Doc 1b PR 6: no ETA yet, so the hold runs to the end of the check-in day;
+    // recordEta tightens it once the guest says when they are arriving.
+    if (holdReleaseEnabled()) bookingData['Hold Expires At'] = overnightHoldExpiryIso(checkInIso, '');
 
     const booking = await airtableCreate('WS_Bookings', bookingData);
     const bookingRef = booking.id ? `WS-${booking.id.slice(-6).toUpperCase()}` : 'WS-000001';
@@ -4017,6 +4022,8 @@ const actions = {
       // fell through to the legacy first-available-room branch.
       'Status': 'Confirmed',
       'Notes': `Short stay: ${durationText(choice)} from ${formatSastDateTime(checkInIso)}`,
+      // Doc 1b PR 6: hold until 30 minutes after the arrival time (WABISTAY_HOLD_RELEASE).
+      ...(holdReleaseEnabled() ? { 'Hold Expires At': holdExpiryIso(checkInIso) } : {}),
       // Amount Due carries the price. Rate Applied is deliberately left empty:
       // it links to WS_Rates, and hourly prices live as WS_Properties fields,
       // which cannot be linked to. Blank, not dangling — B17 aggregates on
@@ -4216,10 +4223,12 @@ const actions = {
     // to both of those handlers. Session State is deliberately NOT advanced on
     // failure, so the guest's next ETA message retries the same write.
     if (confirmedBooking) {
-      const etaWrite = await airtableUpdate('WS_Bookings', confirmedBooking.id, {
-        'ETA': eta,
-        'Status': 'Confirmed'
-      });
+      const etaFields = { 'ETA': eta, 'Status': 'Confirmed' };
+      // Doc 1b PR 6: hold until 30 minutes after the ETA the guest just gave.
+      if (holdReleaseEnabled() && confirmedBooking.fields['Check In']) {
+        etaFields['Hold Expires At'] = overnightHoldExpiryIso(confirmedBooking.fields['Check In'], eta);
+      }
+      const etaWrite = await airtableUpdate('WS_Bookings', confirmedBooking.id, etaFields);
       if (etaWrite && etaWrite.error) {
         logToAxiom('error', 'eta_confirm_write_failed', {
           phone: ctx.phone, bookingId: confirmedBooking.id, error: JSON.stringify(etaWrite.error)
@@ -4979,6 +4988,190 @@ async function settleAutoCheckout(booking, room, guest, propertyName, propertyId
   return true;
 }
 
+// ─── STALE-HOLD RELEASE and OVERDUE QUESTION (Doc 1b PR 6) ───────────────────
+// Two sweeps that ride the auto-checkout cron, both inside its time budget.
+//
+// 1. Stale holds. A booking in Enquiry/Confirmed holds its room (it blocks the
+//    date range) until the guest arrives or cancels; nothing ever expired one, so
+//    a no-show held a room forever. 'Hold Expires At' (WS_Bookings, date+time,
+//    UTC) is set to 30 minutes after the stated arrival time and the sweep
+//    cancels the booking once it has passed. Never sooner than 30 minutes after
+//    the booking is made, whatever arrival time the guest typed. Guarded by
+//    WABISTAY_HOLD_RELEASE (1/true): off, nothing is written and nothing is
+//    released, so existing holds and today's behaviour are untouched.
+// 2. Overdue question. A Checked In booking still open 60 minutes after its
+//    Check Out is a room reception should be asked about. Template only (a
+//    business-initiated message to staff), so WABISTAY_OVERDUE_ALERT_TEMPLATE
+//    unset = off. Stamped in 'Overdue Alert Sent At' so it is asked once.
+const HOLD_GRACE_MS = 30 * 60 * 1000;
+const OVERDUE_ALERT_AFTER_MS = 60 * 60 * 1000;
+// Guest states that exist only because a live hold does. When the hold goes the
+// guest goes back to NEW — otherwise "I'm at the gate" finds no Confirmed
+// booking and gateArrival falls through to its legacy first-available-room path.
+const HOLD_SESSION_STATES = ['CONFIRMED', 'AWAITING_ETA', 'AWAITING_PAYMENT_METHOD'];
+
+function holdReleaseEnabled() {
+  return /^(1|true)$/i.test(String(process.env.WABISTAY_HOLD_RELEASE || '').trim());
+}
+
+function overdueAlertTemplate() {
+  return process.env.WABISTAY_OVERDUE_ALERT_TEMPLATE || null;
+}
+
+// arrival + 30 min, but never earlier than now + 30 min.
+function holdExpiryIso(arrivalIso, now = new Date()) {
+  const fromArrival = Date.parse(arrivalIso) + HOLD_GRACE_MS;
+  const fromNow = now.getTime() + HOLD_GRACE_MS;
+  return new Date(Math.max(fromArrival, fromNow)).toISOString();
+}
+
+// Overnight arrival: the ETA the guest typed, on the check-in day (SAST). A bare
+// 1-11 is ambiguous and is read as the later (pm) time, so a hold is never
+// released early on a misreading. No ETA, or one that cannot be read ("evening"),
+// holds to the end of the check-in day (23:59 SAST).
+function overnightArrivalIso(checkInIso, etaText) {
+  const day = sastCalendarDate(new Date(Date.parse(checkInIso)));
+  const t = etaText ? parseArrivalTime(etaText) : null;
+  let hour = 23;
+  let minute = 59;
+  if (t && t.ambiguous !== undefined) { hour = t.ambiguous + 12; minute = 0; }
+  else if (t) { hour = t.hour; minute = t.minute; }
+  return sastToUtcIso(day, hour, minute);
+}
+
+function overnightHoldExpiryIso(checkInIso, etaText, now = new Date()) {
+  return holdExpiryIso(overnightArrivalIso(checkInIso, etaText), now);
+}
+
+async function runHoldRelease(now = new Date(), opts = {}) {
+  const { deadline = Infinity } = opts;
+  const summary = { holdsReleased: 0 };
+  if (!holdReleaseEnabled()) return summary;
+
+  const nowMs = now.getTime();
+  const holds = await airtableGet('WS_Bookings', orFormula('Status', ['Enquiry', 'Confirmed']));
+  const released = new Set();
+
+  for (const hold of holds) {
+    const expires = hold.fields['Hold Expires At'];
+    if (!expires || nowMs < Date.parse(expires)) continue;   // no expiry set (older holds) or not yet due
+
+    if (Date.now() > deadline) {
+      summary.truncated = true;
+      logToAxiom('warn', 'cron_time_budget_hit', { cron: 'auto_checkout', stage: 'hold_release', leftFrom: hold.id });
+      break;
+    }
+
+    // Money has been recorded against this booking: a person decides, not a timer.
+    if (hold.fields['Payment Status'] === 'Paid' || Number(hold.fields['Amount Paid']) > 0) {
+      logToAxiom('warn', 'hold_expired_paid_skipped', { bookingId: hold.id, holdExpiresAt: expires });
+      continue;
+    }
+
+    // Fresh read immediately before the write: the guest may have checked in,
+    // cancelled, or had the hold extended since this sweep's snapshot.
+    const fresh = (await airtableGet('WS_Bookings', `RECORD_ID() = '${hold.id}'`))[0] || null;
+    if (!fresh || !['Enquiry', 'Confirmed'].includes(fresh.fields['Status']) || fresh.fields['Hold Expires At'] !== expires) {
+      logToAxiom('info', 'hold_release_skipped_changed', {
+        bookingId: hold.id, currentStatus: fresh ? fresh.fields['Status'] : null
+      });
+      continue;
+    }
+
+    const write = await airtableUpdate('WS_Bookings', hold.id, { 'Status': 'Cancelled' });
+    if (write && write.error) {
+      logToAxiom('error', 'hold_release_write_failed', { bookingId: hold.id, error: JSON.stringify(write.error) });
+      continue;
+    }
+    released.add(hold.id);
+    summary.holdsReleased++;
+    logToAxiom('info', 'hold_released', {
+      bookingId: hold.id, bookingRef: hold.fields['Booking Ref'] || null, roomId: (hold.fields['Room'] || [])[0] || null,
+      status: fresh.fields['Status'], holdExpiresAt: expires
+    });
+
+    // Reset the guest, but only if no other live hold of theirs remains.
+    const guestId = (hold.fields['Guest'] || [])[0];
+    if (guestId) {
+      const otherLive = holds.some(h => h.id !== hold.id && !released.has(h.id) && (h.fields['Guest'] || []).includes(guestId));
+      if (!otherLive) {
+        const guest = (await airtableGet('WS_Guests', `RECORD_ID() = '${guestId}'`))[0] || null;
+        if (guest && HOLD_SESSION_STATES.includes(guest.fields['Session State'])) {
+          // No message to the guest: what to say is Shawn's wording, and a guest
+          // who has been silent past their arrival time is likely outside the
+          // 24h window anyway. Their next message starts a fresh booking.
+          await updateGuestState(guest.id, { 'Session State': 'NEW' });
+        }
+      }
+    }
+  }
+  return summary;
+}
+
+async function runOverdueAlerts(now = new Date(), opts = {}) {
+  const { deadline = Infinity } = opts;
+  const summary = { overdueAlerts: 0 };
+  const templateName = overdueAlertTemplate();
+  if (!templateName) return summary;
+
+  const nowMs = now.getTime();
+  const bookings = await airtableGet('WS_Bookings', `{Status} = 'Checked In'`);
+  for (const booking of bookings) {
+    const checkOut = booking.fields['Check Out'];
+    if (!checkOut || nowMs < Date.parse(checkOut) + OVERDUE_ALERT_AFTER_MS) continue;
+    if (booking.fields['Overdue Alert Sent At']) continue;       // asked once
+
+    if (Date.now() > deadline) {
+      summary.truncated = true;
+      logToAxiom('warn', 'cron_time_budget_hit', { cron: 'auto_checkout', stage: 'overdue_alert', leftFrom: booking.id });
+      break;
+    }
+
+    const roomId = (booking.fields['Room'] || [])[0];
+    const guestId = (booking.fields['Guest'] || [])[0];
+    const [roomRows, guestRows] = await Promise.all([
+      roomId ? airtableGet('WS_Rooms', `RECORD_ID() = '${roomId}'`) : [],
+      guestId ? airtableGet('WS_Guests', `RECORD_ID() = '${guestId}'`) : []
+    ]);
+    const room = roomRows[0] || null;
+    const guest = guestRows[0] || null;
+    const propertyId = bookingPropertyId(booking, room && (room.fields['Property'] || [])[0]);
+    const seats = await activeReceptionRolesForProperty(propertyId);
+    const correlation = { site: 'overdue_alert', bookingId: booking.id, propertyId };
+
+    if (seats.length === 0) {
+      logToAxiom('warn', 'overdue_alert_no_seat', { ...correlation, reason: 'no active Reception seat for property' });
+      continue;
+    }
+
+    // Positional and load-bearing once the template is approved: {{1}} room,
+    // {{2}} guest, {{3}} the scheduled check-out (SAST date and time).
+    const params = [
+      room ? room.fields['Room Name'] : 'a room',
+      guest ? (guest.fields['Guest Name'] || 'the guest') : 'the guest',
+      formatSastDateTime(checkOut)
+    ];
+    let sentAny = false;
+    for (const seat of seats) {
+      const to = formatPhone(String(seat.fields['Current Phone']));
+      const result = await sendWhatsAppTemplate(to, templateName, params, { ...correlation, roleId: seat.id });
+      if (result.ok) sentAny = true;
+      else logToAxiom('error', 'overdue_alert_failed', { ...correlation, to, template: templateName, error: JSON.stringify(result.error || null) });
+    }
+    // Stamp only after a send landed, so a template that is not approved yet
+    // (or a failed send) is retried on the next tick rather than lost.
+    if (sentAny) {
+      const stamp = await airtableUpdate('WS_Bookings', booking.id, { 'Overdue Alert Sent At': now.toISOString() });
+      if (stamp && stamp.error) {
+        logToAxiom('error', 'overdue_alert_stamp_write_failed', { bookingId: booking.id, error: JSON.stringify(stamp.error) });
+      }
+      logToAxiom('info', 'overdue_alert_sent', { ...correlation, checkOut });
+      summary.overdueAlerts++;
+    }
+  }
+  return summary;
+}
+
 // Cron time budget (Doc 1b PR 5). Every function is cut at maxDuration and the
 // 5-minute auto-checkout was being cut at 10s (504) near the top of the hour. The
 // sweeps are idempotent, so the safe response to running long is to stop
@@ -5243,16 +5436,25 @@ async function autoCheckoutHandler(req, res) {
     const startedAt = Date.now();
     logToAxiom('info', 'cron_started', { cron: 'auto_checkout' });
     const deadline = startedAt + cronTimeBudgetMs();
-    const { summary, enquiry } = await withAirtableCallCount('auto_checkout', { value: 0 }, async () => {
+    const { summary, enquiry, holds, overdue } = await withAirtableCallCount('auto_checkout', { value: 0 }, async () => {
       const summary = await runAutoCheckout(new Date(), { deadline });
       // B19: reuse this cron for the enquiry-abandonment staleness sweep.
       const enquiry = await runEnquiryAbandonment(new Date(), { deadline });
-      return { summary, enquiry };
+      // Doc 1b PR 6: stale-hold release, then the overdue question. Both share
+      // the same deadline, so they only get the time the sweeps above left.
+      const holds = await runHoldRelease(new Date(), { deadline });
+      const overdue = await runOverdueAlerts(new Date(), { deadline });
+      return { summary, enquiry, holds, overdue };
     });
     logToAxiom('info', 'cron_duration', {
-      cron: 'auto_checkout', ms: Date.now() - startedAt, truncated: !!(summary.truncated || enquiry.truncated)
+      cron: 'auto_checkout', ms: Date.now() - startedAt,
+      truncated: !!(summary.truncated || enquiry.truncated || holds.truncated || overdue.truncated)
     });
-    res.status(200).json({ ok: true, ...summary, ...enquiry });
+    res.status(200).json({
+      ok: true, ...summary, ...enquiry,
+      holdsReleased: holds.holdsReleased, overdueAlerts: overdue.overdueAlerts,
+      ...(holds.truncated || overdue.truncated ? { truncated: true } : {})
+    });
   } catch (err) {
     console.error('[AUTO-CHECKOUT FATAL]', err.message, err.stack);
     logToAxiom('error', 'auto_checkout_fatal', { message: err.message, stack: err.stack });
@@ -7073,6 +7275,10 @@ module.exports.sendWhatsApp = sendWhatsApp;
 module.exports.alertShawn = alertShawn;
 module.exports.getAlertPhone = getAlertPhone;
 module.exports.cronTimeBudgetMs = cronTimeBudgetMs;
+module.exports.runHoldRelease = runHoldRelease;
+module.exports.runOverdueAlerts = runOverdueAlerts;
+module.exports.overnightHoldExpiryIso = overnightHoldExpiryIso;
+module.exports.holdExpiryIso = holdExpiryIso;
 module.exports.orderFreeRooms = orderFreeRooms;
 module.exports.wabistayFlagState = wabistayFlagState;
 module.exports.otherSwitchState = otherSwitchState;
