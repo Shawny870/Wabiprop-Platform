@@ -33,6 +33,15 @@ function cleanerGateTemplate() {
   return process.env.WABISTAY_CLEANER_GATE_TEMPLATE || null;
 }
 
+// Checkout → cleaner dispatch ("room vacated, please prepare it"). Same contract as
+// the getters around it: read at CALL time, unset IS the old free-form behaviour.
+// Params are positional and fixed by the approved template: {{1}} cleaner name,
+// {{2}} room name. No buttons: the router only understands typed text, and the
+// cleaner answers by typing DONE.
+function cleanerDispatchTemplate() {
+  return process.env.WABISTAY_CLEANER_DISPATCH_TEMPLATE || null;
+}
+
 // Gate-arrival alert to every Active Reception seat. Same contract as the
 // getters around it: read at CALL time, unset IS the stub state (the existing
 // free-form Notify Phone alert is unaffected either way).
@@ -294,6 +303,7 @@ async function advanceGuestState(ctx, fields, extra = {}) {
 // deployment id are Vercel system variables, not secrets, and say which
 // deployment this log line belongs to.
 const WABISTAY_KNOWN_FLAGS = [
+  'WABISTAY_CLEANER_DISPATCH_TEMPLATE',
   'WABISTAY_CLEANER_GATE_TEMPLATE',
   'WABISTAY_GATE_ALERT_UNPAID',
   'WABISTAY_GATE_ARRIVAL_TEMPLATE',
@@ -417,6 +427,40 @@ async function activeCleanersForProperty(propertyId) {
   const activeCleaners = await airtableGet('WS_Cleaners', `{Active} = TRUE()`);
   if (!propertyId) return [];
   return activeCleaners.filter(c => (c.fields['Assigned Property'] || []).includes(propertyId));
+}
+
+// One cleaner, one dispatch. The dispatch used to be free-form text at three
+// separate sites, and a business-initiated free-form message to a cleaner who has
+// not written to us in 24 hours is dropped by Meta with HTTP 200 and no error,
+// which is how rooms stayed in Cleaning with nobody told. With the template
+// configured it goes as the template; if Meta rejects the template at once
+// (not approved yet, wrong name or language) that is logged and the free-form
+// message is tried once, so a template problem never leaves the cleaner with
+// nothing. Unset = the free-form message exactly as before. A rejection that
+// only shows up later in a delivery-status callback cannot be fallen back from.
+// `failEvent` is the existing per-site event name for a failed free-form send.
+async function sendCleanerDispatch(cleaner, roomName, { bookingId = null, failEvent = 'cleaner_dispatch_failed' } = {}) {
+  const rawPhone = cleaner.fields['Phone Number'];
+  if (!rawPhone) return { ok: false, skipped: true };
+  const to = formatPhone(rawPhone);
+  const cleanerName = cleaner.fields['Cleaner Name'];
+  const correlation = { bookingId, cleanerId: cleaner.id, roomName };
+
+  const templateName = cleanerDispatchTemplate();
+  if (templateName) {
+    const result = await sendWhatsAppTemplate(to, templateName, [cleanerName || 'there', roomName], { site: 'cleaner_dispatch', ...correlation });
+    if (result.ok) return { ok: true, via: 'template' };
+    logToAxiom('error', 'cleaner_dispatch_template_failed', {
+      ...correlation, to, template: templateName, error: JSON.stringify(result.error || null)
+    });
+  }
+
+  const send = await sendWhatsApp(to, msg('cleanerDispatch', { cleanerName, roomName }));
+  if (send && send.error) {
+    logToAxiom('error', failEvent, { ...correlation, error: JSON.stringify(send.error) });
+    return { ok: false };
+  }
+  return { ok: true, via: templateName ? 'free_form_fallback' : 'free_form' };
 }
 
 // Gate arrival → tell the property's cleaner someone has arrived. Before this,
@@ -1356,6 +1400,25 @@ function propertyCityLine(property) {
 // the suspended-property redirect already uses (Guest Redirect Phone, falling
 // back to Notify Phone). With neither set the sentence is sent without the
 // number — no new words — and the gap is logged loudly.
+// Every guest-facing "speak to reception, no room" message goes through here so
+// the lost enquiry is on the record: a log-only Axiom event (no Airtable row) with
+// the phone and the SAST hour of day, for review of when this happens. `stage` says
+// where the guest was: the greeting itself (no Available room) or a booking step
+// (no availability for the dates/time asked, or the availability check failed
+// closed — the two look the same here; availability_check_failed_closed is logged
+// separately when it is the latter).
+async function sendNoRoomMessage(ctx, stage) {
+  logToAxiom('info', 'enquiry_no_room_at_greeting', {
+    phone: ctx.phone,
+    sastHour: new Date(Date.now() + SAST_OFFSET_MS).getUTCHours(),
+    stage,
+    propertyId: ctx.property && ctx.property.id,
+    sessionState: (ctx.guest && ctx.guest.fields['Session State']) || null,
+    ...(ctx.guest && ctx.guest.fields['Test Phone'] === true ? { testPhone: true } : {})
+  });
+  return sendWhatsApp(ctx.phone, noRoomMessage(ctx.property));
+}
+
 function noRoomMessage(property) {
   const fields = (property && property.fields) || {};
   const redirectPhone = fields['Guest Redirect Phone'] || fields['Notify Phone'] || null;
@@ -3275,15 +3338,7 @@ const actions = {
       const cleanerPhone = cleaner.fields['Phone Number'];
       const cleanerName = cleaner.fields['Cleaner Name'];
       if (cleanerPhone) {
-        const dispatchSend = await sendWhatsApp(formatPhone(cleanerPhone), msg('cleanerDispatch', {
-          cleanerName, roomName: room.fields['Room Name']
-        }));
-        if (dispatchSend && dispatchSend.error) {
-          logToAxiom('error', 'cleaner_dispatch_failed', {
-            bookingId: booking.id, cleanerId: cleaner.id, roomName: room.fields['Room Name'],
-            error: JSON.stringify(dispatchSend.error)
-          });
-        }
+        await sendCleanerDispatch(cleaner, room.fields['Room Name'], { bookingId: booking.id, failEvent: 'cleaner_dispatch_failed' });
       }
     }
 
@@ -3441,7 +3496,7 @@ const actions = {
       // and no stay-type menu is offered. Same "no writes, no state change"
       // posture as the gateTooEarly path above.
       logToAxiom('info', 'greeting_zero_rooms', { phone: ctx.phone, propertyId: ctx.property.id });
-      await sendWhatsApp(ctx.phone, noRoomMessage(ctx.property));
+      await sendNoRoomMessage(ctx, 'greeting');
       return;
     }
 
@@ -3630,7 +3685,7 @@ const actions = {
       await logEnquiry(ctx.property, ctx.phone, 'No Availability', {
         checkInIso, checkOutIso, bookingType: 'Overnight'
       });
-      await sendWhatsApp(ctx.phone, noRoomMessage(ctx.property));
+      await sendNoRoomMessage(ctx, 'overnight_dates');
       return;
     }
 
@@ -3712,7 +3767,7 @@ const actions = {
         await logEnquiry(ctx.property, ctx.phone, 'No Availability', {
           checkInIso, checkOutIso, bookingType: 'Overnight'
         });
-        await sendWhatsApp(ctx.phone, noRoomMessage(ctx.property));
+        await sendNoRoomMessage(ctx, 'overnight_dates_recheck');
         return;
       }
 
@@ -4070,7 +4125,7 @@ const actions = {
       await logEnquiry(ctx.property, ctx.phone, 'No Availability', {
         checkInIso, checkOutIso, bookingType: 'Hourly'
       });
-      await sendWhatsApp(ctx.phone, noRoomMessage(ctx.property));
+      await sendNoRoomMessage(ctx, 'hourly_duration');
       return;
     }
 
@@ -4144,7 +4199,7 @@ const actions = {
       await logEnquiry(ctx.property, ctx.phone, 'No Availability', {
         checkInIso, checkOutIso, bookingType: 'Hourly'
       });
-      await sendWhatsApp(ctx.phone, noRoomMessage(ctx.property));
+      await sendNoRoomMessage(ctx, 'hourly_duration_recheck');
       return;
     }
 
@@ -4666,20 +4721,11 @@ const actions = {
       const cleanerPhone = cleaner.fields['Phone Number'];
       const cleanerName = cleaner.fields['Cleaner Name'];
       if (cleanerPhone) {
-        const formattedCleanerPhone = formatPhone(cleanerPhone);
         // Rule 30 step 2, slice 2: checked but non-fatal — a missed cleaner
         // text shouldn't block reception notify or the guest's own checkout
-        // confirmation below. sendWhatsApp already logs the generic
-        // 'whatsapp_send_error' on failure; this adds correlation to the
-        // booking/cleaner/room, matching notifyCleanerOfArrival's own
-        // checked-send pattern for the equivalent gate-arrival dispatch.
-        const dispatchSend = await sendWhatsApp(formattedCleanerPhone, msg('cleanerDispatch', { cleanerName, roomName }));
-        if (dispatchSend && dispatchSend.error) {
-          logToAxiom('error', 'cleaner_dispatch_failed', {
-            bookingId: bookings[0] && bookings[0].id, cleanerId: cleaner.id, roomName,
-            error: JSON.stringify(dispatchSend.error)
-          });
-        }
+        // confirmation below. sendCleanerDispatch logs the failure with
+        // booking/cleaner/room correlation.
+        await sendCleanerDispatch(cleaner, roomName, { bookingId: bookings[0] && bookings[0].id, failEvent: 'cleaner_dispatch_failed' });
       }
     }
     // B8: tell Reception what to collect. After the booking/room writes and the
@@ -5038,15 +5084,7 @@ async function settleAutoCheckout(booking, room, guest, propertyName, propertyId
     if (cleanerPhone) {
       // Rule 30 step 2, slice 2: checked but non-fatal, same shape as the
       // manual checkout path's equivalent dispatch.
-      const dispatchSend = await sendWhatsApp(formatPhone(cleanerPhone), msg('cleanerDispatch', {
-        cleanerName: cleaner.fields['Cleaner Name'], roomName
-      }));
-      if (dispatchSend && dispatchSend.error) {
-        logToAxiom('error', 'auto_checkout_cleaner_dispatch_failed', {
-          bookingId: booking.id, cleanerId: cleaner.id, roomName,
-          error: JSON.stringify(dispatchSend.error)
-        });
-      }
+      await sendCleanerDispatch(cleaner, roomName, { bookingId: booking.id, failEvent: 'auto_checkout_cleaner_dispatch_failed' });
     }
   }
   // B8: same push as the manual path. This is the branch that matters most —
