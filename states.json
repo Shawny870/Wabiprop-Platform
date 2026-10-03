@@ -107,6 +107,8 @@
     "confirmedMenu": "Hi {guestName}! Your booking is confirmed. 🛏️\n\nReply with a number:\n1 - I'm at the gate\n2 - Cancel my booking",
     "noRoomSpeakToReception": "Please speak to reception on {redirectPhone} to check what is available.",
     "noRoomSpeakToReceptionNoPhone": "Please speak to reception to check what is available.",
+    "gateRoomNotReady": "Almost there, {guestName}! Your room isn't quite ready yet. Please wait at the office, not outside, and reception will look after you. You can reply 1 again in a few minutes to check.",
+    "gateNotifyRoomNotReady": "A guest has arrived at the gate but their room is not ready. Name: {guestName}. Phone: {guestPhone}. Booking: {ref}. {roomName} is {roomStatus}, so no room has been assigned and nothing was changed. They have been asked to wait at the office, not outside.",
     "gateNotifyUnpaid": "A guest has arrived at the gate and has not paid yet. Name: {guestName}. Phone: {guestPhone}. Booking: {ref}. Amount due: R{amountDue}. No room has been assigned. Please take payment at reception first.",
     "gateNotifyUnpaidRoomHeld": "A guest has arrived at the gate and has not paid yet. Name: {guestName}. Phone: {guestPhone}. Booking: {ref}. Amount due: R{amountDue}. {roomName} is held for them. Please take payment at reception first.",
     "stateWriteFailed": "Sorry, something went wrong on our side. Please speak to reception on {redirectPhone} and they will help you straight away.",

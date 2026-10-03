@@ -376,6 +376,7 @@ const WABISTAY_KNOWN_FLAGS = [
   'WABISTAY_ENQUIRY_TRACKING',
   'WABISTAY_GATE_ALERT_UNPAID',
   'WABISTAY_GATE_ARRIVAL_TEMPLATE',
+  'WABISTAY_GATE_ROOM_CHECK',
   'WABISTAY_GUEST_ESCALATION_TEMPLATE',
   'WABISTAY_DAILY_SUMMARY_TEMPLATE',
   'WABISTAY_HIDE_ONE_HOUR',
@@ -395,7 +396,7 @@ const WABISTAY_KNOWN_FLAGS = [
 
 // Switches the code only treats as on for 1/true; for these, 'on' means that,
 // not merely 'set'.
-const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_HIDE_ONE_HOUR', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_PAID_BY_BOOKING_REF', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD'];
+const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_GATE_ROOM_CHECK', 'WABISTAY_HIDE_ONE_HOUR', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_PAID_BY_BOOKING_REF', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD'];
 
 function wabistayFlagState() {
   const names = new Set([...WABISTAY_KNOWN_FLAGS, ...Object.keys(process.env).filter(k => k.startsWith('WABISTAY_'))]);
@@ -738,6 +739,47 @@ const GATE_ALERT_SUPPRESS_MS = 10 * 60 * 1000;
 
 function gateAlertUnpaidEnabled() {
   return /^(1|true)$/i.test(String(process.env.WABISTAY_GATE_ALERT_UNPAID || '').trim());
+}
+
+// WABISTAY_GATE_ROOM_CHECK (1 or true; off by default). A guest who is allowed in
+// (paid, or nothing owed) taps the gate button and the room they would be given is
+// not Available — still Cleaning, or Occupied. Today gateArrival assigns it anyway
+// and sets it Occupied, which overwrites Cleaning and leaves the cleaner's DONE with
+// nothing to flip. With the flag on, that tap assigns nothing and writes nothing:
+// the guest is told to wait at the office (not outside), reception is alerted
+// (template + owner copy, as the unpaid alert does) with the room's real status, and a
+// later tap re-checks from scratch. No stamp is written, so there is no quiet period:
+// each tap re-alerts.
+function gateRoomCheckEnabled() {
+  return /^(1|true)$/i.test(String(process.env.WABISTAY_GATE_ROOM_CHECK || '').trim());
+}
+
+async function alertRoomNotReadyAtGate(ctx, booking, room, notifyPhone) {
+  const roomName = room.fields['Room Name'];
+  const roomStatus = room.fields['Status'] || 'Unknown';
+  await notifyReceptionOfArrival({
+    propertyId: ctx.property.id,
+    propertyName: ctx.property.fields['Property Name'],
+    guestName: ctx.guest.fields['Guest Name'],
+    roomName,
+    roomStatus,
+    guestPhone: ctx.phone
+  });
+  if (notifyPhone) {
+    logOwnerSendWindow('gate_room_not_ready', notifyPhone, ctx.phone);
+    const ownerSend = await sendWhatsApp(notifyPhone, msg('gateNotifyRoomNotReady', {
+      guestName: ctx.guest.fields['Guest Name'],
+      guestPhone: ctx.phone,
+      ref: (booking && (booking.fields['Booking Ref'] || `WS-${booking.id.slice(-6).toUpperCase()}`)) || 'no booking',
+      roomName,
+      roomStatus
+    }));
+    if (ownerSend && ownerSend.error) {
+      logToAxiom('error', 'gate_room_not_ready_owner_send_failed', {
+        bookingId: booking ? booking.id : null, error: JSON.stringify(ownerSend.error)
+      });
+    }
+  }
 }
 
 async function alertUnpaidGateArrival(ctx, booking, heldRoomId, notifyPhone) {
@@ -4760,6 +4802,29 @@ const actions = {
       // findAvailableRoom, and now the same one the greeting's room count uses.
       const availableRooms = await getGuestVisibleAvailableRooms(ctx.property.id);
       room = availableRooms[0] || null;
+    }
+
+    // Gate-time room check (WABISTAY_GATE_ROOM_CHECK): whichever path picked the room
+    // above — the held one, a reassignment, or the legacy fallback — it is only
+    // assigned if it is Available right now. Otherwise nothing is written (room,
+    // booking and guest state stay exactly as they were) and the guest's next tap
+    // re-runs this whole check. The guest's answer goes first; the alerts are fenced
+    // off so a problem there can never cost the guest their reply.
+    if (room && gateRoomCheckEnabled() && room.fields['Status'] !== 'Available') {
+      logToAxiom('info', 'gate_room_not_ready', {
+        phone: ctx.phone, bookingId: booking ? booking.id : null, roomId: room.id,
+        roomName: room.fields['Room Name'], roomStatus: room.fields['Status'] || null,
+        heldRoomId, held: !!heldRoomId && room.id === heldRoomId
+      });
+      await sendWhatsApp(ctx.phone, msg('gateRoomNotReady', { guestName: ctx.guest.fields['Guest Name'] }));
+      try {
+        await alertRoomNotReadyAtGate(ctx, booking, room, notifyPhone);
+      } catch (err) {
+        logToAxiom('error', 'gate_room_not_ready_alert_failed', {
+          phone: ctx.phone, bookingId: booking ? booking.id : null, message: err.message
+        });
+      }
+      return;
     }
 
     const assignedRoomId = room ? room.id : null;
