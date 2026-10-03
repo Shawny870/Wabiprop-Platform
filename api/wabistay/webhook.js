@@ -19,6 +19,67 @@ const WA_PHONE_NUMBER_ID = process.env.WA_PHONE_NUMBER_ID;
 const WA_ACCESS_TOKEN = process.env.WA_ACCESS_TOKEN;
 const WA_VERIFY_TOKEN = process.env.WA_VERIFY_TOKEN;
 const OWNER_PHONE = process.env.OWNER_PHONE;
+
+// ─── NOTIFY ROUTING (WABISTAY_NOTIFY_ROUTING) ────────────────────────────────
+// Off (default / unset): every operational alert goes to OWNER_PHONE and every
+// report to Notify Phone (OWNER_PHONE fallback) — exactly as before. On: the four
+// operational alerts go to the property's Notify Phone (OWNER_PHONE only as a
+// fallback), reports go to Owner Report Phone → Notify Phone → OWNER_PHONE, and
+// Notify Phone / Owner Report Phone are kept out of the guest flow's STOP and
+// consent-notice handling the way OWNER_PHONE already is. NO command authority
+// is granted to either number: PAID, WALKIN, DONE etc. still resolve only from
+// WS_Roles / WS_Cleaners. REPORT_TEST_MODE_PHONE still overrides every report.
+function notifyRoutingOn() {
+  return /^(1|true)$/i.test(String(process.env.WABISTAY_NOTIFY_ROUTING || '').trim());
+}
+function propertyPhoneField(property, field) {
+  const raw = property && property.fields && property.fields[field];
+  // Strict on purpose (no String() coercion): a malformed field fails that one
+  // property's run, as it always has, rather than being silently routed around.
+  return raw ? raw.replace(/[\s\-\+]/g, '') : null;
+}
+// Recipient of the new-booking (overnight + hourly), extension and room-cleaned
+// alerts. Flag off → the raw OWNER_PHONE, exactly what these sites used before.
+function operationalAlertPhone(property) {
+  if (notifyRoutingOn()) {
+    const notify = propertyPhoneField(property, 'Notify Phone');
+    if (notify) return formatPhone(notify);
+  }
+  return OWNER_PHONE || null;
+}
+// Recipient of the weekly recap and monthly report (before the
+// REPORT_TEST_MODE_PHONE gate). Flag off → Notify Phone, else OWNER_PHONE.
+function reportRecipientPhone(property) {
+  if (notifyRoutingOn()) {
+    const report = propertyPhoneField(property, 'Owner Report Phone');
+    if (report) return report;
+  }
+  return propertyPhoneField(property, 'Notify Phone') || (OWNER_PHONE || null);
+}
+// True when phone is one of the property's owner-side numbers: OWNER_PHONE
+// always, plus Notify Phone / Owner Report Phone when routing is on. Used only
+// to keep those numbers out of guest-only handling (STOP, consent notice).
+function isOwnerSideNumber(phone, property) {
+  if (OWNER_PHONE && phone === formatPhone(OWNER_PHONE)) return true;
+  if (!notifyRoutingOn()) return false;
+  try {
+    return ['Notify Phone', 'Owner Report Phone'].some(f => {
+      const v = propertyPhoneField(property, f);
+      return !!v && formatPhone(v) === phone;
+    });
+  } catch (_) {
+    return false; // a malformed phone field must never break a guest's message
+  }
+}
+// Report template names: env override, today's name as the default.
+function reportTemplateName(envName, defaultName) {
+  return String(process.env[envName] || '').trim() || defaultName;
+}
+// Last four digits only — never a full number — for the flags log.
+function last4(v) {
+  const digits = String(v || '').replace(/\D/g, '');
+  return digits ? digits.slice(-4) : null;
+}
 const AXIOM_TOKEN = process.env.AXIOM_TOKEN;
 // Language code every Wabistay utility template is submitted under. Meta matches
 // a template on name + language, so this must equal the locale of the approved
@@ -309,17 +370,22 @@ const WABISTAY_KNOWN_FLAGS = [
   'WABISTAY_GATE_ALERT_UNPAID',
   'WABISTAY_GATE_ARRIVAL_TEMPLATE',
   'WABISTAY_GUEST_ESCALATION_TEMPLATE',
+  'WABISTAY_DAILY_SUMMARY_TEMPLATE',
   'WABISTAY_HOLD_RELEASE',
+  'WABISTAY_MONTHLY_REPORT_TEMPLATE',
+  'WABISTAY_NOTIFY_ROUTING',
   'WABISTAY_OPS_ALERT_TEMPLATE',
   'WABISTAY_OVERDUE_ALERT_TEMPLATE',
+  'WABISTAY_OWNER_SUMMARY_TEMPLATE',
   'WABISTAY_RECEPTION_PAYMENT_TEMPLATE',
   'WABISTAY_ROOM_ORDER',
-  'WABISTAY_STATE_WRITE_GUARD'
+  'WABISTAY_STATE_WRITE_GUARD',
+  'WABISTAY_WEEKLY_RECAP_TEMPLATE'
 ];
 
 // Switches the code only treats as on for 1/true; for these, 'on' means that,
 // not merely 'set'.
-const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD'];
+const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD'];
 
 function wabistayFlagState() {
   const names = new Set([...WABISTAY_KNOWN_FLAGS, ...Object.keys(process.env).filter(k => k.startsWith('WABISTAY_'))]);
@@ -338,14 +404,38 @@ function wabistayFlagState() {
 // phone numbers are reported set/unset ONLY (they are real numbers); the
 // template language is not sensitive, so its effective value is logged — "en"
 // by default, which is what every template is sent under.
+// Notify Phone lives on WS_Properties, not in the environment, so it is only known
+// once a property has been resolved. Null until then (the cold-start event can fire
+// from a cron before any inbound message); handleMessage logs
+// wabistay_notify_phones once with the real value as soon as it has one.
+let _notifyPhoneLast4 = null;
 function otherSwitchState() {
   const isSet = name => !!(process.env[name] && String(process.env[name]).trim());
   return {
     REPORT_TEST_MODE_PHONE: isSet('REPORT_TEST_MODE_PHONE') ? 'set' : 'unset',
     OWNER_PHONE: isSet('OWNER_PHONE') ? 'set' : 'unset',
+    ownerPhoneLast4: last4(process.env.OWNER_PHONE),
+    notifyPhoneLast4: _notifyPhoneLast4,
     WA_TEMPLATE_LANGUAGE: TEMPLATE_LANGUAGE_CODE,
     WA_TEMPLATE_LANGUAGE_source: isSet('WA_TEMPLATE_LANGUAGE') ? 'env' : 'default'
   };
+}
+
+// Once per cold start, the first time a property is resolved: last four digits of
+// its Notify Phone / Owner Report Phone (never the full numbers) plus the routing
+// flag, so "where would alerts and reports go right now" is a query.
+let _notifyPhonesLogged = false;
+function noteNotifyPhones(property) {
+  _notifyPhoneLast4 = last4(propertyPhoneField(property, 'Notify Phone'));
+  if (_notifyPhonesLogged) return;
+  _notifyPhonesLogged = true;
+  logToAxiom('info', 'wabistay_notify_phones', {
+    notifyRouting: notifyRoutingOn() ? 'on' : 'off',
+    ownerPhoneLast4: last4(process.env.OWNER_PHONE),
+    notifyPhoneLast4: _notifyPhoneLast4,
+    ownerReportPhoneLast4: last4(propertyPhoneField(property, 'Owner Report Phone')),
+    propertyId: property.id
+  });
 }
 
 let _flagsLogged = false;
@@ -2691,12 +2781,13 @@ async function resolveRoomClean(ctx, room) {
 
   logToAxiom('info', 'state_transition', { phone: ctx.phone, roomId: room.id, roomName: room.fields['Room Name'], from: 'Cleaning', to: 'Available', reason: 'cleaner_done' });
   await sendWhatsApp(ctx.phone, msg('cleanerThanks', { roomName: room.fields['Room Name'] }));
-  if (OWNER_PHONE) {
-    logOwnerSendWindow('room_cleaned', OWNER_PHONE, ctx.phone); // B17 instrumentation
+  const roomCleanedTo = operationalAlertPhone(ctx.property);
+  if (roomCleanedTo) {
+    logOwnerSendWindow('room_cleaned', roomCleanedTo, ctx.phone); // B17 instrumentation
     // Rule 30 step 2, slice 2: checked but non-fatal — pure courtesy
     // notification, nothing reads a "did the owner get told" flag; the
     // cleaner already got their own confirmation above regardless.
-    const ownerSend = await sendWhatsApp(OWNER_PHONE, msg('ownerRoomCleaned', { roomName: room.fields['Room Name'] }));
+    const ownerSend = await sendWhatsApp(roomCleanedTo, msg('ownerRoomCleaned', { roomName: room.fields['Room Name'] }));
     if (ownerSend && ownerSend.error) {
       logToAxiom('error', 'owner_room_cleaned_notify_failed', {
         roomId: room.id, error: JSON.stringify(ownerSend.error)
@@ -3879,12 +3970,13 @@ const actions = {
     // (CEO decision, 2026-09-28) — previously sent right after creation, before
     // the guest had any price, which meant reception got an alert for an
     // enquiry the guest might abandon before ever seeing a number.
-    if (OWNER_PHONE) {
-      logOwnerSendWindow('new_booking', OWNER_PHONE, ctx.phone); // B17 instrumentation
+    const newBookingTo = operationalAlertPhone(ctx.property);
+    if (newBookingTo) {
+      logOwnerSendWindow('new_booking', newBookingTo, ctx.phone); // B17 instrumentation
       // Rule 30 step 2, slice 2: checked but non-fatal — courtesy notification,
       // the guest already got their own quote/contact-owner reply independent
       // of this.
-      const ownerSend = await sendWhatsApp(OWNER_PHONE, msg('ownerNewBooking', {
+      const ownerSend = await sendWhatsApp(newBookingTo, msg('ownerNewBooking', {
         guestName, phone: ctx.phone, bookingRef, checkIn, checkOut: checkOut || 'TBC'
       }));
       if (ownerSend && ownerSend.error) {
@@ -4240,10 +4332,12 @@ const actions = {
       checkInText: formatSastDateTime(checkInIso),
       checkOutText: formatSastDateTime(checkOutIso)
     };
-    if (OWNER_PHONE) {
+    const hourlyBookingTo = operationalAlertPhone(ctx.property);
+    if (hourlyBookingTo) {
+      logOwnerSendWindow('hourly_new_booking', hourlyBookingTo, ctx.phone); // B17 instrumentation
       // Rule 30 step 2, slice 2: checked but non-fatal, same shape as
       // collectDetails' equivalent owner notify.
-      const ownerSend = await sendWhatsApp(OWNER_PHONE, msg('hourlyOwnerNewBooking', { ...view, phone: ctx.phone }));
+      const ownerSend = await sendWhatsApp(hourlyBookingTo, msg('hourlyOwnerNewBooking', { ...view, phone: ctx.phone }));
       if (ownerSend && ownerSend.error) {
         logToAxiom('error', 'owner_hourly_booking_notify_failed', {
           bookingId: pending.id, error: JSON.stringify(ownerSend.error)
@@ -5010,10 +5104,12 @@ const actions = {
       return;
     }
 
-    if (!alreadyNotified && OWNER_PHONE) {
+    const extensionTo = alreadyNotified ? null : operationalAlertPhone(ctx.property);
+    if (extensionTo) {
+      logOwnerSendWindow('extension', extensionTo, ctx.phone); // B17 instrumentation
       // Rule 30 step 2, slice 2: checked but non-fatal — courtesy notification,
       // the guest already got their own extensionConfirmed reply below regardless.
-      const ownerSend = await sendWhatsApp(OWNER_PHONE, msg('ownerExtension', {
+      const ownerSend = await sendWhatsApp(extensionTo, msg('ownerExtension', {
         guestName,
         bookingRef: booking.fields['Booking Ref'] || '',
         checkOut: formatSastDateTime(newCheckOut)
@@ -5815,6 +5911,7 @@ const HOUR_MS = 60 * 60 * 1000;
 // (Shawn submits). When approved, this is the one-line swap point in
 // sendOwnerSummary below.
 const OWNER_SUMMARY_TEMPLATE = 'wabistay_owner_weekly_summary';
+const ownerSummaryTemplateName = () => reportTemplateName('WABISTAY_OWNER_SUMMARY_TEMPLATE', OWNER_SUMMARY_TEMPLATE);
 
 // Room-nights sold for one booking. Convention (stated explicitly per the brief):
 //   · Overnight → whole nights, rounded from the 14:00→10:00 clock span
@@ -5933,7 +6030,7 @@ async function sendOwnerSummary(property, summary) {
     ? property.fields['Notify Phone'].replace(/[\s\-\+]/g, '')
     : (OWNER_PHONE || null);
   const paymentReconciliationMessage = formatPaymentReconciliationMessage(summary);
-  const payload = { ...summary, template: OWNER_SUMMARY_TEMPLATE, notifyPhone, paymentReconciliationMessage };
+  const payload = { ...summary, template: ownerSummaryTemplateName(), notifyPhone, paymentReconciliationMessage };
   // Last Report Sent is deliberately NOT written back to WS_Properties here —
   // runOwnerSummary/runDailySummary are documented and tested (Rule 29,
   // test/dailysummary.test.js) as read-only reporting with zero Airtable
@@ -5994,6 +6091,7 @@ async function sendOwnerSummary(property, summary) {
 // pre-submission draft name that was never updated once the real template
 // was approved under a different name).
 const MONTHLY_REPORT_TEMPLATE = 'wabistay_owner_monthly_recap';
+const monthlyReportTemplateName = () => reportTemplateName('WABISTAY_MONTHLY_REPORT_TEMPLATE', MONTHLY_REPORT_TEMPLATE);
 
 function avgOrNull(values) {
   const nums = values.filter(v => typeof v === 'number' && Number.isFinite(v));
@@ -6340,13 +6438,11 @@ function monthlyReportTemplateParams(report) {
 // every template param costs message length — Axiom still gets the full
 // `insights` array including it, for anyone who wants it.
 async function sendMonthlyReport(property, report) {
-  const notifyPhone = property.fields['Notify Phone']
-    ? property.fields['Notify Phone'].replace(/[\s\-\+]/g, '')
-    : (OWNER_PHONE || null);
+  const notifyPhone = reportRecipientPhone(property);
   const ownerName = await resolveOwnerName(property);
   const reportWithOwner = { ...report, ownerName };
   const templateParams = monthlyReportTemplateParams(reportWithOwner);
-  const payload = { ...reportWithOwner, template: MONTHLY_REPORT_TEMPLATE, notifyPhone, templateParams };
+  const payload = { ...reportWithOwner, template: monthlyReportTemplateName(), notifyPhone, templateParams };
   logToAxiom('info', 'monthly_report_payload', payload);
 
   // LIVE as of MONTHLY_REPORT_TEMPLATE's Meta approval — routed through the
@@ -6357,7 +6453,7 @@ async function sendMonthlyReport(property, report) {
   if (!recipient) {
     throw new Error('sendMonthlyReport: no recipient phone available — property has no Notify Phone and OWNER_PHONE fallback is unset');
   }
-  await sendWhatsAppTemplate(recipient, MONTHLY_REPORT_TEMPLATE, templateParams, { site: 'monthly_report', propertyId: property.id });
+  await sendWhatsAppTemplate(recipient, monthlyReportTemplateName(), templateParams, { site: 'monthly_report', propertyId: property.id });
   return payload;
 }
 
@@ -6545,6 +6641,7 @@ async function ownerSummaryHandler(req, res) {
 // approval/submission — unlike OWNER_SUMMARY_TEMPLATE this hasn't been
 // submitted yet either; naming it here only marks the swap point.
 const DAILY_SUMMARY_TEMPLATE = 'wabistay_daily_summary';
+const dailySummaryTemplateName = () => reportTemplateName('WABISTAY_DAILY_SUMMARY_TEMPLATE', DAILY_SUMMARY_TEMPLATE);
 
 // ── Room state grid ──────────────────────────────────────────────────────────
 // WS_Rooms.Status alone cannot distinguish overnight vs hourly occupancy (both
@@ -6843,7 +6940,7 @@ async function sendDailySummary(property, summary) {
   const summaryWithOwner = { ...summary, ownerName };
   const templateParams = dailySummaryTemplateParams(summaryWithOwner);
 
-  const payload = { ...summaryWithOwner, template: DAILY_SUMMARY_TEMPLATE, notifyPhone, templateParams };
+  const payload = { ...summaryWithOwner, template: dailySummaryTemplateName(), notifyPhone, templateParams };
   // See the matching comment in sendOwnerSummary — deliberately no Airtable
   // write here either, for the same read-only-cron reason.
   logToAxiom('info', 'daily_summary_payload', payload);
@@ -6879,6 +6976,9 @@ async function sendDailySummary(property, summary) {
 // copy, reusing paymentReconciliationLines (the existing pure per-booking
 // reconciliation function) rather than a new calculation.
 const WEEKLY_RECAP_TEMPLATE = 'wabistay_owner_weekly_recap';
+// WABISTAY_WEEKLY_RECAP_TEMPLATE=weekly_recap points the send at the already-approved
+// template with no new approval; unset = today's name.
+const weeklyRecapTemplateName = () => reportTemplateName('WABISTAY_WEEKLY_RECAP_TEMPLATE', WEEKLY_RECAP_TEMPLATE);
 
 function aggregateWeeklyRecap(property, rooms, bookings, w, guestsById = new Map()) {
   const summary = aggregateOwnerSummary(property, rooms, bookings, w, guestsById);
@@ -6939,20 +7039,18 @@ function weeklyRecapTemplateParams(report) {
 // LIVE as of wabistay_owner_weekly_recap's Meta approval — routed through
 // the REPORT_TEST_MODE_PHONE gate, same as sendMonthlyReport.
 async function sendWeeklyRecap(property, report) {
-  const notifyPhone = property.fields['Notify Phone']
-    ? property.fields['Notify Phone'].replace(/[\s\-\+]/g, '')
-    : (OWNER_PHONE || null);
+  const notifyPhone = reportRecipientPhone(property);
   const ownerName = await resolveOwnerName(property);
   const reportWithOwner = { ...report, ownerName };
   const templateParams = weeklyRecapTemplateParams(reportWithOwner);
-  const payload = { ...reportWithOwner, template: WEEKLY_RECAP_TEMPLATE, notifyPhone, templateParams };
+  const payload = { ...reportWithOwner, template: weeklyRecapTemplateName(), notifyPhone, templateParams };
   logToAxiom('info', 'weekly_recap_payload', payload);
 
   const recipient = resolveSendRecipient(notifyPhone, 'weekly_recap', { propertyId: property.id });
   if (!recipient) {
     throw new Error('sendWeeklyRecap: no recipient phone available — property has no Notify Phone and OWNER_PHONE fallback is unset');
   }
-  await sendWhatsAppTemplate(recipient, WEEKLY_RECAP_TEMPLATE, templateParams, { site: 'weekly_recap', propertyId: property.id });
+  await sendWhatsAppTemplate(recipient, weeklyRecapTemplateName(), templateParams, { site: 'weekly_recap', propertyId: property.id });
   return payload;
 }
 
@@ -6967,10 +7065,13 @@ async function runWeeklyRecap(opts = {}) {
     upcomingEndMs: periodEndMs + 7 * DAY_MS
   };
 
-  const properties = await airtableGet('WS_Properties', '');
-  const allRooms = await airtableGet('WS_Rooms', orFormula('Status', BOOKABLE_ROOM_STATUSES));
-  const allBookings = await airtableGet('WS_Bookings', orFormula('Status', BLOCKING_BOOKING_STATUSES.concat(['Checked Out'])));
-  const allGuests = await airtableGet('WS_Guests', '');
+  // Four independent table reads, run together — same as runMonthlyReport.
+  const [properties, allRooms, allBookings, allGuests] = await Promise.all([
+    airtableGet('WS_Properties', ''),
+    airtableGet('WS_Rooms', orFormula('Status', BOOKABLE_ROOM_STATUSES)),
+    airtableGet('WS_Bookings', orFormula('Status', BLOCKING_BOOKING_STATUSES.concat(['Checked Out']))),
+    airtableGet('WS_Guests', '')
+  ]);
   const guestsById = new Map(allGuests.map(g => [g.id, g.fields['Guest Name'] || null]));
 
   const sent = [];
@@ -7184,6 +7285,7 @@ async function handleMessage(from, messageText, phoneNumberId, wamid) {
     await sendWhatsApp(phone, msg('numberNotConfigured'));
     return;
   }
+  noteNotifyPhones(property);
   // Best-effort, non-blocking — see bumpPropertyActivity's own comment.
   await bumpPropertyActivity(property.id, 'Last Message Received');
 
@@ -7224,7 +7326,7 @@ async function handleMessage(from, messageText, phoneNumberId, wamid) {
     // only on the rare message that is literally "stop", not on every inbound
     // message.
     const isCleanerNumber = (await airtableGet('WS_Cleaners', `{Phone Number} = '${phone}'`)).length > 0;
-    const isOwnerNumber = OWNER_PHONE && phone === formatPhone(OWNER_PHONE);
+    const isOwnerNumber = isOwnerSideNumber(phone, property);
     const isStaffNumber = isCleanerNumber || isOwnerNumber || (await activeWalkinRoleForPhone(phone)) !== null;
     if (isStaffNumber) {
       logToAxiom('info', 'stop_ignored_staff_number', { phone });
@@ -7377,7 +7479,7 @@ async function handleMessage(from, messageText, phoneNumberId, wamid) {
   // both branches merge together (ordering dependency noted in the PR).
   if (!guest) {
     const isCleaner = (await airtableGet('WS_Cleaners', `{Phone Number} = '${phone}'`)).length > 0;
-    const isOwner = OWNER_PHONE && phone === formatPhone(OWNER_PHONE);
+    const isOwner = isOwnerSideNumber(phone, property);
     // B7: a staff seat is not a guest. Without this, the first WALKIN ever sent
     // from a reception handset answers with a POPIA notice about that person's
     // own data — same category error the cleaner and owner exclusions above
@@ -7634,6 +7736,9 @@ module.exports.holdExpiryIso = holdExpiryIso;
 module.exports.orderFreeRooms = orderFreeRooms;
 module.exports.wabistayFlagState = wabistayFlagState;
 module.exports.otherSwitchState = otherSwitchState;
+module.exports.operationalAlertPhone = operationalAlertPhone;
+module.exports.reportRecipientPhone = reportRecipientPhone;
+module.exports.isOwnerSideNumber = isOwnerSideNumber;
 module.exports.sanitizeTemplateParam = sanitizeTemplateParam;
 module.exports.bumpPropertyActivity = bumpPropertyActivity;
 module.exports.dormantProperties = dormantProperties;

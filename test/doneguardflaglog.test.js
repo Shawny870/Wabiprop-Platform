@@ -114,9 +114,9 @@ test('wabistayFlagState: every known flag is listed, unset ones read "off"', () 
   const wh = freshWebhook();
   const flags = wh.wabistayFlagState();
   assert.deepStrictEqual(Object.keys(flags), [
-    'WABISTAY_CLEANER_DISPATCH_TEMPLATE', 'WABISTAY_CLEANER_GATE_TEMPLATE', 'WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_GATE_ARRIVAL_TEMPLATE', 'WABISTAY_GUEST_ESCALATION_TEMPLATE',
-    'WABISTAY_HOLD_RELEASE', 'WABISTAY_OPS_ALERT_TEMPLATE', 'WABISTAY_OVERDUE_ALERT_TEMPLATE',
-    'WABISTAY_RECEPTION_PAYMENT_TEMPLATE', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD'
+    'WABISTAY_CLEANER_DISPATCH_TEMPLATE', 'WABISTAY_CLEANER_GATE_TEMPLATE', 'WABISTAY_DAILY_SUMMARY_TEMPLATE', 'WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_GATE_ARRIVAL_TEMPLATE', 'WABISTAY_GUEST_ESCALATION_TEMPLATE',
+    'WABISTAY_HOLD_RELEASE', 'WABISTAY_MONTHLY_REPORT_TEMPLATE', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_OPS_ALERT_TEMPLATE', 'WABISTAY_OVERDUE_ALERT_TEMPLATE', 'WABISTAY_OWNER_SUMMARY_TEMPLATE',
+    'WABISTAY_RECEPTION_PAYMENT_TEMPLATE', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD', 'WABISTAY_WEEKLY_RECAP_TEMPLATE'
   ]);
   assert.ok(Object.values(flags).every(v => v === 'off'));
 });
@@ -173,7 +173,7 @@ test('otherSwitchState: REPORT_TEST_MODE_PHONE and OWNER_PHONE are set/unset onl
   delete process.env.WA_TEMPLATE_LANGUAGE;
   let wh = freshWebhook();
   assert.deepStrictEqual(wh.otherSwitchState(), {
-    REPORT_TEST_MODE_PHONE: 'unset', OWNER_PHONE: 'unset',
+    REPORT_TEST_MODE_PHONE: 'unset', OWNER_PHONE: 'unset', ownerPhoneLast4: null, notifyPhoneLast4: null,
     WA_TEMPLATE_LANGUAGE: 'en', WA_TEMPLATE_LANGUAGE_source: 'default'
   });
 
@@ -182,7 +182,7 @@ test('otherSwitchState: REPORT_TEST_MODE_PHONE and OWNER_PHONE are set/unset onl
   process.env.WA_TEMPLATE_LANGUAGE = 'en_US';
   wh = freshWebhook();
   assert.deepStrictEqual(wh.otherSwitchState(), {
-    REPORT_TEST_MODE_PHONE: 'set', OWNER_PHONE: 'set',
+    REPORT_TEST_MODE_PHONE: 'set', OWNER_PHONE: 'set', ownerPhoneLast4: '0111', notifyPhoneLast4: null,
     WA_TEMPLATE_LANGUAGE: 'en_US', WA_TEMPLATE_LANGUAGE_source: 'env'
   });
 });
@@ -206,7 +206,8 @@ test('the logged event carries the language value but neither phone number, in A
 
   const event = events(ctx, 'wabistay_flags')[0];
   assert.deepStrictEqual(event.others, {
-    REPORT_TEST_MODE_PHONE: 'set', OWNER_PHONE: 'set', WA_TEMPLATE_LANGUAGE: 'en_US', WA_TEMPLATE_LANGUAGE_source: 'env'
+    REPORT_TEST_MODE_PHONE: 'set', OWNER_PHONE: 'set', ownerPhoneLast4: '0111', notifyPhoneLast4: null,
+    WA_TEMPLATE_LANGUAGE: 'en_US', WA_TEMPLATE_LANGUAGE_source: 'env'
   });
   const everything = JSON.stringify(ctx.axiom) + logged.filter(l => l.startsWith('[WABISTAY FLAGS]')).join('\n');
   assert.ok(!everything.includes('27999000111'), 'OWNER_PHONE value must not be logged');
