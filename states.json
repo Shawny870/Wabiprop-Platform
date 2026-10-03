@@ -155,6 +155,7 @@
     "checkoutUsage": "Checkout format:\n\n*CHECKOUT ROOM 2*\n\nRoom number only — this frees the room and starts cleaning. Record payment separately with *PAID ROOM*.",
     "checkoutCommandConfirmed": "✅ {roomName} checked out\n\n*Ref:* {bookingRef}\n\n{roomName} is now marked for cleaning.",
     "paidUsage": "Payment format:\n\n*PAID ROOM 2 500*\n\nRoom, then the amount received. Add CASH, EFT or CARD at the end if it wasn't cash.\n\nConfirming a card/EFT booking before check-in? Use the reference instead:\n\n*PAID REF AB3D 500*",
+    "paidUsageWithBookingRef": "Payment format:\n\n*PAID ROOM 2 500*\n\nRoom, then the amount received. Add CASH, EFT or CARD at the end if it wasn't cash.\n\nConfirming a booking before check-in? Use its reference instead:\n\n*PAID REF WS-ABC123 500*\n\n(or the 4-character payment reference: *PAID REF AB3D 500*)",
     "paidNoSuchRoom": "No room matching \"{roomToken}\" at this property.\n\nUse the room number, like *PAID ROOM 2 500*",
     "paidNoBooking": "No booking found for {roomName} to record a payment against.",
     "paidNotConfigured": "Your staff profile isn't linked to a property yet, so a payment can't be recorded. Please contact the owner.",

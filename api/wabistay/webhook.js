@@ -385,6 +385,7 @@ const WABISTAY_KNOWN_FLAGS = [
   'WABISTAY_NOTIFY_ROUTING',
   'WABISTAY_OPS_ALERT_TEMPLATE',
   'WABISTAY_OVERDUE_ALERT_TEMPLATE',
+  'WABISTAY_PAID_BY_BOOKING_REF',
   'WABISTAY_OWNER_SUMMARY_TEMPLATE',
   'WABISTAY_RECEPTION_PAYMENT_TEMPLATE',
   'WABISTAY_ROOM_ORDER',
@@ -394,7 +395,7 @@ const WABISTAY_KNOWN_FLAGS = [
 
 // Switches the code only treats as on for 1/true; for these, 'on' means that,
 // not merely 'set'.
-const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_HIDE_ONE_HOUR', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD'];
+const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_HIDE_ONE_HOUR', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_PAID_BY_BOOKING_REF', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD'];
 
 function wabistayFlagState() {
   const names = new Set([...WABISTAY_KNOWN_FLAGS, ...Object.keys(process.env).filter(k => k.startsWith('WABISTAY_'))]);
@@ -1905,6 +1906,17 @@ const PAID_BODY = /^room\s*([a-z0-9]{1,4})\s+r?\s*(\d+(?:[.,]\d{1,2})?)\s*(cash|
 // command-syntax asks, since staff need to memorise this alongside PAID ROOM.
 const PAID_REF_BODY = /^ref\s*([a-z0-9]{4})\s+r?\s*(\d+(?:[.,]\d{1,2})?)\s*(cash|eft|card)?\.?$/i;
 const PAID_METHODS = { cash: 'Cash', eft: 'EFT', card: 'Card' };
+
+// WABISTAY_PAID_BY_BOOKING_REF (1 or true; off by default): PAID REF also accepts the
+// booking reference the guest was given ("WS-KEGGQF"), not only the 4-character
+// payment reference. This is what lets reception record a payment before check-in for
+// a booking that has no payment reference at all (card: only the EFT choice generates
+// one) — PAID ROOM cannot, it only matches Checked In / Checked Out bookings.
+// Same amount rule as every other PAID form: it must equal Amount Due exactly.
+const PAID_BOOKING_REF_BODY = /^ref\s*ws-?([a-z0-9]{6})\s+r?\s*(\d+(?:[.,]\d{1,2})?)\s*(cash|eft|card)?\.?$/i;
+function paidByBookingRefEnabled() {
+  return /^(1|true)$/i.test(String(process.env.WABISTAY_PAID_BY_BOOKING_REF || '').trim());
+}
 // Excludes O, 0, I, 1, L (payment build spec, CEO 2026-09-29) — visually
 // confusable characters a guest reading the reference off a phone screen,
 // or reception typing it back, could misread.
@@ -1915,6 +1927,17 @@ function parsePaidCommand(text) {
   if (!PAID_KEYWORD.test(t)) return null;
 
   const body = t.replace(PAID_KEYWORD, '').trim();
+
+  if (paidByBookingRefEnabled()) {
+    const bookingRefMatch = body.match(PAID_BOOKING_REF_BODY);
+    if (bookingRefMatch) {
+      const amount = Number(String(bookingRefMatch[2]).replace(',', '.'));
+      if (!Number.isFinite(amount) || amount <= 0) return { ok: false, reason: 'bad_amount' };
+      const method = bookingRefMatch[3] ? PAID_METHODS[bookingRefMatch[3].toLowerCase()] : null;
+      // Normalised to the stored form, "WS-" + six uppercase characters.
+      return { ok: true, refToken: 'WS-' + bookingRefMatch[1].toUpperCase(), refKind: 'booking', amount, method };
+    }
+  }
 
   const refMatch = body.match(PAID_REF_BODY);
   if (refMatch) {
@@ -3248,7 +3271,7 @@ const actions = {
 
     if (!parsed.ok) {
       logToAxiom('info', 'paid_rejected', { phone: ctx.phone, reason: parsed.reason });
-      await sendWhatsApp(ctx.phone, msg('paidUsage'));
+      await sendWhatsApp(ctx.phone, msg(paidByBookingRefEnabled() ? 'paidUsageWithBookingRef' : 'paidUsage'));
       return;
     }
 
@@ -3281,8 +3304,14 @@ const actions = {
       // room by this point; overnight becomes Confirmed once ETA is given)
       // — so it is matched by the booking's own {Payment Reference} across
       // both pre-check-in statuses instead of by room or a single status.
-      const preCheckin = await airtableGet('WS_Bookings', orFormula('Status', ['Enquiry', 'Confirmed']));
-      booking = preCheckin.find(b => String(b.fields['Payment Reference'] || '').toUpperCase() === parsed.refToken) || null;
+      // A booking reference is unique to one booking, so it may also name a stay
+      // that has already checked in or out; the 4-character payment reference only
+      // ever identifies a pre-check-in booking.
+      const byBookingRef = parsed.refKind === 'booking';
+      const preCheckin = await airtableGet('WS_Bookings', orFormula('Status', byBookingRef
+        ? ['Enquiry', 'Confirmed', 'Checked In', 'Checked Out']
+        : ['Enquiry', 'Confirmed']));
+      booking = preCheckin.find(b => String(b.fields[byBookingRef ? 'Booking Ref' : 'Payment Reference'] || '').toUpperCase() === parsed.refToken) || null;
       if (!booking) {
         logToAxiom('info', 'paid_rejected', { phone: ctx.phone, reason: 'no_booking_for_reference', refToken: parsed.refToken });
         await sendWhatsApp(ctx.phone, msg('paidNoBooking', { roomName: `reference ${parsed.refToken}` }));
