@@ -99,6 +99,13 @@ function cleanerGateTemplate() {
 // Params are positional and fixed by the approved template: {{1}} cleaner name,
 // {{2}} room name. No buttons: the router only understands typed text, and the
 // cleaner answers by typing DONE.
+// New-booking alert to the property's operational recipient (overnight and hourly).
+// Same contract as the getters around it: read at CALL time, unset = the free-form
+// message exactly as before. Set only once Meta has approved wabistay_new_booking.
+function newBookingTemplate() {
+  return process.env.WABISTAY_NEW_BOOKING_TEMPLATE || null;
+}
+
 function cleanerDispatchTemplate() {
   return process.env.WABISTAY_CLEANER_DISPATCH_TEMPLATE || null;
 }
@@ -374,6 +381,7 @@ const WABISTAY_KNOWN_FLAGS = [
   'WABISTAY_HIDE_ONE_HOUR',
   'WABISTAY_HOLD_RELEASE',
   'WABISTAY_MONTHLY_REPORT_TEMPLATE',
+  'WABISTAY_NEW_BOOKING_TEMPLATE',
   'WABISTAY_NOTIFY_ROUTING',
   'WABISTAY_OPS_ALERT_TEMPLATE',
   'WABISTAY_OVERDUE_ALERT_TEMPLATE',
@@ -800,6 +808,64 @@ async function alertUnpaidGateArrival(ctx, booking, heldRoomId, notifyPhone) {
 function formatAmount(value) {
   const n = Number(value);
   return Number.isFinite(n) ? n.toFixed(2) : '0.00';
+}
+
+// ─── NEW-BOOKING ALERT (WABISTAY_NEW_BOOKING_TEMPLATE) ──────────────────────
+// Template wabistay_new_booking, language en, body:
+//   "The stay is {{5}}. The guest is arriving {{6}}. The amount due is {{7}}."
+// {{1}} property name · {{2}} guest name · {{3}} guest phone · {{4}} booking ref ·
+// {{5}} stay description · {{6}} arrival text · {{7}} amount due.
+//
+// ALL SEVEN values are built here, for both booking types, so a change to what a
+// stay is called (Doc 2's 2 Hours / 3 Hours / Day / Night) or how arrival is
+// phrased is a change to this one function.
+//   · {{5}} is lowercase, sentence-ready: "overnight until 27 June", "2 hours".
+//   · {{6}} is "3 Oct at 2:00pm" (SAST), the same text the hourly guest copy uses.
+//   · {{7}} is "R250", or "to be confirmed" when there is no price to quote (an
+//     overnight booking the owner will finalise). Never blank: Meta rejects an
+//     empty parameter.
+// MONTH_FULL_NAMES is the module-level constant further down; read at call time.
+function formatSastDayMonth(iso) {
+  const d = new Date(Date.parse(iso) + SAST_OFFSET_MS);
+  return `${d.getUTCDate()} ${MONTH_FULL_NAMES[d.getUTCMonth()]}`;
+}
+function newBookingAmountText(amount) {
+  const n = Number(amount);
+  if (amount === null || amount === undefined || amount === '' || !Number.isFinite(n) || n <= 0) return 'to be confirmed';
+  return Number.isInteger(n) ? `R${n}` : `R${n.toFixed(2)}`;
+}
+function newBookingTemplateParams({ propertyName, guestName, guestPhone, bookingRef, bookingType, checkInIso, checkOutIso, hours, amount }) {
+  const stay = bookingType === 'Hourly'
+    ? durationText(hours)
+    : `overnight until ${formatSastDayMonth(checkOutIso)}`;
+  return [
+    propertyName || 'the property',
+    guestName || 'the guest',
+    guestPhone,
+    bookingRef,
+    stay,
+    formatSastDateTime(checkInIso),
+    newBookingAmountText(amount)
+  ];
+}
+
+// Template when WABISTAY_NEW_BOOKING_TEMPLATE is set; if Meta rejects it at once
+// (not approved yet, wrong name or language) that is logged and the free-form
+// message is tried once, so a template problem never costs the owner the alert.
+// Unset = the free-form message exactly as before. A rejection that only shows up
+// later in a delivery-status callback cannot be fallen back from. Returns the same
+// shape the free-form send does ({ error } on failure) so existing callers'
+// failure logging is unchanged.
+async function sendNewBookingAlert(to, params, freeForm, correlation = {}) {
+  const templateName = newBookingTemplate();
+  if (templateName) {
+    const result = await sendWhatsAppTemplate(to, templateName, params, { site: 'new_booking_alert', ...correlation });
+    if (result.ok) return { via: 'template' };
+    logToAxiom('error', 'new_booking_template_failed', {
+      ...correlation, to, template: templateName, error: JSON.stringify(result.error || null)
+    });
+  }
+  return sendWhatsApp(to, msg(freeForm.key, freeForm.vars));
 }
 
 // ─── WHATSAPP HELPER ────────────────────────────────────────────────────────
@@ -3966,6 +4032,7 @@ const actions = {
     // exists either way, so the guest stays in AWAITING_ETA and the owner
     // finalises price manually, same as the zero/ambiguous-rate case.
     let priced = false;
+    let quotedAmount = null; // what the owner alert reports; null = to be confirmed
 
     if (!rate) {
       // Zero configured, or more than one active Per Night rate for this
@@ -3988,6 +4055,7 @@ const actions = {
         });
       } else {
         priced = true;
+        quotedAmount = rate.fields['Amount'];
       }
     }
 
@@ -4011,9 +4079,13 @@ const actions = {
       // Rule 30 step 2, slice 2: checked but non-fatal — courtesy notification,
       // the guest already got their own quote/contact-owner reply independent
       // of this.
-      const ownerSend = await sendWhatsApp(newBookingTo, msg('ownerNewBooking', {
-        guestName, phone: ctx.phone, bookingRef, checkIn, checkOut: checkOut || 'TBC'
-      }));
+      const ownerSend = await sendNewBookingAlert(newBookingTo, newBookingTemplateParams({
+        propertyName: ctx.property.fields['Property Name'], guestName, guestPhone: ctx.phone, bookingRef,
+        bookingType: 'Overnight', checkInIso, checkOutIso, amount: quotedAmount
+      }), {
+        key: 'ownerNewBooking',
+        vars: { guestName, phone: ctx.phone, bookingRef, checkIn, checkOut: checkOut || 'TBC' }
+      }, { bookingId: booking.id });
       if (ownerSend && ownerSend.error) {
         logToAxiom('error', 'owner_new_booking_notify_failed', {
           bookingId: booking.id, error: JSON.stringify(ownerSend.error)
@@ -4377,7 +4449,13 @@ const actions = {
       logOwnerSendWindow('hourly_new_booking', hourlyBookingTo, ctx.phone); // B17 instrumentation
       // Rule 30 step 2, slice 2: checked but non-fatal, same shape as
       // collectDetails' equivalent owner notify.
-      const ownerSend = await sendWhatsApp(hourlyBookingTo, msg('hourlyOwnerNewBooking', { ...view, phone: ctx.phone }));
+      const ownerSend = await sendNewBookingAlert(hourlyBookingTo, newBookingTemplateParams({
+        propertyName: ctx.property.fields['Property Name'], guestName, guestPhone: ctx.phone, bookingRef,
+        bookingType: 'Hourly', checkInIso, checkOutIso, hours: choice, amount
+      }), {
+        key: 'hourlyOwnerNewBooking',
+        vars: { ...view, phone: ctx.phone }
+      }, { bookingId: pending.id });
       if (ownerSend && ownerSend.error) {
         logToAxiom('error', 'owner_hourly_booking_notify_failed', {
           bookingId: pending.id, error: JSON.stringify(ownerSend.error)
@@ -7776,6 +7854,7 @@ module.exports.holdExpiryIso = holdExpiryIso;
 module.exports.orderFreeRooms = orderFreeRooms;
 module.exports.wabistayFlagState = wabistayFlagState;
 module.exports.otherSwitchState = otherSwitchState;
+module.exports.newBookingTemplateParams = newBookingTemplateParams;
 module.exports.operationalAlertPhone = operationalAlertPhone;
 module.exports.reportRecipientPhone = reportRecipientPhone;
 module.exports.isOwnerSideNumber = isOwnerSideNumber;
