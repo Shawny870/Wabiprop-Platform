@@ -371,6 +371,7 @@ const WABISTAY_KNOWN_FLAGS = [
   'WABISTAY_GATE_ARRIVAL_TEMPLATE',
   'WABISTAY_GUEST_ESCALATION_TEMPLATE',
   'WABISTAY_DAILY_SUMMARY_TEMPLATE',
+  'WABISTAY_HIDE_ONE_HOUR',
   'WABISTAY_HOLD_RELEASE',
   'WABISTAY_MONTHLY_REPORT_TEMPLATE',
   'WABISTAY_NOTIFY_ROUTING',
@@ -385,7 +386,7 @@ const WABISTAY_KNOWN_FLAGS = [
 
 // Switches the code only treats as on for 1/true; for these, 'on' means that,
 // not merely 'set'.
-const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD'];
+const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_HIDE_ONE_HOUR', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD'];
 
 function wabistayFlagState() {
   const names = new Set([...WABISTAY_KNOWN_FLAGS, ...Object.keys(process.env).filter(k => k.startsWith('WABISTAY_'))]);
@@ -1576,15 +1577,42 @@ const HOURLY_RATE_FIELDS = {
 // short stays, and must never quote R0 or fall through to a free booking. The
 // whole feature is switched off for that property and the guest is routed to the
 // overnight flow instead — the same redirect the >3hr case uses.
-function hourlyRates(property) {
+function hourlyRatesFor(property, durations) {
   const rates = {};
-  for (const hours of HOURLY_DURATIONS) {
+  for (const hours of durations) {
     const raw = property.fields[HOURLY_RATE_FIELDS[hours]];
     const amount = Number(raw);
     if (raw === undefined || raw === null || raw === '' || !Number.isFinite(amount) || amount <= 0) return null;
     rates[hours] = amount;
   }
   return rates;
+}
+function hourlyRates(property) {
+  return hourlyRatesFor(property, HOURLY_DURATIONS);
+}
+
+// WABISTAY_HIDE_ONE_HOUR (1 or true; off by default): the guest-facing short-stay
+// flow stops offering the 1-hour option. Only 2 and 3 hours are listed, prompted
+// for and accepted; a reply of 1 repeats the prompt and books nothing. The 1hr
+// rate in Airtable is left alone and is simply not read by the guest flow — it is
+// NOT blanked, because hourlyRates() fails closed on any blank rate. Staff
+// walk-ins (WALKIN ... 1HRS) and the +1 hour extension charge still use the 1hr
+// rate, so keep it populated.
+function hideOneHourEnabled() {
+  return /^(1|true)$/i.test(String(process.env.WABISTAY_HIDE_ONE_HOUR || '').trim());
+}
+function offeredHourlyDurations() {
+  return hideOneHourEnabled() ? HOURLY_DURATIONS.filter(h => h !== 1) : HOURLY_DURATIONS;
+}
+// The rates the guest flow reads: every offered duration must be configured
+// (fail closed), the hidden one is not looked at.
+function guestHourlyRates(property) {
+  return hourlyRatesFor(property, offeredHourlyDurations());
+}
+// "1 - 1 hour (R120)\n2 - 2 hours (R250)\n3 - 3 hours (R300)", or just the 2 and 3
+// lines when 1 hour is hidden. The reply key is the hour value either way.
+function hourlyDurationLines(rates) {
+  return offeredHourlyDurations().map(h => `${h} - ${h === 1 ? '1 hour' : h + ' hours'} (R${rates[h]})`).join('\n');
 }
 
 // Bare hours 1–11 are genuinely ambiguous ("9" could be morning or night) and
@@ -3655,7 +3683,7 @@ const actions = {
     const MULTI_DAY_CHOICES = ['2', 'multiple days', 'multi-day', 'multiday', 'overnight'];
 
     if (SHORT_STAY_CHOICES.includes(ctx.text)) {
-      const rates = hourlyRates(ctx.property);
+      const rates = guestHourlyRates(ctx.property);
       if (!rates) {
         // Same fail-closed posture as startHourly's own equivalent branch —
         // property has not configured short stays. Route to the overnight
@@ -3669,7 +3697,7 @@ const actions = {
       }
 
       await updateGuestState(ctx.guest.id, { 'Session State': 'AWAITING_HOURLY_DETAILS', 'Last Inbound At': new Date().toISOString() });
-      const hourlyRateText = HOURLY_DURATIONS
+      const hourlyRateText = offeredHourlyDurations()
         .map(hours => `• ${hours} hour${hours === 1 ? '' : 's'}: R${rates[hours]}`)
         .join('\n');
       await sendWhatsApp(ctx.phone, msg('hourlyRatesMenu', {
@@ -4009,7 +4037,7 @@ const actions = {
   // greeting that advertises HOURLY is itself what moves the guest out of NEW,
   // so almost every real guest types it from AWAITING_DETAILS.
   async startHourly(ctx) {
-    const rates = hourlyRates(ctx.property);
+    const rates = guestHourlyRates(ctx.property);
     if (!rates) {
       // Property has not configured short stays — fail closed, never quote R0.
       logToAxiom('info', 'hourly_not_configured', { phone: ctx.phone, propertyId: ctx.property.id });
@@ -4111,7 +4139,7 @@ const actions = {
     }
     const checkInIso = sastToUtcIso(arrivalDate, arrival.hour, arrival.minute);
 
-    const rates = hourlyRates(ctx.property);
+    const rates = guestHourlyRates(ctx.property);
     if (!rates) {
       // Rates removed mid-conversation — same fail-closed redirect as entry.
       await updateGuestState(ctx.guest.id, { 'Session State': 'AWAITING_DETAILS', 'Last Inbound At': new Date().toISOString() });
@@ -4165,7 +4193,7 @@ const actions = {
     await sendWhatsApp(ctx.phone, msg('hourlyDurationMenu', {
       guestName,
       arrivalText: formatSastDateTime(checkInIso),
-      rate1: rates[1], rate2: rates[2], rate3: rates[3]
+      durationLines: hourlyDurationLines(rates)
     }));
   },
 
@@ -4173,7 +4201,7 @@ const actions = {
   async selectHourlyDuration(ctx) {
     const choice = Number(ctx.text.replace(/\s*(hours?|hrs?)\s*$/, '').trim());
     const pending = await findPendingHourlyBooking(ctx.guest.id);
-    const rates = hourlyRates(ctx.property);
+    const rates = guestHourlyRates(ctx.property);
 
     if (choice > 3 && Number.isInteger(choice)) {
       // Locked decision: >3hr is an overnight stay, not an error and not a
@@ -4200,9 +4228,14 @@ const actions = {
     }
 
     const checkInIso = pending && pending.fields['Check In'];
-    if (!Number.isInteger(choice) || choice < 1 || !checkInIso || !rates) {
+    if (!Number.isInteger(choice) || choice < 1 || !offeredHourlyDurations().includes(choice) || !checkInIso || !rates) {
       // Unreadable choice, or the flow lost its footing (no pending booking,
-      // rates pulled mid-conversation). Re-offer rather than dead-end.
+      // rates pulled mid-conversation), or a duration that is not on offer
+      // (1 hour while WABISTAY_HIDE_ONE_HOUR is on). Re-offer rather than dead-end;
+      // nothing is booked.
+      if (choice === 1 && hideOneHourEnabled()) {
+        logToAxiom('info', 'hourly_one_hour_hidden_reply', { phone: ctx.phone });
+      }
       if (!checkInIso || !rates) {
         await updateGuestState(ctx.guest.id, { 'Session State': 'AWAITING_DETAILS', 'Last Inbound At': new Date().toISOString() });
         await sendWhatsApp(ctx.phone, msg('hourlyUnavailable', { propertyName: ctx.property.fields['Property Name'] }));
@@ -4211,7 +4244,7 @@ const actions = {
       await sendWhatsApp(ctx.phone, msg('hourlyDurationMenu', {
         guestName: ctx.guest.fields['Guest Name'],
         arrivalText: formatSastDateTime(checkInIso),
-        rate1: rates[1], rate2: rates[2], rate3: rates[3]
+        durationLines: hourlyDurationLines(rates)
       }));
       return;
     }
