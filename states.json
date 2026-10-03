@@ -108,6 +108,7 @@
     "noRoomSpeakToReception": "Please speak to reception on {redirectPhone} to check what is available.",
     "noRoomSpeakToReceptionNoPhone": "Please speak to reception to check what is available.",
     "gateNotifyUnpaid": "A guest has arrived at the gate and has not paid yet. Name: {guestName}. Phone: {guestPhone}. Booking: {ref}. Amount due: R{amountDue}. No room has been assigned. Please take payment at reception first.",
+    "gateNotifyUnpaidRoomHeld": "A guest has arrived at the gate and has not paid yet. Name: {guestName}. Phone: {guestPhone}. Booking: {ref}. Amount due: R{amountDue}. {roomName} is held for them. Please take payment at reception first.",
     "stateWriteFailed": "Sorry, something went wrong on our side. Please speak to reception on {redirectPhone} and they will help you straight away.",
     "gateCooldownMenu": "Just checked you in — give it a minute before checking out. Reply 1 again in a bit if you still need to leave.",
     "checkedInMenu": "Hi {guestName}! You're checked in. 🛏️\n\nReply with a number:\n1 - Check out",
