@@ -64,6 +64,7 @@ const templateSends = ctx => ctx.sends.filter(s => s.type === 'template');
 const textsTo = (ctx, to) => ctx.sends.filter(s => s.type === 'text' && s.to === to).map(s => s.body);
 const events = (ctx, name) => ctx.axiom.filter(e => e.event === name);
 
+const OWNER_COPY_HELD = 'A guest has arrived at the gate and has not paid yet. Name: Jane Doe. Phone: 27821234567. Booking: WS-ABC123. Amount due: R250. Room 01 is held for them. Please take payment at reception first.';
 const OWNER_COPY = 'A guest has arrived at the gate and has not paid yet. Name: Jane Doe. Phone: 27821234567. Booking: WS-ABC123. Amount due: R250. No room has been assigned. Please take payment at reception first.';
 
 function on() {
@@ -83,8 +84,41 @@ test('flag ON, unpaid, booking holds a room: Reception gets the template with th
   assert.strictEqual(t.length, 1);
   assert.strictEqual(t[0].to, RECEPTION_PHONE);
   assert.strictEqual(t[0].template, TEMPLATE);
-  assert.deepStrictEqual(t[0].params, ['Canary Street Guest Rooms', 'Jane Doe', 'Room 01', 'Cleaning', GUEST_PHONE]);
+  assert.deepStrictEqual(t[0].params, ['Canary Street Guest Rooms', 'Jane Doe', 'Room 01', 'Cleaning, payment not confirmed', GUEST_PHONE]);
+  assert.deepStrictEqual(textsTo(ctx, NOTIFY_PHONE), [OWNER_COPY_HELD]);
+});
+
+test('flag ON, unpaid, room held, status Available (the 3 Oct case): template carries "Available, payment not confirmed"; owner copy names the room and no longer says none is assigned', async () => {
+  on();
+  const ctx = start({
+    booking: { Room: ['recR1'] },
+    rooms: [{ id: 'recR1', fields: { 'Room Name': 'Room 01', 'Room Number': 1, 'Status': 'Available', 'Property': ['recP1'], 'Active': true } }]
+  });
+  await tap();
+  assert.deepStrictEqual(templateSends(ctx)[0].params, ['Canary Street Guest Rooms', 'Jane Doe', 'Room 01', 'Available, payment not confirmed', GUEST_PHONE]);
+  const owner = textsTo(ctx, NOTIFY_PHONE);
+  assert.deepStrictEqual(owner, [OWNER_COPY_HELD]);
+  assert.ok(!/No room has been assigned/.test(owner[0]));
+});
+
+test('flag ON, unpaid, no room held: owner copy is unchanged ("No room has been assigned")', async () => {
+  on();
+  const ctx = start();
+  await tap();
   assert.deepStrictEqual(textsTo(ctx, NOTIFY_PHONE), [OWNER_COPY]);
+});
+
+test('Reception seat and Notify Phone are the same number: both messages still go (template AND owner copy)', async () => {
+  on();
+  const ctx = start({
+    booking: { Room: ['recR1'] },
+    roles: [{ id: 'recRecep', fields: { 'Role Label': 'Reception', 'Role Type': 'Reception', 'Property': ['recP1'], 'Current Phone': NOTIFY_PHONE, 'Active': true } }]
+  });
+  await tap();
+  const t = templateSends(ctx);
+  assert.strictEqual(t.length, 1);
+  assert.strictEqual(t[0].to, NOTIFY_PHONE);
+  assert.deepStrictEqual(textsTo(ctx, NOTIFY_PHONE), [OWNER_COPY_HELD], 'the duplicate free-form copy is kept');
 });
 
 test('flag ON, unpaid, no room held: room = "not assigned yet", status = "payment not confirmed"', async () => {

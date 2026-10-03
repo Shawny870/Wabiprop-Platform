@@ -739,11 +739,15 @@ async function alertUnpaidGateArrival(ctx, booking, heldRoomId, notifyPhone) {
     return;
   }
 
-  // The room the booking holds, if any: its real name and status. Otherwise the
-  // placeholders agreed for an unpaid guest with no room.
+  // The room the booking holds, if any: its real name, and its real status with
+  // ", payment not confirmed" appended (the approved template has no wording of its
+  // own for "unpaid", so the status param carries it). Otherwise the placeholders
+  // agreed for an unpaid guest with no room.
   const heldRoom = heldRoomId ? (await airtableGet('WS_Rooms', `RECORD_ID() = '${heldRoomId}'`))[0] || null : null;
   const roomName = heldRoom ? heldRoom.fields['Room Name'] : 'not assigned yet';
-  const roomStatus = heldRoom ? (heldRoom.fields['Status'] || 'Unknown') : 'payment not confirmed';
+  const roomStatus = heldRoom
+    ? `${heldRoom.fields['Status'] || 'Unknown'}, payment not confirmed`
+    : 'payment not confirmed';
 
   let anySent = false;
 
@@ -759,11 +763,14 @@ async function alertUnpaidGateArrival(ctx, booking, heldRoomId, notifyPhone) {
 
   if (notifyPhone) {
     logOwnerSendWindow('gate_arrival_unpaid', notifyPhone, ctx.phone);
-    const ownerSend = await sendWhatsApp(notifyPhone, msg('gateNotifyUnpaid', {
+    // A booking that holds a room says so: "No room has been assigned" was false
+    // for it. No held room keeps the original copy.
+    const ownerSend = await sendWhatsApp(notifyPhone, msg(heldRoom ? 'gateNotifyUnpaidRoomHeld' : 'gateNotifyUnpaid', {
       guestName: ctx.guest.fields['Guest Name'],
       guestPhone: ctx.phone,
       ref: booking.fields['Booking Ref'] || `WS-${booking.id.slice(-6).toUpperCase()}`,
-      amountDue: booking.fields['Amount Due']
+      amountDue: booking.fields['Amount Due'],
+      roomName
     }));
     if (ownerSend && ownerSend.error) {
       logToAxiom('error', 'gate_alert_unpaid_owner_send_failed', {
