@@ -7487,14 +7487,41 @@ function matchTransition(rows, text) {
 }
 
 // ─── MESSAGE DEDUPE (WABISTAY_MESSAGE_DEDUPE) ────────────────────────────────
-// Meta can deliver the same inbound message twice. With the flag on, the inbound
-// WhatsApp message id is written to the guest's 'Last Message Id' before any side
-// effect, and a message whose id equals the stored one is skipped. A sender with no
-// WS_Guests row cannot be checked (accepted). Fails OPEN: if the write fails the
-// message is processed and the failure is logged. Two deliveries racing each other
-// can both read the old id; that window is not closed here.
+// Meta can deliver the same inbound message twice ("these retries can result in
+// duplicate webhook notifications"). With the flag on, a message is skipped only when
+// its id already equals the guest's stored 'Last Message Id'. The id is written ONLY
+// AFTER the message has been handled — by the single wrapper around handleMessageInner
+// below, and only when handling returned without throwing. It must not be written
+// early: a crash or timeout after an early write makes Meta's retry look like a
+// duplicate, so the message is silently lost; written late, the retry is processed.
+// The cost of that choice: two deliveries that overlap while the first is still being
+// handled can both read the old id and both be processed (the window is the handling
+// time, bounded by the 10 s function limit), and a handler that dies half-way may have
+// already done some of its side effects before the retry runs it again.
+// A sender with no WS_Guests row cannot be checked (accepted). Fails OPEN: if the read
+// or the write fails the message is processed and the failure logged.
 function messageDedupeEnabled() {
   return /^(1|true)$/i.test(String(process.env.WABISTAY_MESSAGE_DEDUPE || '').trim());
+}
+async function recordHandledMessageId(phone, wamid, guestId) {
+  try {
+    const idWrite = await airtableUpdate('WS_Guests', guestId, { 'Last Message Id': wamid });
+    if (idWrite && idWrite.error) {
+      logToAxiom('error', 'message_dedupe_write_failed', { phone, wamid, guestId, error: JSON.stringify(idWrite.error) });
+    }
+  } catch (err) {
+    logToAxiom('error', 'message_dedupe_write_failed', { phone, wamid, guestId, message: err.message });
+  }
+}
+// The one wrapper. handleMessageInner does the work and, after reading the guest,
+// tells us who to stamp (dedupe.guestId) or that this is a duplicate (dedupe.skipped).
+// If the inner function throws, the throw propagates and nothing is written.
+async function handleMessage(from, messageText, phoneNumberId, wamid, interactive = null) {
+  const dedupe = { guestId: null, skipped: false };
+  await handleMessageInner(from, messageText, phoneNumberId, wamid, interactive, dedupe);
+  if (messageDedupeEnabled() && wamid && dedupe.guestId && !dedupe.skipped) {
+    await recordHandledMessageId(formatPhone(from), wamid, dedupe.guestId);
+  }
 }
 
 // ─── INTERACTIVE REPLIES (WABISTAY_INTERACTIVE) ──────────────────────────────
@@ -7591,7 +7618,7 @@ async function sendPaymentMethodMenu(ctx) {
   return sendTextMenu();
 }
 
-async function handleMessage(from, messageText, phoneNumberId, wamid, interactive = null) {
+async function handleMessageInner(from, messageText, phoneNumberId, wamid, interactive = null, dedupe = {}) {
   const phone = formatPhone(from);
   let text = messageText.trim().toLowerCase();
   console.log(`[handleMessage] from: ${phone} | text: ${text}`);
@@ -7616,21 +7643,15 @@ async function handleMessage(from, messageText, phoneNumberId, wamid, interactiv
   // Logged here rather than first thing so it can carry the step the guest was on
   // (the last step reached, for lost-enquiry reporting). A test phone is flagged,
   // not hidden: Axiom logging stays on for them.
-  // WABISTAY_MESSAGE_DEDUPE: before any side effect (bar the property activity stamp
-  // above, which is harmless to repeat).
+  // WABISTAY_MESSAGE_DEDUPE: skip only when this exact id is already stored. Nothing is
+  // written here: the wrapper stamps the id after this function returns successfully.
   if (messageDedupeEnabled() && wamid && guest) {
     if (guest.fields['Last Message Id'] === wamid) {
+      dedupe.skipped = true;
       logToAxiom('info', 'duplicate_message_skipped', { phone, wamid, guestId: guest.id, sessionState: sessionState || null });
       return;
     }
-    try {
-      const idWrite = await airtableUpdate('WS_Guests', guest.id, { 'Last Message Id': wamid });
-      if (idWrite && idWrite.error) {
-        logToAxiom('error', 'message_dedupe_write_failed', { phone, wamid, guestId: guest.id, error: JSON.stringify(idWrite.error) });
-      }
-    } catch (err) {
-      logToAxiom('error', 'message_dedupe_write_failed', { phone, wamid, guestId: guest.id, message: err.message });
-    }
+    dedupe.guestId = guest.id;
   }
 
   logToAxiom('info', 'message_received', {
