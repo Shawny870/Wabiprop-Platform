@@ -391,6 +391,7 @@ const WABISTAY_KNOWN_FLAGS = [
   'WABISTAY_OPS_ALERT_TEMPLATE',
   'WABISTAY_OVERDUE_ALERT_TEMPLATE',
   'WABISTAY_PAID_BY_BOOKING_REF',
+  'WABISTAY_PAID_ROOM_CONFIRMED',
   'WABISTAY_OWNER_SUMMARY_TEMPLATE',
   'WABISTAY_RECEPTION_PAYMENT_TEMPLATE',
   'WABISTAY_ROOM_ORDER',
@@ -400,7 +401,7 @@ const WABISTAY_KNOWN_FLAGS = [
 
 // Switches the code only treats as on for 1/true; for these, 'on' means that,
 // not merely 'set'.
-const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_GATE_ROOM_CHECK', 'WABISTAY_HIDE_ONE_HOUR', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_INTERACTIVE', 'WABISTAY_LEAN_COPY', 'WABISTAY_MESSAGE_DEDUPE', 'WABISTAY_NONTEXT_REPLY', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_PAID_BY_BOOKING_REF', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD'];
+const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_GATE_ROOM_CHECK', 'WABISTAY_HIDE_ONE_HOUR', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_INTERACTIVE', 'WABISTAY_LEAN_COPY', 'WABISTAY_MESSAGE_DEDUPE', 'WABISTAY_NONTEXT_REPLY', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_PAID_BY_BOOKING_REF', 'WABISTAY_PAID_ROOM_CONFIRMED', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD'];
 
 function wabistayFlagState() {
   const names = new Set([...WABISTAY_KNOWN_FLAGS, ...Object.keys(process.env).filter(k => k.startsWith('WABISTAY_'))]);
@@ -1988,6 +1989,51 @@ const PAID_METHODS = { cash: 'Cash', eft: 'EFT', card: 'Card' };
 // one) — PAID ROOM cannot, it only matches Checked In / Checked Out bookings.
 // Same amount rule as every other PAID form: it must equal Amount Due exactly.
 const PAID_BOOKING_REF_BODY = /^ref\s*ws-?([a-z0-9]{6})\s+r?\s*(\d+(?:[.,]\d{1,2})?)\s*(cash|eft|card)?\.?$/i;
+// WABISTAY_PAID_ROOM_CONFIRMED (1 or true; off by default): PAID ROOM n amount also matches a
+// CONFIRMED booking that holds that room, so reception can settle a booking at the desk before
+// it has checked in (card and EFT bookings alike) with the one command they already know.
+// Which booking a room number means is a RULE, because a room can carry several bookings at once
+// (an old settled stay, the guest in the room, tomorrow's arrival):
+//   1. Candidates: Checked Out, Checked In and Confirmed bookings on that room.
+//   2. UNPAID beats paid. A settled stay must never shadow an unsettled one (without this, last
+//      night's paid booking made PAID ROOM answer "already recorded" for tonight's guest). If
+//      nothing is unpaid, the same order below picks the one to report as already recorded.
+//   3. Order, unchanged for what existed before: Checked Out (latest check-out first), then
+//      Checked In, then Confirmed.
+//   4. Among Confirmed bookings, the NEAREST ARRIVAL wins ... unless another unpaid Confirmed
+//      booking on the room arrives on the same SAST day, which is ambiguous: nothing is recorded
+//      and reception is asked for the booking reference. (The amount must still equal that
+//      booking's Amount Due, which catches most wrong guesses on its own.)
+function paidRoomConfirmedEnabled() {
+  return /^(1|true)$/i.test(String(process.env.WABISTAY_PAID_ROOM_CONFIRMED || '').trim());
+}
+function pickBookingForPaidRoom(bookings, nowMs = Date.now()) {
+  if (bookings.length === 0) return { booking: null };
+  const unpaid = bookings.filter(b => b.fields['Payment Status'] !== 'Paid');
+  const pool = unpaid.length > 0 ? unpaid : bookings;
+  const closedOrOpen = pool
+    .filter(b => b.fields['Status'] === 'Checked Out' || b.fields['Status'] === 'Checked In')
+    .sort((a, b) => {
+      const rank = s => (s === 'Checked Out' ? 0 : 1);
+      const byStatus = rank(a.fields['Status']) - rank(b.fields['Status']);
+      if (byStatus !== 0) return byStatus;
+      return Date.parse(b.fields['Check Out'] || 0) - Date.parse(a.fields['Check Out'] || 0);
+    });
+  if (closedOrOpen.length > 0) return { booking: closedOrOpen[0] };
+  const confirmed = pool
+    .filter(b => b.fields['Status'] === 'Confirmed')
+    .sort((a, b) => {
+      const dist = x => { const t = Date.parse(x.fields['Check In']); return Number.isFinite(t) ? Math.abs(t - nowMs) : Infinity; };
+      return dist(a) - dist(b);
+    });
+  if (confirmed.length === 0) return { booking: null };
+  if (unpaid.length > 0 && confirmed.length > 1) {
+    const dayOf = b => { const t = Date.parse(b.fields['Check In']); return Number.isFinite(t) ? JSON.stringify(sastCalendarDate(new Date(t))) : 'unknown'; };
+    if (confirmed.slice(1).some(b => dayOf(b) === dayOf(confirmed[0]))) return { booking: null, ambiguous: true };
+  }
+  return { booking: confirmed[0] };
+}
+
 function paidByBookingRefEnabled() {
   return /^(1|true)$/i.test(String(process.env.WABISTAY_PAID_BY_BOOKING_REF || '').trim());
 }
@@ -3345,7 +3391,7 @@ const actions = {
 
     if (!parsed.ok) {
       logToAxiom('info', 'paid_rejected', { phone: ctx.phone, reason: parsed.reason });
-      await sendWhatsApp(ctx.phone, msg(paidByBookingRefEnabled() ? 'paidUsageWithBookingRef' : 'paidUsage'));
+      await sendWhatsApp(ctx.phone, msg(paidRoomConfirmedEnabled() ? 'paidUsageRoomOnly' : (paidByBookingRefEnabled() ? 'paidUsageWithBookingRef' : 'paidUsage')));
       return;
     }
 
@@ -3420,17 +3466,27 @@ const actions = {
       // billed at the desk yet), and within each, latest Check Out wins. Cancelled
       // and Enquiry rows can never be paid for through this path — Enquiry is the
       // REF path's job, above.
-      const PAYABLE_STATUSES = ['Checked Out', 'Checked In'];
+      const confirmedOn = paidRoomConfirmedEnabled();
+      const PAYABLE_STATUSES = confirmedOn ? ['Checked Out', 'Checked In', 'Confirmed'] : ['Checked Out', 'Checked In'];
       const all = await airtableGet('WS_Bookings', orFormula('Status', PAYABLE_STATUSES));
-      const candidates = all
-        .filter(b => (b.fields['Room'] || []).includes(room.id))
-        .sort((a, b) => {
+      const onRoom = all.filter(b => (b.fields['Room'] || []).includes(room.id));
+      if (confirmedOn) {
+        const pick = pickBookingForPaidRoom(onRoom);
+        if (pick.ambiguous) {
+          logToAxiom('warn', 'paid_rejected', { phone: ctx.phone, reason: 'ambiguous_confirmed_bookings', roomId: room.id });
+          await sendWhatsApp(ctx.phone, msg('paidRoomAmbiguous', { roomName: room.fields['Room Name'] }));
+          return;
+        }
+        booking = pick.booking;
+      } else {
+        const candidates = onRoom.sort((a, b) => {
           const rank = s => (s === 'Checked Out' ? 0 : 1);
           const byStatus = rank(a.fields['Status']) - rank(b.fields['Status']);
           if (byStatus !== 0) return byStatus;
           return Date.parse(b.fields['Check Out'] || 0) - Date.parse(a.fields['Check Out'] || 0);
         });
-      booking = candidates[0] || null;
+        booking = candidates[0] || null;
+      }
       if (!booking) {
         logToAxiom('info', 'paid_rejected', { phone: ctx.phone, reason: 'no_booking', roomId: room.id });
         await sendWhatsApp(ctx.phone, msg('paidNoBooking', { roomName: room.fields['Room Name'] }));
@@ -3505,7 +3561,7 @@ const actions = {
     // by selectPaymentMethod) — reception isn't re-specifying Card/EFT, just
     // confirming the funds landed, so that stored value wins over the room
     // path's Cash default.
-    const method = parsed.method || (parsed.refToken && booking.fields['Payment Method']) || 'Cash';
+    const method = parsed.method || ((parsed.refToken || paidRoomConfirmedEnabled()) && booking.fields['Payment Method']) || 'Cash';
 
     // One instant, written to both sinks. Generating it twice would let the
     // Airtable field and the Axiom event disagree by however long the write
@@ -8184,6 +8240,7 @@ module.exports.canonicalTextForTap = canonicalTextForTap;
 module.exports.validateReplyButtons = validateReplyButtons;
 module.exports.INTERACTIVE_LIMITS = INTERACTIVE_LIMITS;
 module.exports.parseOneLineNameAndTime = parseOneLineNameAndTime;
+module.exports.pickBookingForPaidRoom = pickBookingForPaidRoom;
 module.exports.sanitizeTemplateParam = sanitizeTemplateParam;
 module.exports.bumpPropertyActivity = bumpPropertyActivity;
 module.exports.dormantProperties = dormantProperties;
