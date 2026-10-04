@@ -382,6 +382,7 @@ const WABISTAY_KNOWN_FLAGS = [
   'WABISTAY_HIDE_ONE_HOUR',
   'WABISTAY_HOLD_RELEASE',
   'WABISTAY_INTERACTIVE',
+  'WABISTAY_LEAN_COPY',
   'WABISTAY_MESSAGE_DEDUPE',
   'WABISTAY_MONTHLY_REPORT_TEMPLATE',
   'WABISTAY_NEW_BOOKING_TEMPLATE',
@@ -399,7 +400,7 @@ const WABISTAY_KNOWN_FLAGS = [
 
 // Switches the code only treats as on for 1/true; for these, 'on' means that,
 // not merely 'set'.
-const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_GATE_ROOM_CHECK', 'WABISTAY_HIDE_ONE_HOUR', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_INTERACTIVE', 'WABISTAY_MESSAGE_DEDUPE', 'WABISTAY_NONTEXT_REPLY', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_PAID_BY_BOOKING_REF', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD'];
+const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_GATE_ROOM_CHECK', 'WABISTAY_HIDE_ONE_HOUR', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_INTERACTIVE', 'WABISTAY_LEAN_COPY', 'WABISTAY_MESSAGE_DEDUPE', 'WABISTAY_NONTEXT_REPLY', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_PAID_BY_BOOKING_REF', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD'];
 
 function wabistayFlagState() {
   const names = new Set([...WABISTAY_KNOWN_FLAGS, ...Object.keys(process.env).filter(k => k.startsWith('WABISTAY_'))]);
@@ -1708,6 +1709,34 @@ function hourlyRatesFor(property, durations) {
 }
 function hourlyRates(property) {
   return hourlyRatesFor(property, HOURLY_DURATIONS);
+}
+
+// WABISTAY_LEAN_COPY (1 or true; off by default). The short-stay path stops sending a
+// separate "Short stay rates" message before it asks for the guest's details (the
+// prices are on the duration question anyway), the name-and-time request and its
+// re-prompt get shorter copy with an example, and a one-line reply such as
+// "Tim 9pm" or "9pm Tim" is accepted. The fail-closed rates check is unchanged.
+function leanCopyEnabled() {
+  return /^(1|true)$/i.test(String(process.env.WABISTAY_LEAN_COPY || '').trim());
+}
+// Words that may sit directly in front of a time ("Tim at 9pm") and are not part of the name.
+const TIME_FILLER_WORDS = new Set(['at', 'around', 'about', 'by', 'before', 'after', 'approx', 'approximately', 'roughly', 'from', '@']);
+// One-line "name and time" reply. Accepted only when EXACTLY ONE whitespace-separated
+// part parses as a time and what is left is a name of at least one word. "9 pm" is joined
+// to "9pm" first. Returns { name, time } (time may be { ambiguous }), or null.
+function parseOneLineNameAndTime(line) {
+  const cleaned = String(line || '').trim().replace(/(\d)\s+(am|pm)\b/gi, '$1$2');
+  const tokens = cleaned.split(/\s+/).filter(Boolean);
+  const timeIdx = [];
+  tokens.forEach((tok, i) => { if (parseArrivalTime(tok)) timeIdx.push(i); });
+  if (timeIdx.length !== 1) return null;
+  const i = timeIdx[0];
+  const time = parseArrivalTime(tokens[i]);
+  const drop = new Set([i]);
+  if (i > 0 && TIME_FILLER_WORDS.has(tokens[i - 1].toLowerCase())) drop.add(i - 1);
+  const name = tokens.filter((_, j) => !drop.has(j)).join(' ').trim();
+  if (!name) return null;
+  return { name, time };
 }
 
 // WABISTAY_HIDE_ONE_HOUR (1 or true; off by default): the guest-facing short-stay
@@ -3844,6 +3873,12 @@ const actions = {
       }
 
       await updateGuestState(ctx.guest.id, { 'Session State': 'AWAITING_HOURLY_DETAILS', 'Last Inbound At': new Date().toISOString() });
+      // WABISTAY_LEAN_COPY: no separate rates message (the duration question shows each
+      // price); the fail-closed rates check above has already run.
+      if (leanCopyEnabled()) {
+        await sendWhatsApp(ctx.phone, msg('hourlyAskDetailsLean'));
+        return;
+      }
       const hourlyRateText = offeredHourlyDurations()
         .map(hours => `• ${hours} hour${hours === 1 ? '' : 's'}: R${rates[hours]}`)
         .join('\n');
@@ -4238,9 +4273,9 @@ const actions = {
         });
       }
     }
-    await sendWhatsApp(ctx.phone, msg('hourlyAskDetails', {
-      propertyName: ctx.property.fields['Property Name']
-    }));
+    await sendWhatsApp(ctx.phone, leanCopyEnabled()
+      ? msg('hourlyAskDetailsLean')
+      : msg('hourlyAskDetails', { propertyName: ctx.property.fields['Property Name'] }));
   },
 
   // AWAITING_HOURLY_DETAILS: name + arrival time, then offer the duration menu.
@@ -4268,6 +4303,18 @@ const actions = {
       }
     }
 
+    // WABISTAY_LEAN_COPY: a ONE-line reply ("Tim 9pm", "9pm Tim") that the line-by-line
+    // pass above could not split. Accepted only when exactly one part is a time and the
+    // rest is a name of at least one word; anything else falls through to the re-prompt.
+    if (leanCopyEnabled() && lines.length === 1 && !arrival && ambiguousHour === null) {
+      const oneLine = parseOneLineNameAndTime(lines[0]);
+      if (oneLine) {
+        typedName = oneLine.name;
+        if (oneLine.time.ambiguous !== undefined) ambiguousHour = oneLine.time.ambiguous;
+        else arrival = oneLine.time;
+      }
+    }
+
     const guestName = typedName || (ctx.guest.fields['Guest Name'] !== 'Unknown' ? ctx.guest.fields['Guest Name'] : null);
 
     if (!arrival && ambiguousHour !== null) {
@@ -4276,7 +4323,7 @@ const actions = {
       return;
     }
     if (!guestName || !arrival) {
-      await sendWhatsApp(ctx.phone, msg('hourlyDetailsReprompt'));
+      await sendWhatsApp(ctx.phone, msg(leanCopyEnabled() ? 'hourlyDetailsRepromptLean' : 'hourlyDetailsReprompt'));
       return;
     }
 
@@ -8136,6 +8183,7 @@ module.exports.isOwnerSideNumber = isOwnerSideNumber;
 module.exports.canonicalTextForTap = canonicalTextForTap;
 module.exports.validateReplyButtons = validateReplyButtons;
 module.exports.INTERACTIVE_LIMITS = INTERACTIVE_LIMITS;
+module.exports.parseOneLineNameAndTime = parseOneLineNameAndTime;
 module.exports.sanitizeTemplateParam = sanitizeTemplateParam;
 module.exports.bumpPropertyActivity = bumpPropertyActivity;
 module.exports.dormantProperties = dormantProperties;
