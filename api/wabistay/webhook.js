@@ -4760,7 +4760,8 @@ const actions = {
     const bankDetails = property.fields['EFT Bank Details'];
     const bankDetailsBlock = bankDetails ? bankDetails : msg('paymentEftBankDetailsFallback');
 
-    await sendWhatsApp(ctx.phone, msg('paymentEftConfirmed', {
+    // WABISTAY_LEAN_COPY: the shorter instant-EFT message (same placeholders, same bank-details fallback line).
+    await sendWhatsApp(ctx.phone, msg(leanCopyEnabled() ? 'paymentEftConfirmedLean' : 'paymentEftConfirmed', {
       amount: formatAmount(booking.fields['Amount Due']),
       reference,
       bankDetailsBlock
@@ -5337,6 +5338,16 @@ const actions = {
     if (!booking || !booking.fields['Check Out']) {
       // Nothing to extend (no active booking, or a date-less legacy row).
       await sendWhatsApp(ctx.phone, msg('checkedInMenu', { guestName }));
+      return;
+    }
+
+    // A Day stay ends at 17:00 and has no extension rule (the generic one would add 24 hours and
+    // another R400). The guest is sent to reception and NOTHING is written: no price, no time,
+    // no booking field. Not behind a flag on purpose: a Day booking only exists because the stay
+    // menu made it, and if that flag is later switched off the booking must still be protected.
+    if (booking.fields['Booking Type'] === 'Day') {
+      logToAxiom('info', 'extend_refused_day_booking', { phone: ctx.phone, bookingId: booking.id });
+      await sendWhatsApp(ctx.phone, msg('dayExtendSpeakToReception'));
       return;
     }
 
@@ -7695,7 +7706,9 @@ async function stayMenuForNow(property, now = new Date()) {
   const lines = keys.map(k => k + ' - ' + STAY_PRODUCTS[k].label + ' (R' + prices[k] + ')' + detail[k]).join('\n');
   const phone = property.fields['Guest Redirect Phone'];
   const anotherDayLine = 'Another day? Please phone reception' + (phone ? ' on ' + phone : '') + '.';
-  return { keys, prices, lines, anotherDayLine, dayRate, nightRate };
+  // From 17:00 the short stays are over for the day; the one-line menu says so first.
+  const menuIntro = sastHourOfDate(now) >= 17 ? 'Short stays have finished for today.\n\n' : '';
+  return { keys, prices, lines, anotherDayLine, menuIntro, dayRate, nightRate };
 }
 // Reply -> product key ('1'..'4'), 'multi' (the typed multiple-days words, which keep
 // reaching today's typed-dates flow), or null. "2" means the SECOND menu line (3 hours);
@@ -7762,6 +7775,7 @@ async function stayMenuGreeting(ctx, roomCount) {
     propertyName: ctx.property.fields['Property Name'],
     propertyCityLine: propertyCityLine(ctx.property),
     roomCountLine: roomCountLine(ctx.property, roomCount),
+    menuIntro: menu.menuIntro,
     menuLines: menu.lines,
     anotherDayLine: menu.anotherDayLine
   });

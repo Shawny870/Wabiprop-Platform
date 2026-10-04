@@ -507,3 +507,30 @@ test('the flag is on the cold-start flag list: off by default, on only for 1/tru
     assert.strictEqual(fresh().wabistayFlagState().WABISTAY_STAY_MENU, exp, v);
   }
 });
+
+// ── the evening menu starts by saying short stays are over ────────────────────
+
+test('17:00-22:59: the one-line menu starts with "Short stays have finished for today."; earlier hours do not say it', async () => {
+  for (const [h, m] of [[17, 0], [20, 30], [22, 59]]) {
+    atSast(h, m);
+    const ctx = start();
+    await say('hi');
+    const menu = texts(ctx).find(t => /What would you like to book/.test(t));
+    assert.match(menu, /Short stays have finished for today\.\n\nWhat would you like to book\? Reply with a number:\n4 - Overnight \(R500\): check in 17:00 to 23:00, check out 10:00\n\nAnother day\? Please phone reception on 0730260871\.$/, `${h}:${m}`);
+    mock.timers.reset();
+  }
+  for (const [h, m] of [[8, 0], [11, 59], [12, 0], [16, 59]]) {
+    atSast(h, m);
+    const ctx = start();
+    await say('hi');
+    assert.ok(!/Short stays have finished/.test(texts(ctx).join('\n')), `${h}:${m}`);
+    mock.timers.reset();
+  }
+});
+
+test('the evening line follows the clock, not which products happen to be priced', async () => {
+  atSast(9, 0);
+  const ctx = start({ dayRate: null, hourly: { 'Hourly Rate 2hr': null } });   // only Overnight priced at 09:00
+  await say('hi');
+  assert.ok(!/Short stays have finished/.test(texts(ctx).join('\n')), 'at 09:00 short stays have not finished, even if none is priced');
+});
