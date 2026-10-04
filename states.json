@@ -89,6 +89,7 @@
     "occupancyContactOwner": "Thanks {guestName}! 🙏 We've got your dates.\n\nWe couldn't confirm a rate for that just yet — the owner will be in touch shortly to finalise the price. Your room is being held in the meantime.\n\nWhat time do you expect to arrive? (e.g. \"around 2pm\" or \"after 5\")",
     "bookingReceived": "Thanks {guestName}! 🙏\n\nYour booking enquiry has been received.\n\n*Ref:* {bookingRef}\n*Check-in:* {checkIn}\n*Check-out:* {checkOut}\n{rateLine}",
     "paymentMethodMenu": "{propertyName} is a cashless property. Payment happens at reception when you arrive:\n1 - Card (tap on our SpeedPoint machine)\n2 - Instant EFT (paid at reception; once funds reflect, you'll be assigned your room)\nReply with a number.",
+    "paymentMethodButtonsBody": "{propertyName} is a cashless property. You will pay at reception when you arrive. How would you like to pay?",
     "paymentMethodReprompt": "Sorry, I didn't quite get that. Please reply with a number:\n1 - Card\n2 - Instant EFT",
     "paymentCardChosen": "Great — head on in! Please tap your card on the SpeedPoint machine in the office, and reception will hand you your keys.",
     "paymentEftConfirmed": "Please pay R{amount} at reception using {reference} as your reference. Once reception confirms the funds have reflected, you'll be assigned your room.\n\n{bankDetailsBlock}",

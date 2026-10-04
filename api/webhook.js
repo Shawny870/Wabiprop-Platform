@@ -115,6 +115,45 @@ async function sendWhatsApp(to, message) {
   return data;
 }
 
+// ─── NON-TEXT REPLY (WABISTAY_NONTEXT_REPLY) and INTERACTIVE FORWARDING ───────
+// Both off by default. With WABISTAY_NONTEXT_REPLY on, a voice note, image or other
+// non-text message on the Wabistay number is answered from the phone_number_id it
+// ARRIVED on (never WP_PHONE_NUMBER_ID, which the old fallback used and which is
+// deliberately cleared). With WABISTAY_INTERACTIVE on, a button/list reply on the
+// Wabistay number is forwarded to the Wabistay handler instead of being treated as
+// "non-text". Wabiprop stays text-only.
+const NONTEXT_REPLY_TEMPLATE =
+  'Sorry, I can only read typed messages. Please type your message, or phone us on a normal call to {lodgePhone}. ' +
+  'Please do not use WhatsApp calling, as it will not ring.';
+// Used only when the property cannot be resolved from the arriving phone_number_id
+// (or has no Guest Redirect Phone): the Canary Street lodge number.
+const LODGE_PHONE_FALLBACK = '0730260871';
+function flagOn(name) {
+  return /^(1|true)$/i.test(String(process.env[name] || '').trim());
+}
+async function resolveLodgePhone(phoneNumberId) {
+  try {
+    if (/^\d+$/.test(String(phoneNumberId || ''))) {
+      const rows = await airtableGet('WS_Properties', `{Phone Number ID} = '${phoneNumberId}'`);
+      const phone = rows[0] && rows[0].fields && rows[0].fields['Guest Redirect Phone'];
+      if (phone) return { lodgePhone: String(phone), source: 'property' };
+    }
+  } catch (e) {
+    console.error('[Router lodge phone lookup failed]', e.message);
+  }
+  return { lodgePhone: LODGE_PHONE_FALLBACK, source: 'constant' };
+}
+async function sendFromPhoneNumberId(fromPhoneNumberId, to, message) {
+  const res = await fetch(`https://graph.facebook.com/v25.0/${fromPhoneNumberId}/messages`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${WA_ACCESS_TOKEN}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ messaging_product: 'whatsapp', to, type: 'text', text: { body: message } })
+  });
+  const data = await res.json();
+  if (data.error) console.error('[Router WhatsApp SEND ERROR]:', JSON.stringify(data.error));
+  return data;
+}
+
 // ─── PRODUCT MENU ─────────────────────────────────────────────────────────────
 // Sent once to any number not found in any registered table.
 
@@ -233,6 +272,24 @@ module.exports = async function handler(req, res) {
 
     // Non-text message — send fallback, return 200
     if (!messageText) {
+      // WABISTAY_INTERACTIVE: a button/list reply on the Wabistay number goes to the
+      // Wabistay handler, which turns it into canonical text. Anywhere else (the
+      // flag off, another number, Wabiprop) it is still just "non-text".
+      if (message.type === 'interactive' && flagOn('WABISTAY_INTERACTIVE') && phoneNumberId === WS_PHONE_NUMBER_ID_CONST) {
+        logToAxiom('info', 'router_route', { phone, phone_number_id: phoneNumberId, destination: 'wabistay', reason: 'interactive_reply' });
+        return wabistayHandler(req, res);
+      }
+      // WABISTAY_NONTEXT_REPLY: answer from the number it arrived on, with the lodge's
+      // own phone number. Flag off: the old reply below, exactly as before.
+      if (flagOn('WABISTAY_NONTEXT_REPLY') && phoneNumberId === WS_PHONE_NUMBER_ID_CONST) {
+        const { lodgePhone, source } = await resolveLodgePhone(phoneNumberId);
+        logToAxiom('info', 'router_nontext_message', {
+          phone, phone_number_id: phoneNumberId, messageType: message.type || null, lodgePhoneSource: source
+        });
+        await sendFromPhoneNumberId(phoneNumberId, phone, NONTEXT_REPLY_TEMPLATE.replace('{lodgePhone}', lodgePhone))
+          .catch(e => console.error('[Router nontext reply failed]', e.message));
+        return res.status(200).send('OK');
+      }
       await sendWhatsApp(phone, `Please send your message as text. Voice notes and images are not supported yet.`)
         .catch(e => console.error('[Router fallback send failed]', e.message));
       return res.status(200).send('OK');
