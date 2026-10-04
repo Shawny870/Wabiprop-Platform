@@ -159,6 +159,7 @@ function installFetch(ctx) {
           .find(c => c.type === 'body') || {}).parameters || [];
         const paramTexts = params.map(p => p.text);
         ctx.sends.push({
+          fromId: u.pathname.split('/')[2],
           to: body.to,
           type: 'template',
           template: body.template.name,
@@ -166,8 +167,16 @@ function installFetch(ctx) {
           params: paramTexts,
           body: paramTexts.join(' | ')
         });
+      } else if (body.type === 'interactive') {
+        // Interactive sends carry no free-form text; `interactive` is the exact Meta
+        // object, `buttons` the reply buttons flattened to {id, title}.
+        const buttons = (((body.interactive || {}).action || {}).buttons || []).map(b => ({ id: b.reply.id, title: b.reply.title }));
+        ctx.sends.push({
+          fromId: u.pathname.split('/')[2], to: body.to, type: 'interactive',
+          interactive: body.interactive, buttons, body: (body.interactive.body || {}).text || ''
+        });
       } else {
-        ctx.sends.push({ to: body.to, type: 'text', body: body.text.body });
+        ctx.sends.push({ fromId: u.pathname.split('/')[2], to: body.to, type: 'text', body: body.text.body });
       }
       return jsonRes({ messages: [{ id: 'wamid.test' }] });
     }
@@ -217,6 +226,26 @@ function metaTextPayload(from, text, id) {
 // sent via the native WhatsApp Business app. `to` is the guest; `from` is
 // this WABA's own number. Shaped nothing like metaTextPayload's `messages`
 // array — see handleMessageEcho's own comment for why it needs its own field.
+// An interactive (button or list) reply from the guest. `reply` is {id, title}.
+function metaInteractivePayload(from, reply, id, kind = 'button_reply') {
+  const p = metaTextPayload(from, 'x', id);
+  const msg0 = p.entry[0].changes[0].value.messages[0];
+  delete msg0.text;
+  msg0.type = 'interactive';
+  msg0.interactive = { type: kind, [kind]: { id: reply.id, title: reply.title } };
+  return p;
+}
+
+// A non-text message of another kind (audio, image, sticker...).
+function metaOtherPayload(from, type, id) {
+  const p = metaTextPayload(from, 'x', id);
+  const msg0 = p.entry[0].changes[0].value.messages[0];
+  delete msg0.text;
+  msg0.type = type;
+  msg0[type] = { id: 'media.test' };
+  return p;
+}
+
 function metaEchoPayload(to, text, id) {
   return {
     object: 'whatsapp_business_account',
@@ -364,4 +393,4 @@ function assertFixture(assert, expect, ctx, res) {
   }
 }
 
-module.exports = { installEnv, runFixture, assertFixture, metaTextPayload, metaEchoPayload, makeRes, TEST_ENV, installFetch, MockAirtable };
+module.exports = { installEnv, runFixture, assertFixture, metaTextPayload, metaInteractivePayload, metaOtherPayload, metaEchoPayload, makeRes, TEST_ENV, installFetch, MockAirtable };

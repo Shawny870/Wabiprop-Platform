@@ -381,8 +381,11 @@ const WABISTAY_KNOWN_FLAGS = [
   'WABISTAY_DAILY_SUMMARY_TEMPLATE',
   'WABISTAY_HIDE_ONE_HOUR',
   'WABISTAY_HOLD_RELEASE',
+  'WABISTAY_INTERACTIVE',
+  'WABISTAY_MESSAGE_DEDUPE',
   'WABISTAY_MONTHLY_REPORT_TEMPLATE',
   'WABISTAY_NEW_BOOKING_TEMPLATE',
+  'WABISTAY_NONTEXT_REPLY',
   'WABISTAY_NOTIFY_ROUTING',
   'WABISTAY_OPS_ALERT_TEMPLATE',
   'WABISTAY_OVERDUE_ALERT_TEMPLATE',
@@ -396,7 +399,7 @@ const WABISTAY_KNOWN_FLAGS = [
 
 // Switches the code only treats as on for 1/true; for these, 'on' means that,
 // not merely 'set'.
-const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_GATE_ROOM_CHECK', 'WABISTAY_HIDE_ONE_HOUR', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_PAID_BY_BOOKING_REF', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD'];
+const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_GATE_ROOM_CHECK', 'WABISTAY_HIDE_ONE_HOUR', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_INTERACTIVE', 'WABISTAY_MESSAGE_DEDUPE', 'WABISTAY_NONTEXT_REPLY', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_PAID_BY_BOOKING_REF', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD'];
 
 function wabistayFlagState() {
   const names = new Set([...WABISTAY_KNOWN_FLAGS, ...Object.keys(process.env).filter(k => k.startsWith('WABISTAY_'))]);
@@ -4178,7 +4181,7 @@ const actions = {
       guestName, bookingRef, checkIn, checkOut,
       rateLine: `*Rate:* R${rate.fields['Amount']} per night`
     }));
-    await sendWhatsApp(ctx.phone, msg('paymentMethodMenu', { propertyName: ctx.property.fields['Property Name'] }));
+    await sendPaymentMethodMenu(ctx);
   },
 
   // NEW / AWAITING_DETAILS + "HOURLY": enter the short-stay flow (closes F10 —
@@ -4534,7 +4537,7 @@ const actions = {
       }
     }
     await sendWhatsApp(ctx.phone, msg('hourlyBookingReceived', view));
-    await sendWhatsApp(ctx.phone, msg('paymentMethodMenu', { propertyName: ctx.property.fields['Property Name'] }));
+    await sendPaymentMethodMenu(ctx);
   },
 
   // AWAITING_PAYMENT_METHOD (payment build, CEO 2026-09-29): guest chooses
@@ -7483,9 +7486,114 @@ function matchTransition(rows, text) {
   return rows.find(t => t.inputs === '*' || t.inputs.includes(text)) || null;
 }
 
-async function handleMessage(from, messageText, phoneNumberId, wamid) {
+// ─── MESSAGE DEDUPE (WABISTAY_MESSAGE_DEDUPE) ────────────────────────────────
+// Meta can deliver the same inbound message twice. With the flag on, the inbound
+// WhatsApp message id is written to the guest's 'Last Message Id' before any side
+// effect, and a message whose id equals the stored one is skipped. A sender with no
+// WS_Guests row cannot be checked (accepted). Fails OPEN: if the write fails the
+// message is processed and the failure is logged. Two deliveries racing each other
+// can both read the old id; that window is not closed here.
+function messageDedupeEnabled() {
+  return /^(1|true)$/i.test(String(process.env.WABISTAY_MESSAGE_DEDUPE || '').trim());
+}
+
+// ─── INTERACTIVE REPLIES (WABISTAY_INTERACTIVE) ──────────────────────────────
+// A button/list tap arrives as type "interactive" with reply id + title. The id is
+// turned into the canonical text the state table already understands, and ONLY in
+// the state the button belongs to; in any other state it is a stale tap and must not
+// be read as a menu choice (e.g. a second tap on an old "Card" button once the guest
+// has moved on). Typed replies are unaffected and stay valid either way.
+function interactiveEnabled() {
+  return /^(1|true)$/i.test(String(process.env.WABISTAY_INTERACTIVE || '').trim());
+}
+const INTERACTIVE_REPLY_IDS = {
+  pay_card: { state: 'AWAITING_PAYMENT_METHOD', text: '1' },
+  pay_eft: { state: 'AWAITING_PAYMENT_METHOD', text: '2' }
+};
+// States whose "*" row would swallow ANY text as data (an arrival time, rating
+// feedback): a stale tap there is answered with that state's own prompt and goes no
+// further, so a button title is never saved as the guest's answer.
+const STALE_TAP_REPROMPT = { AWAITING_ETA: 'askEta', AWAITING_RATING_FEEDBACK: 'ratingLowFollowup' };
+const STALE_TAP_PREFIX = 'interactive:';
+function canonicalTextForTap(replyId, sessionState) {
+  const mapping = INTERACTIVE_REPLY_IDS[replyId];
+  return mapping && mapping.state === sessionState ? mapping.text : null;
+}
+
+// Meta's limits for reply buttons, as code constants.
+const INTERACTIVE_LIMITS = { buttons: 3, buttonTitle: 20, buttonId: 256, body: 1024, footer: 60 };
+function validateReplyButtons({ body, buttons, footer }) {
+  if (typeof body !== 'string' || body.length === 0) return 'body_missing';
+  if (body.length > INTERACTIVE_LIMITS.body) return 'body_too_long';
+  if (footer !== undefined && footer !== null && String(footer).length > INTERACTIVE_LIMITS.footer) return 'footer_too_long';
+  if (!Array.isArray(buttons) || buttons.length === 0) return 'no_buttons';
+  if (buttons.length > INTERACTIVE_LIMITS.buttons) return 'too_many_buttons';
+  for (const b of buttons) {
+    if (!b || typeof b.id !== 'string' || !b.id) return 'button_id_missing';
+    if (b.id.length > INTERACTIVE_LIMITS.buttonId) return 'button_id_too_long';
+    if (typeof b.title !== 'string' || !b.title) return 'button_title_missing';
+    if (b.title.length > INTERACTIVE_LIMITS.buttonTitle) return 'button_title_too_long';
+  }
+  if (new Set(buttons.map(b => b.id)).size !== buttons.length) return 'duplicate_button_id';
+  return null;
+}
+
+// Reply buttons only. Validated BEFORE sending: an over-limit message is never sent.
+// Returns { ok, invalid?, error?, wamid? }; callers fall back to the text menu.
+async function sendInteractiveButtons(to, { body, buttons, footer }) {
+  const invalid = validateReplyButtons({ body, buttons, footer });
+  if (invalid) {
+    logToAxiom('error', 'interactive_invalid', { to, reason: invalid });
+    return { ok: false, invalid };
+  }
+  const interactive = {
+    type: 'button',
+    body: { text: body },
+    action: { buttons: buttons.map(b => ({ type: 'reply', reply: { id: b.id, title: b.title } })) }
+  };
+  if (footer) interactive.footer = { text: footer };
+  console.log(`[WhatsApp INTERACTIVE SEND] to: ${to} | buttons: ${buttons.map(b => b.id).join(',')}`);
+  const res = await fetch(`https://graph.facebook.com/v25.0/${WA_PHONE_NUMBER_ID}/messages`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${WA_ACCESS_TOKEN}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ messaging_product: 'whatsapp', to, type: 'interactive', interactive })
+  });
+  const data = await res.json();
+  const wamid = (data && data.messages && data.messages[0] && data.messages[0].id) || null;
+  const ok = !data.error && res.status < 300;
+  if (!ok) {
+    logToAxiom('error', 'interactive_send_error', { to, status: res.status, error: JSON.stringify(data.error || null) });
+  } else {
+    logToAxiom('info', 'interactive_sent', { to, wamid, buttons: buttons.map(b => b.id) });
+  }
+  return { ok, error: (data && data.error) || null, wamid };
+}
+
+const PAYMENT_BUTTONS = [{ id: 'pay_card', title: 'Card' }, { id: 'pay_eft', title: 'Instant EFT' }];
+
+// The payment-method menu. WABISTAY_INTERACTIVE off: the numbered text menu exactly
+// as before. On: two reply buttons; if they cannot be sent (over a limit, or Meta
+// rejects them at once) that is logged and the numbered text menu is sent once.
+// Typed 1 / 2 / card / eft are valid either way.
+async function sendPaymentMethodMenu(ctx) {
+  const propertyName = ctx.property.fields['Property Name'];
+  const sendTextMenu = () => sendWhatsApp(ctx.phone, msg('paymentMethodMenu', { propertyName }));
+  if (!interactiveEnabled()) return sendTextMenu();
+  const result = await sendInteractiveButtons(ctx.phone, {
+    body: msg('paymentMethodButtonsBody', { propertyName }),
+    buttons: PAYMENT_BUTTONS
+  });
+  if (result.ok) return result;
+  logToAxiom('warn', 'interactive_fallback_text', {
+    phone: ctx.phone, menu: 'payment_method', reason: result.invalid || 'meta_rejected',
+    error: result.error ? JSON.stringify(result.error) : null
+  });
+  return sendTextMenu();
+}
+
+async function handleMessage(from, messageText, phoneNumberId, wamid, interactive = null) {
   const phone = formatPhone(from);
-  const text = messageText.trim().toLowerCase();
+  let text = messageText.trim().toLowerCase();
   console.log(`[handleMessage] from: ${phone} | text: ${text}`);
 
   // 6.4: resolve property before anything else — no action may run for an
@@ -7508,9 +7616,51 @@ async function handleMessage(from, messageText, phoneNumberId, wamid) {
   // Logged here rather than first thing so it can carry the step the guest was on
   // (the last step reached, for lost-enquiry reporting). A test phone is flagged,
   // not hidden: Axiom logging stays on for them.
+  // WABISTAY_MESSAGE_DEDUPE: before any side effect (bar the property activity stamp
+  // above, which is harmless to repeat).
+  if (messageDedupeEnabled() && wamid && guest) {
+    if (guest.fields['Last Message Id'] === wamid) {
+      logToAxiom('info', 'duplicate_message_skipped', { phone, wamid, guestId: guest.id, sessionState: sessionState || null });
+      return;
+    }
+    try {
+      const idWrite = await airtableUpdate('WS_Guests', guest.id, { 'Last Message Id': wamid });
+      if (idWrite && idWrite.error) {
+        logToAxiom('error', 'message_dedupe_write_failed', { phone, wamid, guestId: guest.id, error: JSON.stringify(idWrite.error) });
+      }
+    } catch (err) {
+      logToAxiom('error', 'message_dedupe_write_failed', { phone, wamid, guestId: guest.id, message: err.message });
+    }
+  }
+
   logToAxiom('info', 'message_received', {
-    phone, text: messageText.slice(0, 100), sessionState: sessionState || null, ...(isTestGuest(guest) ? { testPhone: true } : {})
+    phone, text: messageText.slice(0, 100), sessionState: sessionState || null, ...(isTestGuest(guest) ? { testPhone: true } : {}),
+    ...(interactive ? { interactiveId: interactive.id, interactiveTitle: String(interactive.title || '').slice(0, 100) } : {})
   });
+
+  // WABISTAY_INTERACTIVE: a tap becomes canonical text only in its own state.
+  if (interactive) {
+    const canonical = canonicalTextForTap(interactive.id, sessionState);
+    logToAxiom('info', 'interactive_reply_received', {
+      phone, replyId: interactive.id, title: String(interactive.title || '').slice(0, 100),
+      sessionState: sessionState || null, mapped: canonical !== null
+    });
+    if (canonical !== null) {
+      messageText = canonical;
+      text = canonical;
+    } else {
+      // Stale tap: never a menu choice. States that would swallow any text as data
+      // get their own prompt and stop; every other state sees text that matches
+      // nothing, so its own re-prompt answers.
+      const reprompt = STALE_TAP_REPROMPT[sessionState];
+      if (reprompt) {
+        await sendWhatsApp(phone, msg(reprompt));
+        return;
+      }
+      messageText = STALE_TAP_PREFIX + interactive.id;
+      text = messageText.toLowerCase();
+    }
+  }
 
   // ── B14: STOP opt-out (two-tier) ───────────────────────────────────────────
   // Evaluated before consent and before dispatch, so an opting-out or already
@@ -7829,8 +7979,18 @@ module.exports = async function handler(req, res) {
 
     const message = messages[0];
     const from = message.from;
-    const messageText = message?.text?.body;
+    let messageText = message?.text?.body;
     const wamid = message.id || null;
+    // WABISTAY_INTERACTIVE: a button/list reply carries no text; its title stands in
+    // as the display text and its id is mapped (by state) inside handleMessage.
+    let interactiveReply = null;
+    if (!messageText && interactiveEnabled() && message.type === 'interactive') {
+      const reply = message.interactive && (message.interactive.button_reply || message.interactive.list_reply);
+      if (reply && reply.id) {
+        interactiveReply = { id: String(reply.id), title: reply.title || '' };
+        messageText = String(reply.title || reply.id);
+      }
+    }
 
     console.log(`[POST] from: ${from} | text: ${messageText}`);
 
@@ -7841,7 +8001,7 @@ module.exports = async function handler(req, res) {
 
     // F2: handleMessage runs FULLY before we respond 200
     try {
-      await handleMessage(from, messageText, phoneNumberId, wamid);
+      await handleMessage(from, messageText, phoneNumberId, wamid, interactiveReply);
     } catch (err) {
       console.error('[FATAL]', err.message, err.stack);
       logToAxiom('error', 'fatal', { message: err.message, stack: err.stack });
@@ -7952,6 +8112,9 @@ module.exports.newBookingTemplateParams = newBookingTemplateParams;
 module.exports.operationalAlertPhone = operationalAlertPhone;
 module.exports.reportRecipientPhone = reportRecipientPhone;
 module.exports.isOwnerSideNumber = isOwnerSideNumber;
+module.exports.canonicalTextForTap = canonicalTextForTap;
+module.exports.validateReplyButtons = validateReplyButtons;
+module.exports.INTERACTIVE_LIMITS = INTERACTIVE_LIMITS;
 module.exports.sanitizeTemplateParam = sanitizeTemplateParam;
 module.exports.bumpPropertyActivity = bumpPropertyActivity;
 module.exports.dormantProperties = dormantProperties;
