@@ -393,6 +393,7 @@ const WABISTAY_KNOWN_FLAGS = [
   'WABISTAY_OVERDUE_ALERT_TEMPLATE',
   'WABISTAY_PAID_BY_BOOKING_REF',
   'WABISTAY_PAID_ROOM_CONFIRMED',
+  'WABISTAY_PAY_ASSIGNS_ROOM',
   'WABISTAY_OWNER_SUMMARY_TEMPLATE',
   'WABISTAY_RECEPTION_PAYMENT_TEMPLATE',
   'WABISTAY_ROOM_ORDER',
@@ -403,7 +404,7 @@ const WABISTAY_KNOWN_FLAGS = [
 
 // Switches the code only treats as on for 1/true; for these, 'on' means that,
 // not merely 'set'.
-const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_GATE_ROOM_CHECK', 'WABISTAY_GUEST_ADDRESS', 'WABISTAY_HIDE_ONE_HOUR', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_INTERACTIVE', 'WABISTAY_LEAN_COPY', 'WABISTAY_MESSAGE_DEDUPE', 'WABISTAY_NONTEXT_REPLY', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_PAID_BY_BOOKING_REF', 'WABISTAY_PAID_ROOM_CONFIRMED', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD', 'WABISTAY_STAY_MENU'];
+const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_GATE_ROOM_CHECK', 'WABISTAY_GUEST_ADDRESS', 'WABISTAY_HIDE_ONE_HOUR', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_INTERACTIVE', 'WABISTAY_LEAN_COPY', 'WABISTAY_MESSAGE_DEDUPE', 'WABISTAY_NONTEXT_REPLY', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_PAID_BY_BOOKING_REF', 'WABISTAY_PAID_ROOM_CONFIRMED', 'WABISTAY_PAY_ASSIGNS_ROOM', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD', 'WABISTAY_STAY_MENU'];
 
 function wabistayFlagState() {
   const names = new Set([...WABISTAY_KNOWN_FLAGS, ...Object.keys(process.env).filter(k => k.startsWith('WABISTAY_'))]);
@@ -1737,6 +1738,25 @@ function guestAddressBlock(property) {
     .map(f => String(property.fields[f] || '').trim())
     .filter(Boolean);
   return lines.length ? lines.join('\n') + '\n\n' : '';
+}
+// WABISTAY_PAY_ASSIGNS_ROOM (1 or true; off by default). A guest who tapped "I'm at the gate" before
+// paying is waiting for reception. When reception then records the payment, the guest is checked in
+// and sent their room automatically (the same check-in and welcome as a second tap), once.
+// For ten minutes after that automatic check-in a tap of 1 is answered "already checked in" instead of
+// checking the guest out. An automatic check-in is recognised from the booking's own timestamps: the
+// gate tap came first, payment after it, and the check-in within two minutes of the payment.
+function payAssignsRoomEnabled() {
+  return /^(1|true)$/i.test(String(process.env.WABISTAY_PAY_ASSIGNS_ROOM || '').trim());
+}
+const PAY_ASSIGNS_GUARD_MS = 10 * 60 * 1000;
+const PAY_ASSIGNS_CHECKIN_AFTER_PAID_MS = 2 * 60 * 1000;
+const PAY_ASSIGNS_TAP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+function isAutoCheckedIn(booking) {
+  const tap = Date.parse(booking.fields['Gate Tap At'] || '');
+  const paid = Date.parse(booking.fields['Paid At'] || '');
+  const inAt = Date.parse(booking.fields['Checked In At'] || '');
+  if (!(tap > 0) || !(paid > 0) || !(inAt > 0)) return false;
+  return paid >= tap && inAt >= paid && inAt - paid <= PAY_ASSIGNS_CHECKIN_AFTER_PAID_MS;
 }
 function confirmedMenuMessage(property, guestName) {
   return msg('confirmedMenu', { guestName, addressBlock: guestAddressBlock(property) });
@@ -3403,6 +3423,39 @@ const actions = {
     }
   },
 
+  // WABISTAY_PAY_ASSIGNS_ROOM: the guest tapped the gate before paying and reception has now recorded
+  // the payment. Runs today's gateArrival for that guest (same room check, race guard, check-in, welcome,
+  // alerts), forcing the room-must-be-Available check, then tells the seat what happened.
+  async autoCheckInAfterPayment(ctx, booking) {
+    const tapAge = Date.now() - Date.parse(booking.fields['Gate Tap At']);
+    const guestId = (booking.fields['Guest'] || [])[0];
+    const guest = guestId ? (await airtableGet('WS_Guests', `RECORD_ID() = '${guestId}'`))[0] || null : null;
+    const skip = async (reason) => {
+      logToAxiom('info', 'pay_assigns_room_skipped', { bookingId: booking.id, reason });
+    };
+    if (!(tapAge >= 0 && tapAge <= PAY_ASSIGNS_TAP_MAX_AGE_MS)) return skip('gate_tap_too_old');
+    if (!guest || guest.fields['Session State'] !== 'CONFIRMED') return skip('guest_not_waiting');
+    const open = await airtableGetBookingsByGuestId(guest.id, 'Confirmed');
+    if (open.length !== 1 || open[0].id !== booking.id) return skip('not_the_guests_only_confirmed_booking');
+    const guestPhone = formatPhone(String(guest.fields['Phone Number'] || ''));
+    if (!guestPhone) return skip('no_guest_phone');
+
+    const gateCtx = { phone: guestPhone, guest, property: ctx.property, next: 'CHECKED_IN', autoCheckIn: true, gateResult: {} };
+    await actions.gateArrival(gateCtx);
+    const r = gateCtx.gateResult;
+    logToAxiom('info', 'pay_assigns_room', { bookingId: booking.id, outcome: r.outcome || null, guestSendError: !!r.guestSendError });
+    const guestName = guest.fields['Guest Name'];
+    if (r.outcome === 'checked_in' && !r.guestSendError) {
+      await sendWhatsApp(ctx.phone, msg('payAssignsSent', { guestName, roomName: r.roomName || 'a room' }));
+    } else if (r.outcome === 'checked_in') {
+      await sendWhatsApp(ctx.phone, msg('payAssignsSendFailed', { guestName, roomName: r.roomName || 'a room' }));
+    } else if (r.outcome === 'room_not_ready') {
+      await sendWhatsApp(ctx.phone, msg('payAssignsRoomNotReady', { guestName, roomName: r.roomName, roomStatus: r.roomStatus }));
+    } else {
+      await sendWhatsApp(ctx.phone, msg('payAssignsFailed', { roomName: guestName }));
+    }
+  },
+
   // B8 (PAID): reception records cash taken at the desk. Reached only through
   // senderIsAuthorizedPaid, so every reply here is safe to send and goes to the
   // seat that just messaged us — inside the 24h window, so free-form is correct.
@@ -3638,6 +3691,17 @@ const actions = {
       amountPaid: formatAmount(parsed.amount),
       method
     }));
+
+    // WABISTAY_PAY_ASSIGNS_ROOM: a guest already waiting at the gate gets their room now. After the
+    // reply to reception and fenced off: a problem here can never undo or hide the recorded payment.
+    if (payAssignsRoomEnabled() && booking.fields['Status'] === 'Confirmed' && booking.fields['Gate Tap At']) {
+      try {
+        await actions.autoCheckInAfterPayment(ctx, booking);
+      } catch (err) {
+        logToAxiom('error', 'pay_assigns_room_failed', { bookingId: booking.id, message: err.message });
+        await sendWhatsApp(ctx.phone, msg('payAssignsFailed', { roomName: roomNameForCopy }));
+      }
+    }
   },
 
   // PR D (CEO decision, 2026-09-29): `CHECKOUT ROOM <n>` — staff closes out a
@@ -4868,6 +4932,7 @@ const actions = {
           guestName: ctx.guest.fields['Guest Name'],
           bookingDate: formatSastDateTime(bookedIn)
         }));
+        if (ctx.gateResult) ctx.gateResult.outcome = 'too_early';
         return;
       }
     }
@@ -4892,7 +4957,7 @@ const actions = {
       // No writes, no state change (CEO requirement): the guest can send
       // "I'm at the gate" again after paying, and this same check re-runs
       // fresh — nothing about this turn is remembered or needs undoing.
-      await sendWhatsApp(ctx.phone, msg('paymentNotYetConfirmed', {
+      await sendWhatsApp(ctx.phone, msg(payAssignsRoomEnabled() ? 'paymentNotYetConfirmedAuto' : 'paymentNotYetConfirmed', {
         guestName: ctx.guest.fields['Guest Name']
       }));
       // Tell the office the guest is on their way to it. After the guest's reply
@@ -4908,7 +4973,9 @@ const actions = {
       // the sweep can tell when nobody has dealt with the guest 15 minutes later.
       // One non-fatal timestamp write, after the guest's reply and the alert, in its
       // own try/catch: it can never block or delay either. Not for test phones.
-      if (enquiryTrackingEnabled() && !isTestGuest(ctx.guest) && !booking.fields['Gate Tap At']) {
+      // WABISTAY_PAY_ASSIGNS_ROOM also needs the tap remembered (test phones and tracking off included),
+      // because that is how reception's payment finds a guest who is waiting.
+      if (((enquiryTrackingEnabled() && !isTestGuest(ctx.guest)) || payAssignsRoomEnabled()) && !booking.fields['Gate Tap At']) {
         try {
           const tapWrite = await airtableUpdate('WS_Bookings', booking.id, { 'Gate Tap At': tapAt });
           if (tapWrite && tapWrite.error) {
@@ -4918,6 +4985,7 @@ const actions = {
           logToAxiom('error', 'gate_tap_stamp_write_failed', { bookingId: booking.id, message: err.message });
         }
       }
+      if (ctx.gateResult) ctx.gateResult.outcome = 'unpaid';
       return;
     }
 
@@ -4957,13 +5025,14 @@ const actions = {
     // booking and guest state stay exactly as they were) and the guest's next tap
     // re-runs this whole check. The guest's answer goes first; the alerts are fenced
     // off so a problem there can never cost the guest their reply.
-    if (room && gateRoomCheckEnabled() && room.fields['Status'] !== 'Available') {
+    if (room && (gateRoomCheckEnabled() || ctx.autoCheckIn) && room.fields['Status'] !== 'Available') {
       logToAxiom('info', 'gate_room_not_ready', {
         phone: ctx.phone, bookingId: booking ? booking.id : null, roomId: room.id,
         roomName: room.fields['Room Name'], roomStatus: room.fields['Status'] || null,
         heldRoomId, held: !!heldRoomId && room.id === heldRoomId
       });
-      await sendWhatsApp(ctx.phone, msg('gateRoomNotReady', { guestName: ctx.guest.fields['Guest Name'] }));
+      const notReadySend = await sendWhatsApp(ctx.phone, msg('gateRoomNotReady', { guestName: ctx.guest.fields['Guest Name'] }));
+      if (ctx.gateResult) Object.assign(ctx.gateResult, { outcome: 'room_not_ready', roomName: room.fields['Room Name'], roomStatus: room.fields['Status'] || 'Unknown', guestSendError: !!(notReadySend && notReadySend.error) });
       try {
         await alertRoomNotReadyAtGate(ctx, booking, room, notifyPhone);
       } catch (err) {
@@ -5023,6 +5092,7 @@ const actions = {
           phone: ctx.phone, bookingId: booking.id,
           currentStatus: freshBookingCheck[0] ? freshBookingCheck[0].fields['Status'] : null
         });
+        if (ctx.gateResult) ctx.gateResult.outcome = 'already_checked_in';
         return;
       }
 
@@ -5042,6 +5112,7 @@ const actions = {
           phone: ctx.phone, bookingId: booking.id, error: JSON.stringify(checkInWrite.error)
         });
         await sendWhatsApp(ctx.phone, msg('gateArrivalWriteFailed'));
+        if (ctx.gateResult) ctx.gateResult.outcome = 'write_failed';
         return;
       }
     }
@@ -5104,9 +5175,10 @@ const actions = {
 
     // Step 7: tell guest
     const propertyName = ctx.property.fields['Property Name'];
-    await sendWhatsApp(ctx.phone, assignedRoomName
+    const welcomeSend = await sendWhatsApp(ctx.phone, assignedRoomName
       ? msg('welcomeAssigned', { roomName: assignedRoomName, propertyName })
       : msg('welcomeUnassigned', { propertyName }));
+    if (ctx.gateResult) Object.assign(ctx.gateResult, { outcome: 'checked_in', roomName: assignedRoomName, guestSendError: !!(welcomeSend && welcomeSend.error) });
   },
 
   // CONFIRMED → "2": cancel
@@ -5147,6 +5219,20 @@ const actions = {
 
   // CHECKED_IN → "1": checkout + cleaner dispatch
   async checkout(ctx) {
+    // WABISTAY_PAY_ASSIGNS_ROOM: for ten minutes after an AUTOMATIC check-in (reception recorded payment
+    // for a guest already waiting at the gate), a tap of 1 is not a checkout: it is most likely the
+    // impatient second tap. Nothing is written and the guest stays CHECKED_IN.
+    if (payAssignsRoomEnabled()) {
+      const justIn = (await airtableGetBookingsByGuestId(ctx.guest.id, 'Checked In'))[0] || null;
+      const inAt = justIn ? Date.parse(justIn.fields['Checked In At'] || '') : NaN;
+      if (justIn && isAutoCheckedIn(justIn) && Date.now() - inAt < PAY_ASSIGNS_GUARD_MS) {
+        const roomId = (justIn.fields['Room'] || [])[0];
+        const roomRows = roomId ? await airtableGet('WS_Rooms', `RECORD_ID() = '${roomId}'`) : [];
+        logToAxiom('info', 'checkout_ignored_after_auto_checkin', { phone: ctx.phone, bookingId: justIn.id, minutesSince: Math.round((Date.now() - inAt) / 60000) });
+        await sendWhatsApp(ctx.phone, msg('payAssignsAlreadyCheckedIn', { roomName: roomRows[0] ? roomRows[0].fields['Room Name'] : 'your room' }));
+        return; // stay CHECKED_IN
+      }
+    }
     // F14: gate cooldown guard — checkout < 60s after check-in is ignored
     const recentBookings = await airtableGetBookingsByGuestId(ctx.guest.id, 'Checked In');
     if (recentBookings.length > 0 && recentBookings[0].fields['Checked In At']) {
