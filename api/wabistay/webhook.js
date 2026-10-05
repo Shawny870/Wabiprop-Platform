@@ -7697,15 +7697,16 @@ async function stayMenuForNow(property, now = new Date()) {
   }
   const keys = baseKeys.filter(k => prices[k] !== undefined);
   if (keys.length === 0) return null;
-  const detail = {
-    '1': '',
-    '2': '',
-    '3': ': arrive 08:00 to 15:00, leave by 17:00',
-    '4': ': check in 17:00 to 23:00, check out 10:00'
+  // The wording the guest reads; STAY_PRODUCTS labels stay as they are (booking note marker, confirmation text).
+  const menuText = {
+    '1': '2 hour stay, R' + prices['1'],
+    '2': '3 hour stay, R' + prices['2'],
+    '3': 'Full day stay, R' + prices['3'] + '. Arrive between 8am and 3pm, leave by 5pm.',
+    '4': 'Overnight stay, R' + prices['4'] + '. Check in between 5pm and 11pm, check out by 10am.'
   };
-  const lines = keys.map(k => k + ' - ' + STAY_PRODUCTS[k].label + ' (R' + prices[k] + ')' + detail[k]).join('\n');
+  const lines = keys.map(k => k + ' - ' + menuText[k]).join('\n');
   const phone = property.fields['Guest Redirect Phone'];
-  const anotherDayLine = 'Another day? Please phone reception' + (phone ? ' on ' + phone : '') + '.';
+  const anotherDayLine = 'Operating hours are 8am to 11pm. Another day? Please phone reception' + (phone ? ' on ' + phone : '') + '.';
   // From 17:00 the short stays are over for the day; the one-line menu says so first.
   const menuIntro = sastHourOfDate(now) >= 17 ? 'Short stays have finished for today.\n\n' : '';
   return { keys, prices, lines, anotherDayLine, menuIntro, dayRate, nightRate };
@@ -7740,6 +7741,10 @@ function stayWindowForArrival(product, arrival, now = new Date()) {
   else if (product.type === 'Day') coIso = sastToUtcIso(today, 17, 0);
   else coIso = sastToUtcIso(addSastDays(today, 1), 10, 0);
   return { ok: true, ciIso, coIso };
+}
+// The example time shown under "Sam Dlamini": an evening time for Overnight, an afternoon one otherwise.
+function stayExampleTime(product) {
+  return product.type === 'Overnight' ? '7pm' : '2pm';
 }
 function stayArrivalWindowText(product) {
   if (product.type === 'Hourly') return 'a short stay must start later today and before 17:00';
@@ -7816,7 +7821,7 @@ async function handleStayMenuChoice(ctx) {
   }
   logToAxiom('info', 'stay_menu_choice', { phone: ctx.phone, product: product.key, offered: menu.keys });
   if (!(await advanceGuestState(ctx, { 'Session State': 'AWAITING_HOURLY_DETAILS', 'Last Inbound At': new Date().toISOString() }))) return true;
-  await sendWhatsApp(ctx.phone, msg('hourlyAskDetailsLean'));
+  await sendWhatsApp(ctx.phone, msg('stayMenuAskDetails', { example: stayExampleTime(product) }));
   return true;
 }
 
@@ -7854,11 +7859,13 @@ async function collectStayMenuDetails(ctx, pending) {
   const knownName = ctx.guest.fields['Guest Name'] !== 'Unknown' ? ctx.guest.fields['Guest Name'] : null;
   const guestName = typedName || knownName;
 
-  const reask = async () => {
+  const reask = async (reason) => {
     // Keep the name they gave, so the next reply can be just a time.
     if (typedName && typedName !== knownName) await updateGuestState(ctx.guest.id, { 'Guest Name': typedName });
-    const example = product.type === 'Overnight' ? '7pm' : '2pm';
-    await sendWhatsApp(ctx.phone, msg('stayMenuTimeReask', { windowText: stayArrivalWindowText(product), example }));
+    const example = stayExampleTime(product);
+    // A time that has already passed gets its own message, not the window one.
+    if (reason === 'in_the_past') await sendWhatsApp(ctx.phone, msg('stayMenuTimePassed', { example }));
+    else await sendWhatsApp(ctx.phone, msg('stayMenuTimeReask', { windowText: stayArrivalWindowText(product), example }));
   };
 
   if (!arrival && ambiguousHour !== null) {
@@ -7873,13 +7880,13 @@ async function collectStayMenuDetails(ctx, pending) {
     }
   }
   if (!guestName || !arrival) {
-    await sendWhatsApp(ctx.phone, msg('hourlyDetailsRepromptLean'));
+    await sendWhatsApp(ctx.phone, msg('stayMenuDetailsReprompt', { example: stayExampleTime(product) }));
     return true;
   }
   const window = stayWindowForArrival(product, arrival, now);
   if (!window.ok) {
     logToAxiom('info', 'stay_menu_arrival_refused', { phone: ctx.phone, product: product.key, reason: window.reason });
-    await reask();
+    await reask(window.reason);
     return true;
   }
   const { ciIso, coIso } = window;
