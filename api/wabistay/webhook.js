@@ -6161,6 +6161,31 @@ async function logEnquiry(property, phone, outcome, opts = {}) {
         e.fields['Outcome'] === 'Invalid Input' &&
         (e.fields['Booking'] || []).length === 0)) return false;
 
+  // WABISTAY_AFTER_HOURS: a guest who books in the same closed window has their After Hours row turned into the
+  // Booked row, not a second row beside it.
+  if (outcome === 'Booked' && bookingId && afterHoursEnabled()) {
+    const w = closedWindowInfo(new Date());
+    const open = w && existing
+      .filter(e => e.fields['Phone Number'] === phone && e.fields['Outcome'] === 'After Hours' &&
+        (e.fields['Booking'] || []).length === 0 && Date.parse(e.fields['Created At'] || '') >= Date.parse(w.startIso))
+      .sort((a, b) => Date.parse(b.fields['Created At']) - Date.parse(a.fields['Created At']))[0];
+    if (open) {
+      const upd = { 'Outcome': 'Booked', 'Booking': [bookingId] };
+      if (checkInIso) upd['Requested Check In'] = checkInIso;
+      if (checkOutIso) upd['Requested Check Out'] = checkOutIso;
+      if (bookingType) upd['Booking Type'] = bookingType;
+      if (tracking && lastMessageAt) upd['Last Message At'] = lastMessageAt;
+      const updWrite = await airtableUpdate('WS_Enquiries', open.id, upd);
+      if (updWrite && updWrite.error) {
+        logToAxiom('error', 'enquiry_log_write_failed', { phone, propertyId: property.id, outcome, error: JSON.stringify(updWrite.error) });
+        return false;
+      }
+      logToAxiom('info', 'enquiry_logged', { phone, propertyId: property.id, outcome, bookingType: bookingType || null, upgradedFrom: 'After Hours' });
+      if (tracking) logToAxiom('info', 'enquiry_closed', { ...closed, testPhone: false });
+      return true;
+    }
+  }
+
   const fields = {
     'Phone Number': phone,
     'Property': [property.id],
@@ -7767,16 +7792,20 @@ function stayClock(ctx) {
   }
   return { menuNow: real, now: real };
 }
+const AFTER_HOURS_RESTART_STATES = ['AWAITING_STAY_TYPE', 'AWAITING_DETAILS', 'AWAITING_HOURLY_DETAILS', 'AWAITING_HOURLY_DURATION'];
 // Before dispatch, after staff and cleaner commands have had their turn. Sends the welcome when due and
 // returns { startIso } so the caller stamps it once the normal reply has gone; null when nothing was sent.
-async function afterHoursPrelude(ctx) {
+async function afterHoursPrelude(ctx, { restart = false } = {}) {
   const real = new Date();
   const w = closedWindowInfo(real);
   if (!w) return null;
   const guest = ctx.guest;
   const state = guest ? guest.fields['Session State'] : null;
   logToAxiom('info', 'after_hours_message', { phone: ctx.phone, sastHour: sastHourOfDate(real), sessionState: state || null });
-  if (guest && state && state !== 'NEW') return null;
+  // A guest who restarts ("hi" / "menu") from a step of the booking chat is welcomed like a new conversation;
+  // anyone with a booking, or at payment, ETA or rating, never is.
+  const restarting = restart && AFTER_HOURS_RESTART_STATES.includes(state) && ['hi', 'menu'].includes(ctx.text);
+  if (guest && state && state !== 'NEW' && !restarting) return null;
   const lastWelcome = guest && guest.fields['After Hours Reply At'];
   if (lastWelcome && Date.parse(lastWelcome) >= Date.parse(w.startIso)) return null;
   // A staff number is not a guest (same identity checks as the consent notice).
@@ -8040,7 +8069,10 @@ async function collectStayMenuDetails(ctx, pending) {
     if (typedName && typedName !== knownName) await updateGuestState(ctx.guest.id, { 'Guest Name': typedName });
     const example = stayExampleTime(product);
     // A time that has already passed gets its own message, not the window one.
-    if (reason === 'in_the_past') await sendWhatsApp(ctx.phone, msg('stayMenuTimePassed', { example }));
+    if (reason === 'in_the_past') {
+      const w = afterHoursEnabled() && !isTestGuest(ctx.guest) ? closedWindowInfo(new Date()) : null;
+      await sendWhatsApp(ctx.phone, msg('stayMenuTimePassed', { example, when: w && w.tomorrow ? 'tomorrow' : 'later today' }));
+    }
     else await sendWhatsApp(ctx.phone, msg('stayMenuTimeReask', { windowText: stayArrivalWindowText(product), example }));
   };
 
@@ -8558,6 +8590,13 @@ async function handleMessageInner(from, messageText, phoneNumberId, wamid, inter
     if (t.guard && !(await guards[t.guard](ctx))) continue;
     ctx.next = t.next || null;
     console.log(`[Dispatch] global → ${t.action}`);
+    // WABISTAY_AFTER_HOURS: "hi" / "menu" from a booking step restarts the chat, so it can carry the welcome.
+    if (t.action === 'greetAndAskStayType' && afterHoursEnabled() && !isTestGuest(guest)) {
+      const restartWelcome = await afterHoursPrelude(ctx, { restart: true });
+      await actions[t.action](ctx);
+      if (restartWelcome) await stampAfterHoursReply(ctx);
+      return;
+    }
     return actions[t.action](ctx);
   }
 

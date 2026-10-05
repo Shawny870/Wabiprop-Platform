@@ -80,7 +80,7 @@
     "stayMenuReprompt": "Sorry, I didn't catch that. Please reply with a number:\n{menuLines}\n\n{anotherDayLine}",
     "stayMenuAskDetails": "Please send your full name and the time you expect to arrive, each on a new line.\n\nExample:\nSam Dlamini\n{example}",
     "stayMenuDetailsReprompt": "Sorry, I didn't catch that. Please send your full name and arrival time, each on a new line.\n\nExample:\nSam Dlamini\n{example}",
-    "stayMenuTimePassed": "That time has already passed. Please send your full name and the time you expect to arrive, later today.\n\nExample:\nSam Dlamini\n{example}",
+    "stayMenuTimePassed": "That time has already passed. Please send your full name and the time you expect to arrive, {when}.\n\nExample:\nSam Dlamini\n{example}",
     "stayMenuTimeReask": "Sorry, {windowText}. Please send your full name and the time you expect to arrive, each on a new line.\n\nExample:\nSam Dlamini\n{example}",
     "stayMenuBookingReceived": "Thanks {guestName}! 🙏\n\nYour *{stayLabel}* is booked.\n\n*Ref:* {bookingRef}\n*Arriving:* {checkInText}\n*Until:* {checkOutText}\n*Price:* R{amount}",
     "stayMenuOwnerNewBooking": "📋 New *{stayLabel}* booking from {guestName}\nPhone: {phone}\nRef: {bookingRef}\nArriving: {checkInText}\nUntil: {checkOutText}\nPrice: R{amount}",

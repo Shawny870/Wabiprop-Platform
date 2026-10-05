@@ -320,3 +320,146 @@ test('the flag is on the cold-start list and reads off by default', () => {
   process.env.WABISTAY_AFTER_HOURS = '1';
   assert.strictEqual(wh.wabistayFlagState()['WABISTAY_AFTER_HOURS'], 'on');
 });
+
+// ── review changes: Booked replaces the After Hours row ──────────────────────
+
+const enquiries = ctx => ctx.airtable.tables['WS_Enquiries'];
+
+test('booking in the same closed window turns the After Hours row into the Booked row: one row, with the booking and dates', async () => {
+  atSast(23, 30);
+  const ctx = start({ guest: false }, { tracking: '1' });
+  await say('hi');
+  assert.strictEqual(enquiries(ctx).length, 1);
+  assert.strictEqual(enquiries(ctx)[0].fields['Outcome'], 'After Hours');
+  await say('4');
+  atSast(23, 40);
+  await say('Sam Dlamini\n7pm');
+  const rows = enquiries(ctx);
+  assert.strictEqual(rows.length, 1, 'no second row');
+  assert.strictEqual(rows[0].fields['Outcome'], 'Booked');
+  assert.deepStrictEqual(rows[0].fields['Booking'], [mine(ctx).id]);
+  assert.strictEqual(rows[0].fields['Requested Check In'], iso(19, 0, 7));
+  assert.strictEqual(rows[0].fields['Booking Type'], 'Overnight');
+});
+
+test('an After Hours row from an earlier window is left alone; a booking in open hours gets its own Booked row', async () => {
+  atSast(10, 0);
+  const ctx = start({ state: 'AWAITING_STAY_TYPE' }, { tracking: '1' });
+  ctx.airtable.tables['WS_Enquiries'].push({ id: 'recEnqOld', fields: { 'Phone Number': GUEST, 'Property': ['recP1'], 'Outcome': 'After Hours', 'Created At': iso(23, 30, 5) } });
+  await say('4');
+  await say('Sam Dlamini\n7pm');
+  const rows = enquiries(ctx);
+  assert.strictEqual(rows.length, 2);
+  assert.strictEqual(rows.find(r => r.id === 'recEnqOld').fields['Outcome'], 'After Hours');
+  assert.ok(rows.some(r => r.fields['Outcome'] === 'Booked'));
+});
+
+test('a guest who does not book keeps the After Hours row', async () => {
+  atSast(23, 30);
+  const ctx = start({ guest: false }, { tracking: '1' });
+  await say('hi');
+  await say('banana');
+  assert.deepStrictEqual(enquiries(ctx).map(r => r.fields['Outcome']), ['After Hours']);
+});
+
+test('flag off: a booking logs its own Booked row exactly as today', async () => {
+  atSast(10, 0);
+  const ctx = start({ state: 'AWAITING_STAY_TYPE' }, { after: null, tracking: '1' });
+  await say('4');
+  await say('Sam Dlamini\n7pm');
+  assert.deepStrictEqual(enquiries(ctx).map(r => r.fields['Outcome']), ['Booked']);
+});
+
+// ── review changes: "hi" / "menu" from a booking step gets the welcome ───────
+
+test('"hi" or "menu" from a booking step after 23:00 gets the welcome once, then the menu', async () => {
+  for (const [state, word] of [['AWAITING_STAY_TYPE', 'menu'], ['AWAITING_STAY_TYPE', 'hi'], ['AWAITING_DETAILS', 'hi'], ['AWAITING_HOURLY_DETAILS', 'menu'], ['AWAITING_HOURLY_DURATION', 'hi']]) {
+    atSast(23, 30);
+    const ctx = start({ state });
+    await say(word);
+    assert.deepStrictEqual(welcomes(ctx), [TOMORROW], `${state} ${word}`);
+    assert.ok(menuOf(ctx), `${state} ${word}: the menu follows`);
+    assert.strictEqual(guestRow(ctx)['After Hours Reply At'], iso(23, 30));
+    await say('hi');
+    assert.strictEqual(welcomes(ctx).length, 1, 'not twice in the same window');
+    mock.timers.reset();
+  }
+});
+
+test('00:30: the same restart gets the "later today" welcome', async () => {
+  atSast(0, 30, 7);
+  const ctx = start({ state: 'AWAITING_STAY_TYPE' });
+  await say('menu');
+  assert.deepStrictEqual(welcomes(ctx), [TODAY]);
+});
+
+test('a restart word from payment, ETA, confirmed, checked in or rating still gets no welcome', async () => {
+  for (const state of ['CONFIRMED', 'CHECKED_IN', 'AWAITING_PAYMENT_METHOD', 'AWAITING_ETA', 'AWAITING_RATING', 'AWAITING_RATING_FEEDBACK']) {
+    for (const word of ['hi', 'menu']) {
+      atSast(23, 30);
+      const ctx = start({ state });
+      await say(word).catch(() => {});
+      assert.deepStrictEqual(welcomes(ctx), [], `${state} ${word}`);
+      assert.strictEqual(guestRow(ctx)['After Hours Reply At'], undefined, `${state} ${word}`);
+      mock.timers.reset();
+    }
+  }
+});
+
+test('other words from a booking step get no welcome (the chat finishes normally)', async () => {
+  atSast(23, 30);
+  const ctx = start({ state: 'AWAITING_STAY_TYPE' });
+  await say('banana');
+  assert.deepStrictEqual(welcomes(ctx), []);
+});
+
+test('flag off: "menu" from a booking step after 23:00 gets no welcome', async () => {
+  atSast(23, 30);
+  const ctx = start({ state: 'AWAITING_STAY_TYPE' }, { after: null });
+  await say('menu');
+  assert.deepStrictEqual(welcomes(ctx), []);
+  assert.strictEqual(guestRow(ctx)['After Hours Reply At'], undefined);
+});
+
+test('a test phone restarting after 23:00 gets no welcome', async () => {
+  atSast(23, 30);
+  const ctx = start({ state: 'AWAITING_STAY_TYPE', testPhone: true });
+  await say('menu');
+  assert.deepStrictEqual(welcomes(ctx), []);
+});
+
+// ── review changes: the passed-time message ──────────────────────────────────
+
+test('passed-time message says "tomorrow" 23:00-23:59, "later today" from 00:00, and "later today" in open hours and with the flag off', async () => {
+  const cases = [
+    [[23, 30], 6, '1', 'Sam Dlamini\n7am', 'tomorrow', {}],
+    [[23, 0], 6, '1', 'Sam Dlamini\n7am', 'tomorrow', {}],
+    [[0, 30], 7, '1', 'Sam Dlamini\n7am', 'later today', {}],
+    [[10, 0], 6, '1', 'Sam Dlamini\n9am', 'later today', {}],
+    [[0, 30], 7, '1', 'Sam Dlamini\n7am', null, { after: null }]
+  ];
+  for (const [now, day, choice, reply, when, flags] of cases) {
+    atSast(now[0], now[1], day);
+    const ctx = start({ state: 'AWAITING_STAY_TYPE' }, flags);
+    await say(choice);
+    await say(reply);
+    if (when) {
+      assert.strictEqual(texts(ctx).slice(-1)[0], `That time has already passed. Please send your full name and the time you expect to arrive, ${when}.\n\nExample:\nSam Dlamini\n2pm`, JSON.stringify(now));
+    } else {
+      assert.ok(!/already passed/.test(texts(ctx).slice(-1)[0]), 'flag off at 00:30 7am: the old flow, not this message');
+    }
+    mock.timers.reset();
+  }
+});
+
+test('a closed-hours booking does not take over an After Hours row from an earlier night', async () => {
+  atSast(23, 30);
+  const ctx = start({ state: 'AWAITING_STAY_TYPE' }, { tracking: '1' });
+  ctx.airtable.tables['WS_Enquiries'].push({ id: 'recEnqOld', fields: { 'Phone Number': GUEST, 'Property': ['recP1'], 'Outcome': 'After Hours', 'Created At': iso(23, 30, 5) } });
+  await say('4');
+  await say('Sam Dlamini\n7pm');
+  const rows = enquiries(ctx);
+  assert.strictEqual(rows.find(r => r.id === 'recEnqOld').fields['Outcome'], 'After Hours', 'last night\'s row untouched');
+  assert.strictEqual(rows.length, 2);
+  assert.ok(rows.some(r => r.id !== 'recEnqOld' && r.fields['Outcome'] === 'Booked'));
+});
