@@ -56,7 +56,7 @@ const bookings = ctx => ctx.airtable.tables['WS_Bookings'];
 const mine = ctx => bookings(ctx).find(b => String(b.fields['Notes'] || '').startsWith('Stay: ')) || bookings(ctx)[0];
 const texts = (ctx, to = GUEST) => ctx.sends.filter(s => s.type === 'text' && s.to === to).map(s => s.body);
 const events = (ctx, n) => ctx.axiom.filter(e => e.event === n);
-const ANOTHER = `Another day? Please phone reception on ${LODGE}.`;
+const ANOTHER = `Operating hours are 8am to 11pm. Another day? Please phone reception on ${LODGE}.`;
 
 // ── the menu by time ─────────────────────────────────────────────────────────
 
@@ -68,7 +68,7 @@ test('08:00-11:59: all four products, fixed keys, prices, windows, and the phone
     const menu = texts(ctx).find(t => /What would you like to book/.test(t));
     assert.ok(menu, `${h}:${m}`);
     assert.match(menu, /^Hi! 👋 Welcome to Canary Street Guest Rooms/);
-    assert.match(menu, /1 - 2 hours \(R250\)\n2 - 3 hours \(R300\)\n3 - Day \(R400\): arrive 08:00 to 15:00, leave by 17:00\n4 - Overnight \(R500\): check in 17:00 to 23:00, check out 10:00\n\n/);
+    assert.match(menu, /1 - 2 hour stay, R250\n2 - 3 hour stay, R300\n3 - Full day stay, R400\. Arrive between 8am and 3pm, leave by 5pm\.\n4 - Overnight stay, R500\. Check in between 5pm and 11pm, check out by 10am\.\n\n/);
     assert.ok(menu.endsWith(ANOTHER), 'ends with the phone line');
     assert.strictEqual(guestRow(ctx)['Session State'], 'AWAITING_STAY_TYPE');
     mock.timers.reset();
@@ -81,8 +81,8 @@ test('12:00-16:59: 2h, 3h and Overnight — Day is gone, but keys stay fixed (1,
     const ctx = start();
     await say('hi');
     const menu = texts(ctx).find(t => /What would you like to book/.test(t));
-    assert.match(menu, /1 - 2 hours \(R250\)\n2 - 3 hours \(R300\)\n4 - Overnight \(R500\)/);
-    assert.ok(!/Day/.test(menu.replace('Another day?', '')), `${h}:${m}`);
+    assert.match(menu, /1 - 2 hour stay, R250\n2 - 3 hour stay, R300\n4 - Overnight stay, R500\. Check in between 5pm and 11pm, check out by 10am\./);
+    assert.ok(!/day stay/i.test(menu), `${h}:${m}`);
     assert.ok(!/\n3 - /.test(menu));
     mock.timers.reset();
   }
@@ -94,8 +94,8 @@ test('17:00-22:59: Overnight only', async () => {
     const ctx = start();
     await say('hi');
     const menu = texts(ctx).find(t => /What would you like to book/.test(t));
-    assert.match(menu, /Reply with a number:\n4 - Overnight \(R500\): check in 17:00 to 23:00, check out 10:00\n\n/);
-    assert.ok(!/hours \(/.test(menu));
+    assert.match(menu, /Reply with a number:\n4 - Overnight stay, R500\. Check in between 5pm and 11pm, check out by 10am\.\n\n/);
+    assert.ok(!/hour stay/.test(menu));
     mock.timers.reset();
   }
 });
@@ -124,7 +124,7 @@ test('a product with no price is left off; with nothing priceable there is no me
   const noDay = start({ dayRate: null });
   await say('hi');
   assert.ok(!/3 - Day/.test(texts(noDay).join('\n')), 'no Per Day row: Day is not offered');
-  assert.match(texts(noDay).join('\n'), /4 - Overnight \(R500\)/);
+  assert.match(texts(noDay).join('\n'), /4 - Overnight stay, R500\./);
   mock.timers.reset();
 
   atSast(9, 0);
@@ -179,6 +179,16 @@ test('choosing a product parks it on an inert booking row and asks for name and 
   assert.deepStrictEqual(texts(ctx), ['Please send your full name and the time you expect to arrive, each on a new line.\n\nExample:\nSam Dlamini\n2pm']);
 });
 
+test('the name-and-time request shows 7pm for Overnight and 2pm for the others', async () => {
+  for (const [choice, example, now] of [['1', '2pm', [9, 0]], ['2', '2pm', [9, 0]], ['3', '2pm', [9, 0]], ['4', '7pm', [12, 0]]]) {
+    atSast(now[0], now[1]);
+    const ctx = start({ state: 'AWAITING_STAY_TYPE' });
+    await say(choice);
+    assert.strictEqual(texts(ctx).slice(-1)[0], 'Please send your full name and the time you expect to arrive, each on a new line.\n\nExample:\nSam Dlamini\n' + example, choice);
+    mock.timers.reset();
+  }
+});
+
 test('each product maps to its own Booking Type and note; picking again reuses the same row', async () => {
   atSast(9, 0);
   for (const [reply, type, note] of [['1', 'Hourly', 'Stay: 2 hours'], ['2', 'Hourly', 'Stay: 3 hours'], ['day', 'Day', 'Stay: Day'], ['overnight', 'Overnight', 'Stay: Overnight']]) {
@@ -204,7 +214,7 @@ test('a product that is not on sale right now (Day at 12:30) or a junk reply get
   const again = texts(ctx);
   assert.strictEqual(again.length, 2);
   for (const t of again) {
-    assert.match(t, /^Sorry, I didn't catch that\. Please reply with a number:\n1 - 2 hours \(R250\)\n2 - 3 hours \(R300\)\n4 - Overnight \(R500\)/);
+    assert.match(t, /^Sorry, I didn't catch that\. Please reply with a number:\n1 - 2 hour stay, R250\n2 - 3 hour stay, R300\n4 - Overnight stay, R500\. Check in between 5pm and 11pm, check out by 10am\./);
     assert.ok(t.endsWith(ANOTHER));
   }
   assert.strictEqual(bookings(ctx).length, 0);
@@ -364,7 +374,8 @@ test('arrival outside the window is refused with the window restated, no booking
 
 test('a time already past today is refused (the stay is always today)', async () => {
   const ctx = await book('1', 'Sam Dlamini\n9am', { now: [10, 0] });
-  assert.match(texts(ctx).slice(-1)[0], /a short stay must start later today and before 17:00/);
+  assert.strictEqual(texts(ctx).slice(-1)[0], 'That time has already passed. Please send your full name and the time you expect to arrive, later today.\n\nExample:\nSam Dlamini\n2pm');
+  assert.ok(!/must start later today|Sorry/.test(texts(ctx).slice(-1)[0]), 'not the window message');
   assert.strictEqual(mine(ctx).fields['Status'], 'Enquiry');
 });
 
@@ -516,7 +527,7 @@ test('17:00-22:59: the one-line menu starts with "Short stays have finished for 
     const ctx = start();
     await say('hi');
     const menu = texts(ctx).find(t => /What would you like to book/.test(t));
-    assert.match(menu, /Short stays have finished for today\.\n\nWhat would you like to book\? Reply with a number:\n4 - Overnight \(R500\): check in 17:00 to 23:00, check out 10:00\n\nAnother day\? Please phone reception on 0730260871\.$/, `${h}:${m}`);
+    assert.match(menu, /Short stays have finished for today\.\n\nWhat would you like to book\? Reply with a number:\n4 - Overnight stay, R500\. Check in between 5pm and 11pm, check out by 10am\.\n\nOperating hours are 8am to 11pm\. Another day\? Please phone reception on 0730260871\.$/, `${h}:${m}`);
     mock.timers.reset();
   }
   for (const [h, m] of [[8, 0], [11, 59], [12, 0], [16, 59]]) {
@@ -533,4 +544,9 @@ test('the evening line follows the clock, not which products happen to be priced
   const ctx = start({ dayRate: null, hourly: { 'Hourly Rate 2hr': null } });   // only Overnight priced at 09:00
   await say('hi');
   assert.ok(!/Short stays have finished/.test(texts(ctx).join('\n')), 'at 09:00 short stays have not finished, even if none is priced');
+});
+
+test('an unreadable reply to Overnight gets the re-prompt with the 7pm example; the others keep 2pm', async () => {
+  const ctx = await book('4', 'hello there', { now: [12, 0] });
+  assert.strictEqual(texts(ctx).slice(-1)[0], "Sorry, I didn't catch that. Please send your full name and arrival time, each on a new line.\n\nExample:\nSam Dlamini\n7pm");
 });
