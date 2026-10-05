@@ -371,6 +371,7 @@ async function advanceGuestState(ctx, fields, extra = {}) {
 // deployment id are Vercel system variables, not secrets, and say which
 // deployment this log line belongs to.
 const WABISTAY_KNOWN_FLAGS = [
+  'WABISTAY_AFTER_HOURS',
   'WABISTAY_CLEANER_DISPATCH_TEMPLATE',
   'WABISTAY_CLEANER_GATE_TEMPLATE',
   'WABISTAY_ENQUIRY_TRACKING',
@@ -404,7 +405,7 @@ const WABISTAY_KNOWN_FLAGS = [
 
 // Switches the code only treats as on for 1/true; for these, 'on' means that,
 // not merely 'set'.
-const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_GATE_ROOM_CHECK', 'WABISTAY_GUEST_ADDRESS', 'WABISTAY_HIDE_ONE_HOUR', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_INTERACTIVE', 'WABISTAY_LEAN_COPY', 'WABISTAY_MESSAGE_DEDUPE', 'WABISTAY_NONTEXT_REPLY', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_PAID_BY_BOOKING_REF', 'WABISTAY_PAID_ROOM_CONFIRMED', 'WABISTAY_PAY_ASSIGNS_ROOM', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD', 'WABISTAY_STAY_MENU'];
+const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_AFTER_HOURS', 'WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_GATE_ROOM_CHECK', 'WABISTAY_GUEST_ADDRESS', 'WABISTAY_HIDE_ONE_HOUR', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_INTERACTIVE', 'WABISTAY_LEAN_COPY', 'WABISTAY_MESSAGE_DEDUPE', 'WABISTAY_NONTEXT_REPLY', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_PAID_BY_BOOKING_REF', 'WABISTAY_PAID_ROOM_CONFIRMED', 'WABISTAY_PAY_ASSIGNS_ROOM', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD', 'WABISTAY_STAY_MENU'];
 
 function wabistayFlagState() {
   const names = new Set([...WABISTAY_KNOWN_FLAGS, ...Object.keys(process.env).filter(k => k.startsWith('WABISTAY_'))]);
@@ -6160,6 +6161,31 @@ async function logEnquiry(property, phone, outcome, opts = {}) {
         e.fields['Outcome'] === 'Invalid Input' &&
         (e.fields['Booking'] || []).length === 0)) return false;
 
+  // WABISTAY_AFTER_HOURS: a guest who books in the same closed window has their After Hours row turned into the
+  // Booked row, not a second row beside it.
+  if (outcome === 'Booked' && bookingId && afterHoursEnabled()) {
+    const w = closedWindowInfo(new Date());
+    const open = w && existing
+      .filter(e => e.fields['Phone Number'] === phone && e.fields['Outcome'] === 'After Hours' &&
+        (e.fields['Booking'] || []).length === 0 && Date.parse(e.fields['Created At'] || '') >= Date.parse(w.startIso))
+      .sort((a, b) => Date.parse(b.fields['Created At']) - Date.parse(a.fields['Created At']))[0];
+    if (open) {
+      const upd = { 'Outcome': 'Booked', 'Booking': [bookingId] };
+      if (checkInIso) upd['Requested Check In'] = checkInIso;
+      if (checkOutIso) upd['Requested Check Out'] = checkOutIso;
+      if (bookingType) upd['Booking Type'] = bookingType;
+      if (tracking && lastMessageAt) upd['Last Message At'] = lastMessageAt;
+      const updWrite = await airtableUpdate('WS_Enquiries', open.id, upd);
+      if (updWrite && updWrite.error) {
+        logToAxiom('error', 'enquiry_log_write_failed', { phone, propertyId: property.id, outcome, error: JSON.stringify(updWrite.error) });
+        return false;
+      }
+      logToAxiom('info', 'enquiry_logged', { phone, propertyId: property.id, outcome, bookingType: bookingType || null, upgradedFrom: 'After Hours' });
+      if (tracking) logToAxiom('info', 'enquiry_closed', { ...closed, testPhone: false });
+      return true;
+    }
+  }
+
   const fields = {
     'Phone Number': phone,
     'Property': [property.id],
@@ -7728,6 +7754,81 @@ function matchTransition(rows, text) {
   return rows.find(t => t.inputs === '*' || t.inputs.includes(text)) || null;
 }
 
+// ─── CLOSED HOURS (WABISTAY_AFTER_HOURS) ─────────────────────────────────────
+// Open 08:00 to 23:00 SAST; closed 23:00 to 07:59. Off by default. On, for a guest who is not a test phone:
+//   · a conversation that STARTS in the closed window gets one welcome per window (stamped in
+//     WS_Guests 'After Hours Reply At'), then the normal greeting. 23:00-23:59 says tomorrow, 00:00-07:59
+//     says later today. Guests mid-booking, with a booking, or rating are not interrupted.
+//   · the stay menu (needs WABISTAY_STAY_MENU) is the 08:00 menu, and arrivals are judged against 08:00 of
+//     the day the stay will start (tomorrow from 23:00, today after midnight), worked out when the
+//     name-and-time reply arrives, not when the chat began. A reply to a menu shown before 23:00 still means
+//     what the guest saw.
+//   · the first message of a conversation that starts closed is recorded as an 'After Hours' enquiry
+//     (when enquiry tracking is on). An 'after_hours_message' event goes to Axiom for every closed message.
+function afterHoursEnabled() {
+  return /^(1|true)$/i.test(String(process.env.WABISTAY_AFTER_HOURS || '').trim());
+}
+// null while open; else when this closed window started and when the lodge next opens.
+function closedWindowInfo(now = new Date()) {
+  const hour = sastHourOfDate(now);
+  if (hour >= 8 && hour < 23) return null;
+  const today = sastCalendarDate(now);
+  if (hour >= 23) {
+    return { tomorrow: true, startIso: sastToUtcIso(today, 23, 0), openIso: sastToUtcIso(addSastDays(today, 1), 8, 0) };
+  }
+  return { tomorrow: false, startIso: sastToUtcIso(addSastDays(today, -1), 23, 0), openIso: sastToUtcIso(today, 8, 0) };
+}
+// The clock the stay menu uses: the real one while open (or flag off, or a test phone); in the closed
+// window, 08:00 on opening day for the menu band and one second before it for window and "already
+// passed" checks, so an 08:00 arrival is allowed.
+function stayClock(ctx) {
+  const real = new Date();
+  if (afterHoursEnabled() && !isTestGuest(ctx.guest)) {
+    const w = closedWindowInfo(real);
+    if (w) {
+      const open = new Date(Date.parse(w.openIso));
+      return { menuNow: open, now: new Date(open.getTime() - 1000) };
+    }
+  }
+  return { menuNow: real, now: real };
+}
+const AFTER_HOURS_RESTART_STATES = ['AWAITING_STAY_TYPE', 'AWAITING_DETAILS', 'AWAITING_HOURLY_DETAILS', 'AWAITING_HOURLY_DURATION'];
+// Before dispatch, after staff and cleaner commands have had their turn. Sends the welcome when due and
+// returns { startIso } so the caller stamps it once the normal reply has gone; null when nothing was sent.
+async function afterHoursPrelude(ctx, { restart = false } = {}) {
+  const real = new Date();
+  const w = closedWindowInfo(real);
+  if (!w) return null;
+  const guest = ctx.guest;
+  const state = guest ? guest.fields['Session State'] : null;
+  logToAxiom('info', 'after_hours_message', { phone: ctx.phone, sastHour: sastHourOfDate(real), sessionState: state || null });
+  // A guest who restarts ("hi" / "menu") from a step of the booking chat is welcomed like a new conversation;
+  // anyone with a booking, or at payment, ETA or rating, never is.
+  const restarting = restart && AFTER_HOURS_RESTART_STATES.includes(state) && ['hi', 'menu'].includes(ctx.text);
+  if (guest && state && state !== 'NEW' && !restarting) return null;
+  const lastWelcome = guest && guest.fields['After Hours Reply At'];
+  if (lastWelcome && Date.parse(lastWelcome) >= Date.parse(w.startIso)) return null;
+  // A staff number is not a guest (same identity checks as the consent notice).
+  const isCleaner = (await airtableGet('WS_Cleaners', `{Phone Number} = '${ctx.phone}'`)).length > 0;
+  if (isCleaner || isOwnerSideNumber(ctx.phone, ctx.property) || (await activeWalkinRoleForPhone(ctx.phone)) !== null) return null;
+  await sendWhatsApp(ctx.phone, msg(w.tomorrow ? 'afterHoursWelcomeTomorrow' : 'afterHoursWelcomeToday'));
+  logToAxiom('info', 'after_hours_welcome_sent', { phone: ctx.phone, tomorrow: w.tomorrow });
+  if (enquiryTrackingEnabled()) {
+    await logEnquiry(ctx.property, ctx.phone, 'After Hours', { ...enquiryTrackingOpts(ctx), lastStep: state || 'NEW' });
+  }
+  return { startIso: w.startIso };
+}
+async function stampAfterHoursReply(ctx) {
+  try {
+    const rows = ctx.guest ? [ctx.guest] : await airtableGet('WS_Guests', `{Phone Number} = '${ctx.phone}'`);
+    if (!rows[0]) return;
+    const write = await airtableUpdate('WS_Guests', rows[0].id, { 'After Hours Reply At': new Date().toISOString() });
+    if (write && write.error) logToAxiom('error', 'after_hours_stamp_failed', { phone: ctx.phone, error: JSON.stringify(write.error) });
+  } catch (err) {
+    logToAxiom('error', 'after_hours_stamp_failed', { phone: ctx.phone, message: err.message });
+  }
+}
+
 // ─── STAY MENU (WABISTAY_STAY_MENU) — slice 1 ────────────────────────────────
 // Numbered TEXT menu of what is on sale right now, by SAST time of day. Off by default.
 // Slice 1 only: no buttons or lists, no closed-hours flow, no hold-release work, and the
@@ -7878,7 +7979,7 @@ function stayProductFromBooking(booking) {
 
 // The greeting with the menu in it (one message). Null when the menu does not apply.
 async function stayMenuGreeting(ctx, roomCount) {
-  const menu = await stayMenuForNow(ctx.property, new Date());
+  const menu = await stayMenuForNow(ctx.property, stayClock(ctx).menuNow);
   if (!menu) return null;
   return msg('greetingStayMenu', {
     propertyName: ctx.property.fields['Property Name'],
@@ -7893,7 +7994,7 @@ async function stayMenuGreeting(ctx, roomCount) {
 // AWAITING_STAY_TYPE with the flag on. Returns true when the reply was dealt with here;
 // false hands it to today's handler (closed hours, nothing priceable, typed multiple-days words).
 async function handleStayMenuChoice(ctx) {
-  const menu = await stayMenuForNow(ctx.property, new Date());
+  const menu = await stayMenuForNow(ctx.property, stayClock(ctx).menuNow);
   if (!menu) return false;
   const choice = parseStayMenuChoice(ctx.text);
   if (choice === 'multi') return false;
@@ -7937,7 +8038,7 @@ async function collectStayMenuDetails(ctx, pending) {
     // Marker we cannot read: leave it to today's handler rather than guess a product.
     return false;
   }
-  const now = new Date();
+  const now = stayClock(ctx).now;
   const lines = ctx.messageText.trim().split('\n').map(l => l.trim()).filter(Boolean);
   let typedName = null;
   let arrival = null;
@@ -7968,7 +8069,10 @@ async function collectStayMenuDetails(ctx, pending) {
     if (typedName && typedName !== knownName) await updateGuestState(ctx.guest.id, { 'Guest Name': typedName });
     const example = stayExampleTime(product);
     // A time that has already passed gets its own message, not the window one.
-    if (reason === 'in_the_past') await sendWhatsApp(ctx.phone, msg('stayMenuTimePassed', { example }));
+    if (reason === 'in_the_past') {
+      const w = afterHoursEnabled() && !isTestGuest(ctx.guest) ? closedWindowInfo(new Date()) : null;
+      await sendWhatsApp(ctx.phone, msg('stayMenuTimePassed', { example, when: w && w.tomorrow ? 'tomorrow' : 'later today' }));
+    }
     else await sendWhatsApp(ctx.phone, msg('stayMenuTimeReask', { windowText: stayArrivalWindowText(product), example }));
   };
 
@@ -8486,6 +8590,13 @@ async function handleMessageInner(from, messageText, phoneNumberId, wamid, inter
     if (t.guard && !(await guards[t.guard](ctx))) continue;
     ctx.next = t.next || null;
     console.log(`[Dispatch] global → ${t.action}`);
+    // WABISTAY_AFTER_HOURS: "hi" / "menu" from a booking step restarts the chat, so it can carry the welcome.
+    if (t.action === 'greetAndAskStayType' && afterHoursEnabled() && !isTestGuest(guest)) {
+      const restartWelcome = await afterHoursPrelude(ctx, { restart: true });
+      await actions[t.action](ctx);
+      if (restartWelcome) await stampAfterHoursReply(ctx);
+      return;
+    }
     return actions[t.action](ctx);
   }
 
@@ -8497,8 +8608,12 @@ async function handleMessageInner(from, messageText, phoneNumberId, wamid, inter
   const transition = matchTransition(STATES.states[stateKey], text);
   if (!transition) return; // unreachable while every state has a "*" row
   ctx.next = transition.next || null;
+  // WABISTAY_AFTER_HOURS: the closed-hours welcome (once per window) goes before the normal reply.
+  const afterHours = afterHoursEnabled() && !isTestGuest(guest) ? await afterHoursPrelude(ctx) : null;
   console.log(`[Dispatch] ${stateKey} → ${transition.action}${ctx.next ? ' → ' + ctx.next : ''}`);
-  return actions[transition.action](ctx);
+  if (!afterHours) return actions[transition.action](ctx);
+  await actions[transition.action](ctx);
+  await stampAfterHoursReply(ctx);
 }
 
 // ─── MAIN HANDLER ────────────────────────────────────────────────────────────
