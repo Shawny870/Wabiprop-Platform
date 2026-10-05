@@ -377,6 +377,7 @@ const WABISTAY_KNOWN_FLAGS = [
   'WABISTAY_GATE_ALERT_UNPAID',
   'WABISTAY_GATE_ARRIVAL_TEMPLATE',
   'WABISTAY_GATE_ROOM_CHECK',
+  'WABISTAY_GUEST_ADDRESS',
   'WABISTAY_GUEST_ESCALATION_TEMPLATE',
   'WABISTAY_DAILY_SUMMARY_TEMPLATE',
   'WABISTAY_HIDE_ONE_HOUR',
@@ -402,7 +403,7 @@ const WABISTAY_KNOWN_FLAGS = [
 
 // Switches the code only treats as on for 1/true; for these, 'on' means that,
 // not merely 'set'.
-const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_GATE_ROOM_CHECK', 'WABISTAY_HIDE_ONE_HOUR', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_INTERACTIVE', 'WABISTAY_LEAN_COPY', 'WABISTAY_MESSAGE_DEDUPE', 'WABISTAY_NONTEXT_REPLY', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_PAID_BY_BOOKING_REF', 'WABISTAY_PAID_ROOM_CONFIRMED', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD', 'WABISTAY_STAY_MENU'];
+const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_GATE_ROOM_CHECK', 'WABISTAY_GUEST_ADDRESS', 'WABISTAY_HIDE_ONE_HOUR', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_INTERACTIVE', 'WABISTAY_LEAN_COPY', 'WABISTAY_MESSAGE_DEDUPE', 'WABISTAY_NONTEXT_REPLY', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_PAID_BY_BOOKING_REF', 'WABISTAY_PAID_ROOM_CONFIRMED', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD', 'WABISTAY_STAY_MENU'];
 
 function wabistayFlagState() {
   const names = new Set([...WABISTAY_KNOWN_FLAGS, ...Object.keys(process.env).filter(k => k.startsWith('WABISTAY_'))]);
@@ -1722,6 +1723,23 @@ function hourlyRates(property) {
 // "Tim 9pm" or "9pm Tim" is accepted. The fail-closed rates check is unchanged.
 function leanCopyEnabled() {
   return /^(1|true)$/i.test(String(process.env.WABISTAY_LEAN_COPY || '').trim());
+}
+// WABISTAY_GUEST_ADDRESS (1 or true; off by default). The booking-confirmed messages (confirmedMenu,
+// the overnight etaConfirmed, and the CONFIRMED fallback that reuses confirmedMenu) carry the lodge's
+// Guest Address and, on its own line, Guest Maps Link, between the "confirmed" / "See you at" line and
+// "Reply with a number". Each line shows only when its WS_Properties field is filled. Off: today's text.
+function guestAddressEnabled() {
+  return /^(1|true)$/i.test(String(process.env.WABISTAY_GUEST_ADDRESS || '').trim());
+}
+function guestAddressBlock(property) {
+  if (!guestAddressEnabled() || !property) return '';
+  const lines = ['Guest Address', 'Guest Maps Link']
+    .map(f => String(property.fields[f] || '').trim())
+    .filter(Boolean);
+  return lines.length ? lines.join('\n') + '\n\n' : '';
+}
+function confirmedMenuMessage(property, guestName) {
+  return msg('confirmedMenu', { guestName, addressBlock: guestAddressBlock(property) });
 }
 // Words that may sit directly in front of a time ("Tim at 9pm") and are not part of the name.
 const TIME_FILLER_WORDS = new Set(['at', 'around', 'about', 'by', 'before', 'after', 'approx', 'approximately', 'roughly', 'from', '@']);
@@ -4723,7 +4741,7 @@ const actions = {
       }
       if (!(await advanceGuestState(ctx, { 'Session State': nextState, 'Last Inbound At': new Date().toISOString() }, { bookingId: booking.id }))) return;
       await sendWhatsApp(ctx.phone, msg('paymentCardChosen'));
-      await sendWhatsApp(ctx.phone, isHourly ? msg('confirmedMenu', { guestName }) : msg('askEta'));
+      await sendWhatsApp(ctx.phone, isHourly ? confirmedMenuMessage(ctx.property, guestName) : msg('askEta'));
       return;
     }
 
@@ -4766,7 +4784,7 @@ const actions = {
       reference,
       bankDetailsBlock
     }));
-    await sendWhatsApp(ctx.phone, isHourly ? msg('confirmedMenu', { guestName }) : msg('askEta'));
+    await sendWhatsApp(ctx.phone, isHourly ? confirmedMenuMessage(ctx.property, guestName) : msg('askEta'));
   },
 
   // AWAITING_ETA: record ETA, confirm booking
@@ -4811,7 +4829,7 @@ const actions = {
       });
     }
     logToAxiom('info', 'state_transition', { phone: ctx.phone, guestId: ctx.guest.id, from: 'AWAITING_ETA', to: ctx.next, eta });
-    await sendWhatsApp(ctx.phone, msg('etaConfirmed', { eta, propertyName: ctx.property.fields['Property Name'] }));
+    await sendWhatsApp(ctx.phone, msg('etaConfirmed', { eta, propertyName: ctx.property.fields['Property Name'], addressBlock: guestAddressBlock(ctx.property) }));
   },
 
   // CONFIRMED → "1": gate arrival (F11)
@@ -5124,7 +5142,7 @@ const actions = {
 
   // CONFIRMED fallback menu (F9)
   async showConfirmedMenu(ctx) {
-    await sendWhatsApp(ctx.phone, msg('confirmedMenu', { guestName: ctx.guest.fields['Guest Name'] }));
+    await sendWhatsApp(ctx.phone, confirmedMenuMessage(ctx.property, ctx.guest.fields['Guest Name']));
   },
 
   // CHECKED_IN → "1": checkout + cleaner dispatch
