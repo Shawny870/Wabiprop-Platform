@@ -374,6 +374,7 @@ const WABISTAY_KNOWN_FLAGS = [
   'WABISTAY_AFTER_HOURS',
   'WABISTAY_CLEANER_DISPATCH_TEMPLATE',
   'WABISTAY_CLEANER_GATE_TEMPLATE',
+  'WABISTAY_CHECKOUT_BUTTON',
   'WABISTAY_ENQUIRY_TRACKING',
   'WABISTAY_GATE_ALERT_UNPAID',
   'WABISTAY_GATE_ARRIVAL_TEMPLATE',
@@ -407,7 +408,7 @@ const WABISTAY_KNOWN_FLAGS = [
 
 // Switches the code only treats as on for 1/true; for these, 'on' means that,
 // not merely 'set'.
-const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_AFTER_HOURS', 'WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_GATE_REQUIRES_BOOKING', 'WABISTAY_GATE_ROOM_CHECK', 'WABISTAY_GUEST_ADDRESS', 'WABISTAY_HIDE_ONE_HOUR', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_INTERACTIVE', 'WABISTAY_LEAN_COPY', 'WABISTAY_MESSAGE_DEDUPE', 'WABISTAY_NONTEXT_REPLY', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_ONE_OPEN_BOOKING', 'WABISTAY_PAID_BY_BOOKING_REF', 'WABISTAY_PAID_ROOM_CONFIRMED', 'WABISTAY_PAY_ASSIGNS_ROOM', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD', 'WABISTAY_STAY_MENU'];
+const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_AFTER_HOURS', 'WABISTAY_CHECKOUT_BUTTON', 'WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_GATE_REQUIRES_BOOKING', 'WABISTAY_GATE_ROOM_CHECK', 'WABISTAY_GUEST_ADDRESS', 'WABISTAY_HIDE_ONE_HOUR', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_INTERACTIVE', 'WABISTAY_LEAN_COPY', 'WABISTAY_MESSAGE_DEDUPE', 'WABISTAY_NONTEXT_REPLY', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_ONE_OPEN_BOOKING', 'WABISTAY_PAID_BY_BOOKING_REF', 'WABISTAY_PAID_ROOM_CONFIRMED', 'WABISTAY_PAY_ASSIGNS_ROOM', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD', 'WABISTAY_STAY_MENU'];
 
 function wabistayFlagState() {
   const names = new Set([...WABISTAY_KNOWN_FLAGS, ...Object.keys(process.env).filter(k => k.startsWith('WABISTAY_'))]);
@@ -5309,9 +5310,21 @@ const actions = {
 
     // Step 7: tell guest
     const propertyName = ctx.property.fields['Property Name'];
-    const welcomeSend = await sendWhatsApp(ctx.phone, assignedRoomName
-      ? msg(payAssignsRoomEnabled() ? 'welcomeAssignedNew' : 'welcomeAssigned', { roomName: assignedRoomName, propertyName })
-      : msg('welcomeUnassigned', { propertyName }));
+    // WABISTAY_CHECKOUT_BUTTON: the welcome carries one Check out button; if it cannot be sent, today's text goes instead.
+    let welcomeSend = null;
+    if (assignedRoomName && checkoutButtonEnabled()) {
+      const sent = await sendInteractiveButtons(ctx.phone, {
+        body: msg('welcomeAssignedButton', { roomName: assignedRoomName, propertyName }),
+        buttons: [{ id: 'co_start', title: 'Check out' }]
+      });
+      if (sent.ok) welcomeSend = {};
+      else logToAxiom('warn', 'checkout_button_welcome_fell_back', { phone: ctx.phone, error: JSON.stringify(sent.error || sent.invalid || null) });
+    }
+    if (!welcomeSend) {
+      welcomeSend = await sendWhatsApp(ctx.phone, assignedRoomName
+        ? msg(payAssignsRoomEnabled() ? 'welcomeAssignedNew' : 'welcomeAssigned', { roomName: assignedRoomName, propertyName })
+        : msg('welcomeUnassigned', { propertyName }));
+    }
     if (ctx.gateResult) Object.assign(ctx.gateResult, { outcome: 'checked_in', roomName: assignedRoomName, guestSendError: !!(welcomeSend && welcomeSend.error) });
   },
 
@@ -5569,6 +5582,23 @@ const actions = {
   // extension only (one notification per booking), tracked by the
   // `Extension Owner Notified` checkbox. Clearing `Checkout Warning Sent At`
   // re-arms the cron so a fresh warning fires when the new checkout time passes.
+  // WABISTAY_CHECKOUT_BUTTON: the Check out button asks first. Nothing is written here.
+  async checkoutAsk(ctx) {
+    if (!checkoutButtonEnabled()) { await actions.showCheckedInMenu(ctx); return; }
+    const sent = await sendInteractiveButtons(ctx.phone, {
+      body: msg('checkoutAskBody'),
+      buttons: [{ id: 'co_yes', title: 'Yes, check out' }, { id: 'co_no', title: 'Not yet' }]
+    });
+    if (!sent.ok) {
+      logToAxiom('warn', 'checkout_ask_fell_back', { phone: ctx.phone, error: JSON.stringify(sent.error || sent.invalid || null) });
+      await sendWhatsApp(ctx.phone, msg('checkoutAskFallback'));
+    }
+  },
+  async checkoutNotYet(ctx) {
+    if (!checkoutButtonEnabled()) { await actions.showCheckedInMenu(ctx); return; }
+    await sendWhatsApp(ctx.phone, msg('checkoutNotYetReply'));
+  },
+
   async extendStay(ctx) {
     const guestName = ctx.guest.fields['Guest Name'];
     const bookings = byNewest(await airtableGetBookingsByGuestId(ctx.guest.id, 'Checked In'));
@@ -8367,6 +8397,18 @@ async function handleMessage(from, messageText, phoneNumberId, wamid, interactiv
 function interactiveEnabled() {
   return /^(1|true)$/i.test(String(process.env.WABISTAY_INTERACTIVE || '').trim());
 }
+// WABISTAY_CHECKOUT_BUTTON (1 or true; off by default; needs WABISTAY_INTERACTIVE too). The welcome carries one "Check out"
+// button. Tapping it does NOT check the guest out: it asks "Check out now?" with "Yes, check out" and "Not yet". Only "Yes"
+// runs the existing checkout (with its 60-second and 10-minute guards); "Not yet" replies "No problem, enjoy your stay.".
+// These ids mean something only in CHECKED_IN; a tap anywhere else, or with the flag off, is ignored.
+function checkoutButtonEnabled() {
+  return interactiveEnabled() && /^(1|true)$/i.test(String(process.env.WABISTAY_CHECKOUT_BUTTON || '').trim());
+}
+const CHECKOUT_BUTTON_IDS = {
+  co_start: { state: 'CHECKED_IN', text: '__checkout_ask' },
+  co_yes: { state: 'CHECKED_IN', text: '1' },
+  co_no: { state: 'CHECKED_IN', text: '__checkout_not_yet' }
+};
 const INTERACTIVE_REPLY_IDS = {
   pay_card: { state: 'AWAITING_PAYMENT_METHOD', text: '1' },
   pay_eft: { state: 'AWAITING_PAYMENT_METHOD', text: '2' }
@@ -8377,7 +8419,7 @@ const INTERACTIVE_REPLY_IDS = {
 const STALE_TAP_REPROMPT = { AWAITING_ETA: 'askEta', AWAITING_RATING_FEEDBACK: 'ratingLowFollowup' };
 const STALE_TAP_PREFIX = 'interactive:';
 function canonicalTextForTap(replyId, sessionState) {
-  const mapping = INTERACTIVE_REPLY_IDS[replyId];
+  const mapping = INTERACTIVE_REPLY_IDS[replyId] || (checkoutButtonEnabled() ? CHECKOUT_BUTTON_IDS[replyId] : undefined);
   return mapping && mapping.state === sessionState ? mapping.text : null;
 }
 
@@ -8507,6 +8549,10 @@ async function handleMessageInner(from, messageText, phoneNumberId, wamid, inter
       // Stale tap: never a menu choice. States that would swallow any text as data
       // get their own prompt and stop; every other state sees text that matches
       // nothing, so its own re-prompt answers.
+      if (String(interactive.id).startsWith('co_')) {
+        logToAxiom('info', 'checkout_button_tap_ignored', { phone, replyId: interactive.id, sessionState: sessionState || null });
+        return;
+      }
       const reprompt = STALE_TAP_REPROMPT[sessionState];
       if (reprompt) {
         await sendWhatsApp(phone, msg(reprompt));

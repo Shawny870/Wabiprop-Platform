@@ -42,6 +42,8 @@
       { "inputs": "*", "action": "showConfirmedMenu" }
     ],
     "CHECKED_IN": [
+      { "inputs": ["__checkout_ask"], "action": "checkoutAsk" },
+      { "inputs": ["__checkout_not_yet"], "action": "checkoutNotYet" },
       { "inputs": ["extend", "extend stay", "more time", "stay longer", "longer"], "action": "extendStay" },
       { "inputs": ["1", "checking out", "checkout", "check out"], "action": "checkout", "next": "AWAITING_RATING" },
       { "inputs": "*", "action": "showCheckedInMenu" }
@@ -124,6 +126,10 @@
     "gateNoRoomInfo": "No rooms available — please assign manually.",
     "welcomeAssigned": "Welcome to {propertyName}! 🌟 Your room is *{roomName}*.\n\nSomeone is on their way to help you at the gate.\n\nWhen you're ready to leave, reply with a number:\n1 - Check out",
     "welcomeAssignedNew": "Welcome to {propertyName}! Your room is *{roomName}*. We're happy to have you here. When you're ready to leave, tap Check out.\n\n1 - Check out",
+    "welcomeAssignedButton": "Welcome to {propertyName}! Your room is *{roomName}*. We're happy to have you here. When you're ready to leave, tap Check out.",
+    "checkoutAskBody": "Check out now?",
+    "checkoutAskFallback": "Check out now? Reply 1 to check out.",
+    "checkoutNotYetReply": "No problem, enjoy your stay.",
     "welcomeUnassigned": "Welcome to {propertyName}! 🌟 We've notified someone to assist you at the gate.\n\nEnjoy your stay! When you're ready to leave, reply with a number:\n1 - Check out",
     "gateArrivalWriteFailed": "Sorry, something went wrong on our end confirming your arrival. Please try again in a moment, or ask reception for help.",
     "cancelled": "Your booking has been cancelled. No problem at all — we hope to see you another time. 👋",
