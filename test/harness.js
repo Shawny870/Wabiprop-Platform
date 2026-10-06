@@ -29,7 +29,7 @@ class MockAirtable {
     this.log = []; // ordered create/update log — the behaviour freeze
     this.counter = 0;
     for (const [table, recs] of Object.entries(seed)) {
-      this.tables[table] = recs.map(r => ({ id: r.id, fields: { ...r.fields } }));
+      this.tables[table] = recs.map(r => ({ id: r.id, fields: { ...r.fields }, ...(r.createdTime ? { createdTime: r.createdTime } : {}) }));
     }
   }
 
@@ -94,7 +94,8 @@ class MockAirtable {
 
   create(table, fields) {
     const id = 'recNEW' + String(++this.counter).padStart(3, '0');
-    const rec = { id, fields: { ...fields } };
+    // Airtable gives every record a createdTime; a created one gets an increasing instant, so "newest" is testable.
+    const rec = { id, fields: { ...fields }, createdTime: new Date(Date.UTC(2030, 0, 1) + this.counter * 1000).toISOString() };
     (this.tables[table] = this.tables[table] || []).push(rec);
     this.log.push({ op: 'create', table, id, fields: { ...fields } });
     return rec;

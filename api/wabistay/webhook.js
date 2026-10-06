@@ -377,6 +377,7 @@ const WABISTAY_KNOWN_FLAGS = [
   'WABISTAY_ENQUIRY_TRACKING',
   'WABISTAY_GATE_ALERT_UNPAID',
   'WABISTAY_GATE_ARRIVAL_TEMPLATE',
+  'WABISTAY_GATE_REQUIRES_BOOKING',
   'WABISTAY_GATE_ROOM_CHECK',
   'WABISTAY_GUEST_ADDRESS',
   'WABISTAY_GUEST_ESCALATION_TEMPLATE',
@@ -390,6 +391,7 @@ const WABISTAY_KNOWN_FLAGS = [
   'WABISTAY_NEW_BOOKING_TEMPLATE',
   'WABISTAY_NONTEXT_REPLY',
   'WABISTAY_NOTIFY_ROUTING',
+  'WABISTAY_ONE_OPEN_BOOKING',
   'WABISTAY_OPS_ALERT_TEMPLATE',
   'WABISTAY_OVERDUE_ALERT_TEMPLATE',
   'WABISTAY_PAID_BY_BOOKING_REF',
@@ -405,7 +407,7 @@ const WABISTAY_KNOWN_FLAGS = [
 
 // Switches the code only treats as on for 1/true; for these, 'on' means that,
 // not merely 'set'.
-const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_AFTER_HOURS', 'WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_GATE_ROOM_CHECK', 'WABISTAY_GUEST_ADDRESS', 'WABISTAY_HIDE_ONE_HOUR', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_INTERACTIVE', 'WABISTAY_LEAN_COPY', 'WABISTAY_MESSAGE_DEDUPE', 'WABISTAY_NONTEXT_REPLY', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_PAID_BY_BOOKING_REF', 'WABISTAY_PAID_ROOM_CONFIRMED', 'WABISTAY_PAY_ASSIGNS_ROOM', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD', 'WABISTAY_STAY_MENU'];
+const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_AFTER_HOURS', 'WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_GATE_REQUIRES_BOOKING', 'WABISTAY_GATE_ROOM_CHECK', 'WABISTAY_GUEST_ADDRESS', 'WABISTAY_HIDE_ONE_HOUR', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_INTERACTIVE', 'WABISTAY_LEAN_COPY', 'WABISTAY_MESSAGE_DEDUPE', 'WABISTAY_NONTEXT_REPLY', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_ONE_OPEN_BOOKING', 'WABISTAY_PAID_BY_BOOKING_REF', 'WABISTAY_PAID_ROOM_CONFIRMED', 'WABISTAY_PAY_ASSIGNS_ROOM', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD', 'WABISTAY_STAY_MENU'];
 
 function wabistayFlagState() {
   const names = new Set([...WABISTAY_KNOWN_FLAGS, ...Object.keys(process.env).filter(k => k.startsWith('WABISTAY_'))]);
@@ -1742,6 +1744,91 @@ function guestAddressBlock(property) {
     .filter(Boolean);
   return lines.length ? lines.join('\n') + '\n\n' : '';
 }
+// ─── ONE OPEN BOOKING (WABISTAY_ONE_OPEN_BOOKING) and GATE_REQUIRES_BOOKING ──
+// Seen live 6 Oct 2026: a 3-hour booking (WS-D4NUMZ, 16:00) was never paid or used; at 18:53 the guest booked an
+// Overnight (WS-PSG4VQ) and the 18:54 gate tap used the OLD booking, because the gate took the first Confirmed
+// booking Airtable returned (the oldest). Nothing ever replaced the older open booking.
+// ONE_OPEN_BOOKING (off by default):
+//   · when a booking becomes Confirmed, the guest's OTHER unpaid, unchecked-in Enquiry/Confirmed bookings at the
+//     same property are cancelled, except one that falls on a LATER DAY than the new one (a real future stay);
+//     Notify Phone is told once, and a failed notice never blocks the cancel;
+//   · the gate chooses the open booking whose check-in is nearest to now, newest (record createdTime) on a tie;
+//     the payment-method step, cancel, ETA, checkout and extend choose the newest.
+// GATE_REQUIRES_BOOKING (off by default): a guest tapping "I'm at the gate" with no Confirmed booking is told so,
+// set to NEW, and nothing else happens (before: the legacy branch assigned a free room and checked them in).
+function oneOpenBookingEnabled() {
+  return /^(1|true)$/i.test(String(process.env.WABISTAY_ONE_OPEN_BOOKING || '').trim());
+}
+function gateRequiresBookingEnabled() {
+  return /^(1|true)$/i.test(String(process.env.WABISTAY_GATE_REQUIRES_BOOKING || '').trim());
+}
+// Newest first by Airtable's record createdTime; records without one fall back to list position (later = newer).
+function newestFirst(list) {
+  const created = b => { const t = Date.parse(b.createdTime || ''); return Number.isFinite(t) ? t : null; };
+  return list.map((b, i) => ({ b, i })).sort((x, y) => {
+    const cx = created(x.b);
+    const cy = created(y.b);
+    if (cx !== null && cy !== null && cx !== cy) return cy - cx;
+    return y.i - x.i;
+  }).map(o => o.b);
+}
+// The newest open booking when the flag is on, otherwise the list exactly as Airtable returned it.
+function byNewest(list) {
+  return oneOpenBookingEnabled() ? newestFirst(list) : list;
+}
+// Check-in nearest to now; a tie (or no dates at all) goes to the newest.
+function pickNearestOpenBooking(list, nowMs = Date.now()) {
+  if (list.length === 0) return null;
+  const dist = b => { const t = Date.parse(b.fields['Check In'] || ''); return Number.isFinite(t) ? Math.abs(t - nowMs) : Infinity; };
+  return newestFirst(list).sort((a, b) => {
+    const da = dist(a);
+    const db = dist(b);
+    return da === db ? 0 : (da < db ? -1 : 1);
+  })[0];
+}
+// `fresh` = { id, checkIn, ref, stay } of the booking that has just become Confirmed.
+async function supersedeOlderBookings(ctx, fresh) {
+  if (!oneOpenBookingEnabled()) return;
+  try {
+    const [enquiries, confirmed] = await Promise.all([
+      airtableGetBookingsByGuestId(ctx.guest.id, 'Enquiry'),
+      airtableGetBookingsByGuestId(ctx.guest.id, 'Confirmed')
+    ]);
+    const newMs = Date.parse(fresh.checkIn || '');
+    const cancelled = [];
+    for (const b of [...enquiries, ...confirmed]) {
+      if (b.id === fresh.id) continue;
+      const f = b.fields;
+      if (f['Payment Status'] === 'Paid' || Number(f['Amount Paid']) > 0 || f['Checked In At']) continue;
+      const olderMs = Date.parse(f['Check In'] || '');
+      // A stay on a LATER DAY is a real future booking, left alone. Compared by SAST date, not clock time: a typed-dates
+      // overnight is stamped 14:00, which is earlier than a 16:00 short stay booked for the same day.
+      if (Number.isFinite(olderMs) && Number.isFinite(newMs) && compareYmd(sastCalendarDate(new Date(olderMs)), sastCalendarDate(new Date(newMs))) > 0) continue;
+      const roomId = (f['Room'] || [])[0];
+      const room = roomId ? (await airtableGet('WS_Rooms', `RECORD_ID() = '${roomId}'`))[0] || null : null;
+      if (bookingPropertyId(b, room && (room.fields['Property'] || [])[0]) !== ctx.property.id) continue;
+      const write = await airtableUpdate('WS_Bookings', b.id, { 'Status': 'Cancelled' });
+      if (write && write.error) {
+        logToAxiom('error', 'booking_superseded_write_failed', { bookingId: b.id, supersededBy: fresh.id, error: JSON.stringify(write.error) });
+        continue;
+      }
+      const ref = f['Booking Ref'] || `WS-${b.id.slice(-6).toUpperCase()}`;
+      cancelled.push(`${ref} (${f['Booking Type'] || 'booking'}${room ? ', ' + room.fields['Room Name'] : ''})`);
+      logToAxiom('info', 'booking_superseded', { bookingId: b.id, bookingRef: ref, supersededBy: fresh.id, status: f['Status'] });
+    }
+    if (cancelled.length === 0) return;
+    const notifyRaw = ctx.property.fields['Notify Phone'];
+    const notifyPhone = notifyRaw ? String(notifyRaw).replace(/[\s\-\+]/g, '') : OWNER_PHONE;
+    if (!notifyPhone) return;
+    const send = await sendWhatsApp(notifyPhone, msg('oneOpenSuperseded', {
+      guestName: ctx.guest.fields['Guest Name'], phone: ctx.phone, newRef: fresh.ref, newStay: fresh.stay, list: cancelled.join(', ')
+    }));
+    if (send && send.error) logToAxiom('error', 'booking_superseded_notice_failed', { supersededBy: fresh.id, error: JSON.stringify(send.error) });
+  } catch (err) {
+    logToAxiom('error', 'booking_supersede_failed', { phone: ctx.phone, bookingId: fresh.id, message: err.message });
+  }
+}
+
 // WABISTAY_PAY_ASSIGNS_ROOM (1 or true; off by default). A guest who tapped "I'm at the gate" before
 // paying is waiting for reception. When reception then records the payment, the guest is checked in
 // and sent their room automatically (the same check-in and welcome as a second tap), once.
@@ -4715,6 +4802,7 @@ const actions = {
     // tripped guard here leaves a hold the guest was never told about — the
     // alert carries the booking id so reception can finish or cancel it.
     if (!(await advanceGuestState(ctx, { 'Session State': ctx.next, 'Last Inbound At': new Date().toISOString() }, { bookingId: pending.id, bookingRef }))) return;
+    await supersedeOlderBookings(ctx, { id: pending.id, checkIn: checkInIso, ref: bookingRef, stay: `${choice} hour short stay` });
     // B19: Booked, Hourly. Completed in one handler, so this is the single log site.
     await logEnquiry(ctx.property, ctx.phone, 'Booked', { ...enquiryTrackingOpts(ctx),
       checkInIso, checkOutIso, bookingType: 'Hourly', bookingId: pending.id
@@ -4782,9 +4870,14 @@ const actions = {
       airtableGetBookingsByGuestId(ctx.guest.id, 'Enquiry'),
       airtableGetBookingsByGuestId(ctx.guest.id, 'Confirmed')
     ]);
-    const booking = enquiries.find(b => b.fields['Amount Due'] !== undefined)
-      || confirmedHourly.find(b => (b.fields['Booking Type'] === 'Hourly' || isStayMenuBooking(b)) && b.fields['Amount Due'] !== undefined)
-      || null;
+    const pricedConfirmed = b => (b.fields['Booking Type'] === 'Hourly' || isStayMenuBooking(b)) && b.fields['Amount Due'] !== undefined;
+    // ONE_OPEN_BOOKING: the booking being paid for is the one this chat has just created, so the NEWEST priced one. (The
+    // gate's nearest-to-now rule would pick the older 16:00 short stay over an overnight stamped 14:00 the same day.)
+    const booking = oneOpenBookingEnabled()
+      ? (newestFirst([...enquiries.filter(b => b.fields['Amount Due'] !== undefined), ...confirmedHourly.filter(pricedConfirmed)])[0] || null)
+      : (enquiries.find(b => b.fields['Amount Due'] !== undefined)
+        || confirmedHourly.find(pricedConfirmed)
+        || null);
     if (!booking) {
       // Flow lost its footing (no pending priced enquiry) — re-prompt rather
       // than dead-end, zero writes. Mirrors selectOccupancy's old posture.
@@ -4858,7 +4951,7 @@ const actions = {
   async recordEta(ctx) {
     const eta = ctx.messageText.trim();
     // F5: was FIND/ARRAYJOIN — now JS filter on fetched records
-    const bookings = await airtableGetBookingsByGuestId(ctx.guest.id, 'Enquiry');
+    const bookings = byNewest(await airtableGetBookingsByGuestId(ctx.guest.id, 'Enquiry'));
     const confirmedBooking = bookings[0] || null;
     // Rule 30 step 2, slice 1: FATAL on failure — this write is what moves the
     // booking from 'Enquiry' to 'Confirmed', and both cancelBooking and
@@ -4886,6 +4979,12 @@ const actions = {
       'Session State': ctx.next,
       ...(enquiryTrackingEnabled() && !isTestGuest(ctx.guest) ? { 'Last Inbound At': new Date().toISOString() } : {})
     }))) return;
+    if (confirmedBooking) {
+      await supersedeOlderBookings(ctx, {
+        id: confirmedBooking.id, checkIn: confirmedBooking.fields['Check In'],
+        ref: confirmedBooking.fields['Booking Ref'] || `WS-${confirmedBooking.id.slice(-6).toUpperCase()}`, stay: 'overnight'
+      });
+    }
     // B19: Booked, re-affirmed on confirmation — deduped by booking id, so this is
     // a no-op when collectDetails already logged it at creation, and the single
     // logging site when the booking reached AWAITING_ETA another way.
@@ -4910,7 +5009,15 @@ const actions = {
     // Step 2: settle which room this guest actually gets.
     // F5-style: see greetAndAskStayType — FIND/ARRAYJOIN confirmed unreliable, JS-filter instead
     const bookings = await airtableGetBookingsByGuestId(ctx.guest.id, 'Confirmed');
-    const booking = bookings[0] || null;
+    const booking = oneOpenBookingEnabled() ? pickNearestOpenBooking(bookings) : (bookings[0] || null);
+    // WABISTAY_GATE_REQUIRES_BOOKING: nothing to arrive for. No room, no check-in, no alert.
+    if (!booking && gateRequiresBookingEnabled()) {
+      logToAxiom('info', 'gate_arrival_no_booking', { phone: ctx.phone, guestId: ctx.guest.id });
+      await sendWhatsApp(ctx.phone, msg('gateNoBooking'));
+      await updateGuestState(ctx.guest.id, { 'Session State': 'NEW' });
+      if (ctx.gateResult) ctx.gateResult.outcome = 'no_booking';
+      return;
+    }
     const heldRoomId = (booking && (booking.fields['Room'] || [])[0]) || null;
     const bookedIn = booking && booking.fields['Check In'];
     const bookedOut = booking && booking.fields['Check Out'];
@@ -5187,7 +5294,7 @@ const actions = {
   // CONFIRMED → "2": cancel
   async cancelBooking(ctx) {
     // F5: was FIND/ARRAYJOIN
-    const bookings = await airtableGetBookingsByGuestId(ctx.guest.id, 'Confirmed');
+    const bookings = byNewest(await airtableGetBookingsByGuestId(ctx.guest.id, 'Confirmed'));
     // Rule 30 step 2, slice 1: FATAL on failure — telling the guest "cancelled"
     // while the booking stays Confirmed leaves it still holding its room via
     // BLOCKING_BOOKING_STATUSES with no way for the guest to know it's still
@@ -5237,7 +5344,7 @@ const actions = {
       }
     }
     // F14: gate cooldown guard — checkout < 60s after check-in is ignored
-    const recentBookings = await airtableGetBookingsByGuestId(ctx.guest.id, 'Checked In');
+    const recentBookings = byNewest(await airtableGetBookingsByGuestId(ctx.guest.id, 'Checked In'));
     if (recentBookings.length > 0 && recentBookings[0].fields['Checked In At']) {
       const checkedInAt = new Date(recentBookings[0].fields['Checked In At']);
       const secondsSinceCheckin = (Date.now() - checkedInAt.getTime()) / 1000;
@@ -5247,7 +5354,7 @@ const actions = {
       }
     }
     // F5: was FIND/ARRAYJOIN
-    const bookings = await airtableGetBookingsByGuestId(ctx.guest.id, 'Checked In');
+    const bookings = byNewest(await airtableGetBookingsByGuestId(ctx.guest.id, 'Checked In'));
     let roomName = 'your room';
     // B10.5 Bug 2: ctx.property is the fallback only — the booking's own
     // WS_Property wins when present (bookings checked in before this fix have none).
@@ -5440,7 +5547,7 @@ const actions = {
   // re-arms the cron so a fresh warning fires when the new checkout time passes.
   async extendStay(ctx) {
     const guestName = ctx.guest.fields['Guest Name'];
-    const bookings = await airtableGetBookingsByGuestId(ctx.guest.id, 'Checked In');
+    const bookings = byNewest(await airtableGetBookingsByGuestId(ctx.guest.id, 'Checked In'));
     const booking = bookings[0] || null;
     if (!booking || !booking.fields['Check Out']) {
       // Nothing to extend (no active booking, or a date-less legacy row).
@@ -8161,6 +8268,7 @@ async function collectStayMenuDetails(ctx, pending) {
 
   logToAxiom('info', 'booking_create', { phone: ctx.phone, guestName, bookingRef, bookingType: product.type, stay: product.key, airtableId: pending.id });
   if (!(await advanceGuestState(ctx, { 'Guest Name': guestName, 'Session State': 'AWAITING_PAYMENT_METHOD', 'Last Inbound At': new Date().toISOString() }, { bookingId: pending.id, bookingRef }))) return true;
+  await supersedeOlderBookings(ctx, { id: pending.id, checkIn: ciIso, ref: bookingRef, stay: product.label });
   await logEnquiry(ctx.property, ctx.phone, 'Booked', { ...enquiryTrackingOpts(ctx), checkInIso: ciIso, checkOutIso: coIso, bookingType: product.type, bookingId: pending.id });
 
   const stayLabel = product.type === 'Hourly' ? product.label : product.label + ' stay';
