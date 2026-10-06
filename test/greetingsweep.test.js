@@ -95,3 +95,109 @@ test('every first word takes the same path: Hi, hi, Hie, Hey, Hello, Good day, a
     assert.strictEqual(guestRow(ctx)['Session State'], 'AWAITING_STAY_TYPE', word);
   }
 });
+
+// ── the fix reaches every way into a swept step ──────────────────────────────
+
+function sweepAt(h, m, s, d) { mock.timers.reset(); mock.timers.enable({ apis: ['Date'], now: sast(h, m, s, d) }); }
+
+test('tracking off: the greeting still writes Last Inbound At, and no attempt fields; the sweep leaves the chat alone', async () => {
+  setClock(15, 32, 10);
+  const ctx = start({ testPhone: false, lastInboundAt: hoursAgo(72) });
+  delete process.env.WABISTAY_ENQUIRY_TRACKING;
+  await say('Hie');
+  const g = guestRow(ctx);
+  assert.strictEqual(g['Last Inbound At'], new Date(sast(15, 32, 10)).toISOString());
+  assert.strictEqual(g['Attempt Started At'], undefined);
+  assert.strictEqual(g['Attempt Property'], undefined);
+  setClock(15, 32, 25);
+  await wh.runEnquiryAbandonment(new Date());
+  assert.strictEqual(guestRow(ctx)['Session State'], 'AWAITING_STAY_TYPE');
+});
+
+test('tracked, non-test guest: the greeting still writes the attempt start and property as before', async () => {
+  setClock(15, 32, 10);
+  const ctx = start({ testPhone: false });
+  await say('Hie');
+  assert.strictEqual(guestRow(ctx)['Attempt Started At'], new Date(sast(15, 32, 10)).toISOString());
+  assert.deepStrictEqual(guestRow(ctx)['Attempt Property'], ['recP1']);
+});
+
+test('a restart ("hi", "menu", "cancel") from a booking step also writes a fresh Last Inbound At', async () => {
+  for (const word of ['hi', 'menu', 'cancel']) {
+    setClock(15, 32, 10);
+    const ctx = start({ testPhone: true, lastInboundAt: hoursAgo(72) });
+    guestRow(ctx)['Session State'] = 'AWAITING_DETAILS';
+    await say(word);
+    assert.strictEqual(guestRow(ctx)['Session State'], 'AWAITING_STAY_TYPE', word);
+    assert.strictEqual(guestRow(ctx)['Last Inbound At'], new Date(sast(15, 32, 10)).toISOString(), word);
+    setClock(15, 32, 25);
+    await wh.runEnquiryAbandonment(new Date());
+    assert.strictEqual(guestRow(ctx)['Session State'], 'AWAITING_STAY_TYPE', `${word}: not swept`);
+  }
+});
+
+test('"hourly" typed from NEW (the old short-stay start) is not swept right after', async () => {
+  setClock(15, 32, 10);
+  const ctx = start({ testPhone: true, lastInboundAt: hoursAgo(72) });
+  delete process.env.WABISTAY_STAY_MENU;
+  await say('hourly');
+  assert.strictEqual(guestRow(ctx)['Session State'], 'AWAITING_HOURLY_DETAILS');
+  setClock(15, 32, 25);
+  await wh.runEnquiryAbandonment(new Date());
+  assert.strictEqual(guestRow(ctx)['Session State'], 'AWAITING_HOURLY_DETAILS');
+});
+
+test('the duration answer (AWAITING_HOURLY_DURATION -> AWAITING_PAYMENT_METHOD) writes Last Inbound At: a guest who answers after a long silence is not swept a minute later', async () => {
+  setClock(15, 32, 10);
+  const ctx = start({ testPhone: true });
+  delete process.env.WABISTAY_STAY_MENU;
+  await say('hi');
+  await say('1');
+  await say('Tim\n4pm');
+  assert.strictEqual(guestRow(ctx)['Session State'], 'AWAITING_HOURLY_DURATION');
+  guestRow(ctx)['Last Inbound At'] = hoursAgo(25);       // the guest was silent for 25 hours, then answers
+  setClock(15, 40, 0);
+  await say('2');
+  assert.strictEqual(guestRow(ctx)['Session State'], 'AWAITING_PAYMENT_METHOD');
+  assert.strictEqual(guestRow(ctx)['Last Inbound At'], new Date(sast(15, 40, 0)).toISOString());
+  setClock(15, 40, 20);
+  await wh.runEnquiryAbandonment(new Date());
+  assert.strictEqual(guestRow(ctx)['Session State'], 'AWAITING_PAYMENT_METHOD', 'not reset');
+});
+
+// ── a test phone is still swept like any guest after 24 hours of silence ─────
+
+test('a test phone silent for 24 hours is swept back to NEW like any guest; at 23h59m it is not', async () => {
+  setClock(15, 32, 10);
+  const ctx = start({ testPhone: true, lastInboundAt: hoursAgo(72) });
+  await say('Hie');
+  const greeted = sast(15, 32, 10);
+  mock.timers.reset(); mock.timers.enable({ apis: ['Date'], now: greeted + (24 * 3600e3 - 60e3) });
+  await wh.runEnquiryAbandonment(new Date());
+  assert.strictEqual(guestRow(ctx)['Session State'], 'AWAITING_STAY_TYPE', '23h59m: still waiting');
+  mock.timers.reset(); mock.timers.enable({ apis: ['Date'], now: greeted + 24 * 3600e3 + 60e3 });
+  await wh.runEnquiryAbandonment(new Date());
+  assert.strictEqual(guestRow(ctx)['Session State'], 'NEW', '24h and a minute: swept');
+});
+
+// ── the hold-release log carries the real last-message time ──────────────────
+
+test('hold release: the "Hold Expired" event shows the guest\'s real last-message time (the greeting), not an old or empty one', async () => {
+  setClock(15, 32, 10);
+  const ctx = start({ testPhone: true, lastInboundAt: hoursAgo(72) });
+  await say('Hie');
+  const stamped = new Date(sast(15, 32, 10)).toISOString();
+  ctx.airtable.tables['WS_Bookings'].push({
+    id: 'recHold1',
+    fields: { Guest: ['recG1'], Room: ['recR1'], Status: 'Confirmed', 'Booking Type': 'Overnight', 'Payment Status': 'Unpaid',
+      'Check In': new Date(sast(15, 0)).toISOString(), 'Hold Expires At': new Date(sast(15, 30)).toISOString() }
+  });
+  process.env.WABISTAY_HOLD_RELEASE = '1';
+  try {
+    setClock(15, 45, 0);
+    await wh.runHoldRelease(new Date());
+  } finally { delete process.env.WABISTAY_HOLD_RELEASE; }
+  const closed = ctx.axiom.filter(e => e.event === 'enquiry_closed' && e.outcome === 'Hold Expired');
+  assert.strictEqual(closed.length, 1);
+  assert.strictEqual(closed[0].lastMessageAt, stamped);
+});

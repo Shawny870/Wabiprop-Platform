@@ -101,16 +101,19 @@ test('flag ON: a restart from mid-flow ("hi") keeps the original attempt start b
   assert.ok(Date.parse(g.fields['Last Inbound At']) > Date.parse(started));
 });
 
-test('flag OFF, or a test phone: the greeting writes no tracking fields', async () => {
+test('flag OFF, or a test phone: the greeting writes no attempt fields, only Last Inbound At (so the sweep sees a fresh chat)', async () => {
   let ctx = setup();
   await say('hi');
   assert.strictEqual(guestRow(ctx).fields['Attempt Started At'], undefined);
+  assert.strictEqual(guestRow(ctx).fields['Attempt Property'], undefined);
+  assert.ok(guestRow(ctx).fields['Last Inbound At'], 'Last Inbound At is written even with tracking off');
 
   on();
   ctx = setup({ WS_Guests: [guest({ 'Test Phone': true })] });
   await say('hi');
   assert.strictEqual(guestRow(ctx).fields['Attempt Started At'], undefined);
-  assert.strictEqual(guestRow(ctx).fields['Last Inbound At'], undefined);
+  assert.strictEqual(guestRow(ctx).fields['Attempt Property'], undefined);
+  assert.ok(guestRow(ctx).fields['Last Inbound At'], 'and for a test phone');
 });
 
 // ── rows carry first message, last message, last step ────────────────────────
