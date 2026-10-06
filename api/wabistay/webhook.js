@@ -8672,6 +8672,13 @@ module.exports = async function handler(req, res) {
       for (const s of statuses) {
         const detail = { wamid: s.id, status: s.status, timestamp: s.timestamp, recipient: s.recipient_id };
         if (s.status === 'failed' && s.errors) detail.errors = s.errors;
+        // Meta's own billing verdict for this message, when the callback carries one: whether it is billable,
+        // under which pricing model, and its category (utility, marketing, service...). Left off when absent.
+        if (s.pricing) {
+          detail.billable = s.pricing.billable;
+          detail.pricing_model = s.pricing.pricing_model;
+          detail.pricing_category = s.pricing.category;
+        }
         logToAxiom('info', 'whatsapp_status_callback', detail);
 
         // Proxy for "owner opened WhatsApp" — see bumpPropertyActivity's
