@@ -7915,7 +7915,7 @@ async function stayMenuForNow(property, now = new Date()) {
   const phone = property.fields['Guest Redirect Phone'];
   const anotherDayLine = 'Operating hours are 8am to 11pm. Another day? Please phone reception' + (phone ? ' on ' + phone : '') + '.';
   // From 17:00 the short stays are over for the day; the one-line menu says so first.
-  const menuIntro = sastHourOfDate(now) >= 17 ? 'Short stays have finished for today.\n\n' : '';
+  const menuIntro = sastHourOfDate(now) >= 17 ? 'Short stays have finished for today. They start again tomorrow from 8am.\n\n' : '';
   return { keys, prices, lines, anotherDayLine, menuIntro, dayRate, nightRate };
 }
 // Reply -> product key ('1'..'4'), 'multi' (the typed multiple-days words, which keep
