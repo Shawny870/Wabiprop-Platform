@@ -521,13 +521,13 @@ test('the flag is on the cold-start flag list: off by default, on only for 1/tru
 
 // ── the evening menu starts by saying short stays are over ────────────────────
 
-test('17:00-22:59: the one-line menu starts with "Short stays have finished for today."; earlier hours do not say it', async () => {
+test('17:00-22:59: the one-line menu starts with "Short stays have finished for today. They start again tomorrow from 8am."; earlier hours do not say it', async () => {
   for (const [h, m] of [[17, 0], [20, 30], [22, 59]]) {
     atSast(h, m);
     const ctx = start();
     await say('hi');
     const menu = texts(ctx).find(t => /What would you like to book/.test(t));
-    assert.match(menu, /Short stays have finished for today\.\n\nWhat would you like to book\? Reply with a number:\n4 - Overnight stay, R500\. Check in between 5pm and 11pm, check out by 10am\.\n\nOperating hours are 8am to 11pm\. Another day\? Please phone reception on 0730260871\.$/, `${h}:${m}`);
+    assert.match(menu, /Short stays have finished for today\. They start again tomorrow from 8am\.\n\nWhat would you like to book\? Reply with a number:\n4 - Overnight stay, R500\. Check in between 5pm and 11pm, check out by 10am\.\n\nOperating hours are 8am to 11pm\. Another day\? Please phone reception on 0730260871\.$/, `${h}:${m}`);
     mock.timers.reset();
   }
   for (const [h, m] of [[8, 0], [11, 59], [12, 0], [16, 59]]) {
