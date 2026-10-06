@@ -3169,6 +3169,23 @@ async function resolveRoomClean(ctx, room) {
       });
     }
   }
+  // WABISTAY_PAY_ASSIGNS_ROOM: a PAID guest who tapped the gate and was told to wait because this room was not ready is
+  // checked in and sent their room now, once. Only the booking that holds THIS room; the earliest gate tap if several do.
+  if (payAssignsRoomEnabled()) {
+    // The outcome line goes where the gate alerts go: the property's Notify Phone, else the owner.
+    const notifyRaw = ctx.property.fields['Notify Phone'];
+    const doneReportTo = notifyRaw ? String(notifyRaw).replace(/[\s\-\+]/g, '') : OWNER_PHONE;
+    try {
+      const waiting = (await airtableGet('WS_Bookings', `{Status} = 'Confirmed'`))
+        .filter(b => (b.fields['Room'] || []).includes(room.id) && b.fields['Payment Status'] === 'Paid' && b.fields['Gate Tap At'])
+        .sort((a, b) => Date.parse(a.fields['Gate Tap At']) - Date.parse(b.fields['Gate Tap At']));
+      for (const b of waiting) {
+        if (await actions.autoCheckInAfterPayment(ctx, b, { reportTo: doneReportTo, requirePaid: true })) break;
+      }
+    } catch (err) {
+      logToAxiom('error', 'done_auto_checkin_failed', { roomId: room.id, message: err.message });
+    }
+  }
 }
 
 // ─── ACTION HANDLERS ─────────────────────────────────────────────────────────
@@ -3516,7 +3533,10 @@ const actions = {
   // WABISTAY_PAY_ASSIGNS_ROOM: the guest tapped the gate before paying and reception has now recorded
   // the payment. Runs today's gateArrival for that guest (same room check, race guard, check-in, welcome,
   // alerts), forcing the room-must-be-Available check, then tells the seat what happened.
-  async autoCheckInAfterPayment(ctx, booking) {
+  // opts.reportTo: who gets the one-line outcome (default: whoever recorded the payment); opts.requirePaid: DONE-triggered.
+  // Returns true when the guest was checked in.
+  async autoCheckInAfterPayment(ctx, booking, opts = {}) {
+    const reportTo = opts.reportTo === undefined ? ctx.phone : opts.reportTo;
     const tapAge = Date.now() - Date.parse(booking.fields['Gate Tap At']);
     const guestId = (booking.fields['Guest'] || [])[0];
     const guest = guestId ? (await airtableGet('WS_Guests', `RECORD_ID() = '${guestId}'`))[0] || null : null;
@@ -3524,6 +3544,7 @@ const actions = {
       logToAxiom('info', 'pay_assigns_room_skipped', { bookingId: booking.id, reason });
     };
     if (!(tapAge >= 0 && tapAge <= PAY_ASSIGNS_TAP_MAX_AGE_MS)) return skip('gate_tap_too_old');
+    if (opts.requirePaid && booking.fields['Payment Status'] !== 'Paid') return skip('not_paid');
     if (!guest || guest.fields['Session State'] !== 'CONFIRMED') return skip('guest_not_waiting');
     const open = await airtableGetBookingsByGuestId(guest.id, 'Confirmed');
     if (open.length !== 1 || open[0].id !== booking.id) return skip('not_the_guests_only_confirmed_booking');
@@ -3535,15 +3556,18 @@ const actions = {
     const r = gateCtx.gateResult;
     logToAxiom('info', 'pay_assigns_room', { bookingId: booking.id, outcome: r.outcome || null, guestSendError: !!r.guestSendError });
     const guestName = guest.fields['Guest Name'];
-    if (r.outcome === 'checked_in' && !r.guestSendError) {
-      await sendWhatsApp(ctx.phone, msg('payAssignsSent', { guestName, roomName: r.roomName || 'a room' }));
-    } else if (r.outcome === 'checked_in') {
-      await sendWhatsApp(ctx.phone, msg('payAssignsSendFailed', { guestName, roomName: r.roomName || 'a room' }));
-    } else if (r.outcome === 'room_not_ready') {
-      await sendWhatsApp(ctx.phone, msg('payAssignsRoomNotReady', { guestName, roomName: r.roomName, roomStatus: r.roomStatus }));
-    } else {
-      await sendWhatsApp(ctx.phone, msg('payAssignsFailed', { roomName: guestName }));
+    if (reportTo) {
+      if (r.outcome === 'checked_in' && !r.guestSendError) {
+        await sendWhatsApp(reportTo, msg('payAssignsSent', { guestName, roomName: r.roomName || 'a room' }));
+      } else if (r.outcome === 'checked_in') {
+        await sendWhatsApp(reportTo, msg('payAssignsSendFailed', { guestName, roomName: r.roomName || 'a room' }));
+      } else if (r.outcome === 'room_not_ready') {
+        await sendWhatsApp(reportTo, msg('payAssignsRoomNotReady', { guestName, roomName: r.roomName, roomStatus: r.roomStatus }));
+      } else {
+        await sendWhatsApp(reportTo, msg('payAssignsFailed', { roomName: guestName }));
+      }
     }
+    return r.outcome === 'checked_in';
   },
 
   // B8 (PAID): reception records cash taken at the desk. Reached only through
@@ -5286,7 +5310,7 @@ const actions = {
     // Step 7: tell guest
     const propertyName = ctx.property.fields['Property Name'];
     const welcomeSend = await sendWhatsApp(ctx.phone, assignedRoomName
-      ? msg('welcomeAssigned', { roomName: assignedRoomName, propertyName })
+      ? msg(payAssignsRoomEnabled() ? 'welcomeAssignedNew' : 'welcomeAssigned', { roomName: assignedRoomName, propertyName })
       : msg('welcomeUnassigned', { propertyName }));
     if (ctx.gateResult) Object.assign(ctx.gateResult, { outcome: 'checked_in', roomName: assignedRoomName, guestSendError: !!(welcomeSend && welcomeSend.error) });
   },
