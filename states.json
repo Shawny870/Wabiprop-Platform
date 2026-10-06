@@ -96,6 +96,8 @@
     "hourlyBookingCreateFailed": "Sorry {guestName}, something went wrong on our end and we couldn't save your short stay. Nothing was charged. Please resend your details:\n1. Full name\n2. Arrival time (e.g. 2pm or 14:00)\n\nSend each on a new line.",
     "hourlyTooLong": "No problem — for stays longer than 3 hours we'll book you overnight instead. 🛏️\n\nPlease send:\n1. Your full name\n2. Check-in date (e.g. 25 June)\n3. Check-out date (e.g. 27 June)\n\nSend all three, each on a new line.",
     "hourlyUnavailable": "Sorry, short stays aren't available at {propertyName} at the moment. 😔\n\nWe'd be happy to book you overnight instead. Please send:\n1. Your full name\n2. Check-in date (e.g. 25 June)\n3. Check-out date (e.g. 27 June)\n\nSend all three, each on a new line.",
+    "hourlyExpiredTap": "Your short stay has expired. Reply hi to start a new booking.",
+    "hourlyExpiredNotice": "⏱ {ref} ({stay}, {roomName}) for {guestName} ({phone}) was not paid within 30 minutes of its arrival time ({arrival}) and has been released. The room is free again.",
     "gateNoBooking": "We couldn't find a booking for you. Reply hi to start a new booking.",
     "oneOpenSuperseded": "ℹ️ {guestName} ({phone}) confirmed {newRef} ({newStay}). Their earlier unpaid booking was cancelled so only one stays open: {list}.",
     "gateTooEarly": "Hi {guestName}! Your booking is for *{bookingDate}*, not today. 📅\n\nWe'll see you then! If you need to change your booking, just let us know.",
