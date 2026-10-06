@@ -384,6 +384,7 @@ const WABISTAY_KNOWN_FLAGS = [
   'WABISTAY_DAILY_SUMMARY_TEMPLATE',
   'WABISTAY_HIDE_ONE_HOUR',
   'WABISTAY_HOLD_RELEASE',
+  'WABISTAY_HOURLY_EXPIRY',
   'WABISTAY_INTERACTIVE',
   'WABISTAY_LEAN_COPY',
   'WABISTAY_MESSAGE_DEDUPE',
@@ -407,7 +408,7 @@ const WABISTAY_KNOWN_FLAGS = [
 
 // Switches the code only treats as on for 1/true; for these, 'on' means that,
 // not merely 'set'.
-const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_AFTER_HOURS', 'WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_GATE_REQUIRES_BOOKING', 'WABISTAY_GATE_ROOM_CHECK', 'WABISTAY_GUEST_ADDRESS', 'WABISTAY_HIDE_ONE_HOUR', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_INTERACTIVE', 'WABISTAY_LEAN_COPY', 'WABISTAY_MESSAGE_DEDUPE', 'WABISTAY_NONTEXT_REPLY', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_ONE_OPEN_BOOKING', 'WABISTAY_PAID_BY_BOOKING_REF', 'WABISTAY_PAID_ROOM_CONFIRMED', 'WABISTAY_PAY_ASSIGNS_ROOM', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD', 'WABISTAY_STAY_MENU'];
+const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_AFTER_HOURS', 'WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_GATE_REQUIRES_BOOKING', 'WABISTAY_GATE_ROOM_CHECK', 'WABISTAY_GUEST_ADDRESS', 'WABISTAY_HIDE_ONE_HOUR', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_HOURLY_EXPIRY', 'WABISTAY_INTERACTIVE', 'WABISTAY_LEAN_COPY', 'WABISTAY_MESSAGE_DEDUPE', 'WABISTAY_NONTEXT_REPLY', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_ONE_OPEN_BOOKING', 'WABISTAY_PAID_BY_BOOKING_REF', 'WABISTAY_PAID_ROOM_CONFIRMED', 'WABISTAY_PAY_ASSIGNS_ROOM', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD', 'WABISTAY_STAY_MENU'];
 
 function wabistayFlagState() {
   const names = new Set([...WABISTAY_KNOWN_FLAGS, ...Object.keys(process.env).filter(k => k.startsWith('WABISTAY_'))]);
@@ -1744,6 +1745,112 @@ function guestAddressBlock(property) {
     .filter(Boolean);
   return lines.length ? lines.join('\n') + '\n\n' : '';
 }
+// ─── HOURLY EXPIRY (WABISTAY_HOURLY_EXPIRY) ──────────────────────────────────
+// Off by default. Seen live 6 Oct 2026: a 3-hour booking for 16:00 that was never paid or used was still Confirmed,
+// holding its room, at 18:54, and the gate used it. With the flag on, a Confirmed Hourly or Day booking that is unpaid,
+// not checked in, and whose guest has not tapped the gate is released 30 minutes after its Check In:
+//   · Status becomes Cancelled (no new Airtable value), with "Expired: unpaid 30 min after arrival" added to Notes,
+//     which is how the gate recognises it later; the room is free again (Cancelled does not block);
+//   · a 'Hold Expired' enquiry row (tracking on; a test phone logs the event only) and an Axiom event;
+//   · Notify Phone is told once (a failed notice never undoes the release);
+//   · the guest stays in CONFIRMED so their next message can be answered: "Your short stay has expired. Reply hi to
+//     start a new booking." (state then NEW, no room, no alert to anyone).
+// A sweep in the 5-minute auto-checkout cron does the release (not runHoldRelease, which also covers overnight bookings),
+// and the gate tap does the same check itself, so a tap is answered correctly even if the cron has not run yet.
+// A test phone expires exactly like any guest (the first unpaid gate tap is stamped in 'Gate Tap At' for everyone).
+function hourlyExpiryEnabled() {
+  return /^(1|true)$/i.test(String(process.env.WABISTAY_HOURLY_EXPIRY || '').trim());
+}
+const HOURLY_EXPIRY_GRACE_MS = 30 * 60 * 1000;
+const HOURLY_EXPIRED_NOTE = 'Expired: unpaid 30 min after arrival';
+function hourlyExpiryCandidate(b, nowMs) {
+  const f = b.fields;
+  if (f['Status'] !== 'Confirmed') return false;
+  if (f['Booking Type'] !== 'Hourly' && f['Booking Type'] !== 'Day') return false;
+  const ci = Date.parse(f['Check In'] || '');
+  if (!Number.isFinite(ci) || nowMs < ci + HOURLY_EXPIRY_GRACE_MS) return false;
+  if (f['Payment Status'] === 'Paid' || Number(f['Amount Paid']) > 0) return false;
+  if (f['Checked In At'] || f['Gate Tap At']) return false;
+  return true;
+}
+// Releases one booking. Returns true when the Cancelled write landed; the notice and the enquiry row never undo it.
+async function expireHourlyBooking(booking, { property, guest, source }) {
+  const f = booking.fields;
+  const write = await airtableUpdate('WS_Bookings', booking.id, {
+    'Status': 'Cancelled',
+    'Notes': f['Notes'] ? `${f['Notes']} | ${HOURLY_EXPIRED_NOTE}` : HOURLY_EXPIRED_NOTE
+  });
+  if (write && write.error) {
+    logToAxiom('error', 'hourly_expiry_write_failed', { bookingId: booking.id, source, error: JSON.stringify(write.error) });
+    return false;
+  }
+  const ref = f['Booking Ref'] || `WS-${booking.id.slice(-6).toUpperCase()}`;
+  const roomId = (f['Room'] || [])[0] || null;
+  logToAxiom('info', 'hourly_booking_expired', {
+    bookingId: booking.id, bookingRef: ref, roomId, source, bookingType: f['Booking Type'], checkIn: f['Check In'],
+    minutesLate: Math.round((Date.now() - Date.parse(f['Check In'])) / 60000), testPhone: isTestGuest(guest)
+  });
+  try {
+    const room = roomId ? (await airtableGet('WS_Rooms', `RECORD_ID() = '${roomId}'`))[0] || null : null;
+    const prop = property || ((room && (room.fields['Property'] || [])[0])
+      ? (await airtableGet('WS_Properties', `RECORD_ID() = '${room.fields['Property'][0]}'`))[0] || null : null);
+    if (enquiryTrackingEnabled() && prop && guest) {
+      await logEnquiry({ id: prop.id }, formatPhone(String(guest.fields['Phone Number'] || '')), 'Hold Expired', {
+        checkInIso: f['Check In'], checkOutIso: f['Check Out'], bookingType: f['Booking Type'], bookingId: booking.id,
+        firstMessageAt: guest.fields['Attempt Started At'], lastMessageAt: guest.fields['Last Inbound At'],
+        lastStep: guest.fields['Session State'], testPhone: isTestGuest(guest)
+      });
+    }
+    const notifyRaw = prop && prop.fields['Notify Phone'];
+    const notifyPhone = notifyRaw ? String(notifyRaw).replace(/[\s\-\+]/g, '') : OWNER_PHONE;
+    if (notifyPhone) {
+      const send = await sendWhatsApp(notifyPhone, msg('hourlyExpiredNotice', {
+        ref, stay: f['Booking Type'] === 'Day' ? 'day stay' : 'short stay', roomName: room ? room.fields['Room Name'] : 'no room',
+        guestName: guest ? guest.fields['Guest Name'] : 'the guest', phone: guest ? guest.fields['Phone Number'] : '',
+        arrival: formatSastDateTime(f['Check In'])
+      }));
+      if (send && send.error) logToAxiom('error', 'hourly_expiry_notice_failed', { bookingId: booking.id, error: JSON.stringify(send.error) });
+    }
+  } catch (err) {
+    logToAxiom('error', 'hourly_expiry_followup_failed', { bookingId: booking.id, message: err.message });
+  }
+  return true;
+}
+// The guest's most recent booking released by this rule (recognised by the note), or null.
+async function findHourlyExpiredBooking(guestId) {
+  const cancelled = await airtableGetBookingsByGuestId(guestId, 'Cancelled');
+  return newestFirst(cancelled.filter(b => String(b.fields['Notes'] || '').includes(HOURLY_EXPIRED_NOTE)))[0] || null;
+}
+async function runHourlyExpiry(now = new Date(), opts = {}) {
+  const { deadline = Infinity } = opts;
+  const summary = { hourlyExpired: 0 };
+  if (!hourlyExpiryEnabled()) return summary;
+  const nowMs = now.getTime();
+  const confirmed = await airtableGet('WS_Bookings', `{Status} = 'Confirmed'`);
+  for (const b of confirmed) {
+    if (!hourlyExpiryCandidate(b, nowMs)) continue;
+    if (Date.now() > deadline) {
+      summary.truncated = true;
+      logToAxiom('warn', 'cron_time_budget_hit', { cron: 'auto_checkout', stage: 'hourly_expiry', leftFrom: b.id });
+      break;
+    }
+    const fresh = (await airtableGet('WS_Bookings', `RECORD_ID() = '${b.id}'`))[0] || null;
+    if (!fresh || !hourlyExpiryCandidate(fresh, nowMs)) {
+      logToAxiom('info', 'hourly_expiry_skipped_changed', { bookingId: b.id });
+      continue;
+    }
+    const guestId = (fresh.fields['Guest'] || [])[0];
+    const guest = guestId ? (await airtableGet('WS_Guests', `RECORD_ID() = '${guestId}'`))[0] || null : null;
+    if (await expireHourlyBooking(fresh, { property: null, guest, source: 'cron' })) summary.hourlyExpired++;
+  }
+  return summary;
+}
+// A guest whose booking was released (or is released by their own tap): the expired message, state NEW, nothing else.
+async function sendHourlyExpiredReply(ctx) {
+  await sendWhatsApp(ctx.phone, msg('hourlyExpiredTap'));
+  await updateGuestState(ctx.guest.id, { 'Session State': 'NEW' });
+}
+
 // ─── ONE OPEN BOOKING (WABISTAY_ONE_OPEN_BOOKING) and GATE_REQUIRES_BOOKING ──
 // Seen live 6 Oct 2026: a 3-hour booking (WS-D4NUMZ, 16:00) was never paid or used; at 18:53 the guest booked an
 // Overnight (WS-PSG4VQ) and the 18:54 gate tap used the OLD booking, because the gate took the first Confirmed
@@ -5008,8 +5115,26 @@ const actions = {
 
     // Step 2: settle which room this guest actually gets.
     // F5-style: see greetAndAskStayType — FIND/ARRAYJOIN confirmed unreliable, JS-filter instead
-    const bookings = await airtableGetBookingsByGuestId(ctx.guest.id, 'Confirmed');
+    let bookings = await airtableGetBookingsByGuestId(ctx.guest.id, 'Confirmed');
+    // WABISTAY_HOURLY_EXPIRY: an overdue unpaid short or day stay is released by the tap itself if the cron has not
+    // got to it. Anything left is judged as usual; if nothing is left, the guest is told it has expired.
+    let expiredAtTap = false;
+    if (hourlyExpiryEnabled()) {
+      const nowMs = Date.now();
+      const released = [];
+      for (const b of bookings.filter(x => hourlyExpiryCandidate(x, nowMs))) {
+        if (await expireHourlyBooking(b, { property: ctx.property, guest: ctx.guest, source: 'gate' })) released.push(b);
+      }
+      if (released.length > 0) { expiredAtTap = true; bookings = bookings.filter(b => !released.includes(b)); }
+    }
     const booking = oneOpenBookingEnabled() ? pickNearestOpenBooking(bookings) : (bookings[0] || null);
+    // The cron may already have released it: the guest has no Confirmed booking but an expired one.
+    if (!booking && hourlyExpiryEnabled() && (expiredAtTap || await findHourlyExpiredBooking(ctx.guest.id))) {
+      logToAxiom('info', 'gate_arrival_booking_expired', { phone: ctx.phone, guestId: ctx.guest.id, releasedAtTap: expiredAtTap });
+      await sendHourlyExpiredReply(ctx);
+      if (ctx.gateResult) ctx.gateResult.outcome = 'expired';
+      return;
+    }
     // WABISTAY_GATE_REQUIRES_BOOKING: nothing to arrive for. No room, no check-in, no alert.
     if (!booking && gateRequiresBookingEnabled()) {
       logToAxiom('info', 'gate_arrival_no_booking', { phone: ctx.phone, guestId: ctx.guest.id });
@@ -5085,7 +5210,7 @@ const actions = {
       // own try/catch: it can never block or delay either. Not for test phones.
       // WABISTAY_PAY_ASSIGNS_ROOM also needs the tap remembered (test phones and tracking off included),
       // because that is how reception's payment finds a guest who is waiting.
-      if (((enquiryTrackingEnabled() && !isTestGuest(ctx.guest)) || payAssignsRoomEnabled()) && !booking.fields['Gate Tap At']) {
+      if (((enquiryTrackingEnabled() && !isTestGuest(ctx.guest)) || payAssignsRoomEnabled() || hourlyExpiryEnabled()) && !booking.fields['Gate Tap At']) {
         try {
           const tapWrite = await airtableUpdate('WS_Bookings', booking.id, { 'Gate Tap At': tapAt });
           if (tapWrite && tapWrite.error) {
@@ -5324,6 +5449,11 @@ const actions = {
 
   // CONFIRMED fallback menu (F9)
   async showConfirmedMenu(ctx) {
+    // WABISTAY_HOURLY_EXPIRY: a guest left in CONFIRMED after their booking was released is not told it is confirmed.
+    if (hourlyExpiryEnabled() && (await airtableGetBookingsByGuestId(ctx.guest.id, 'Confirmed')).length === 0 && await findHourlyExpiredBooking(ctx.guest.id)) {
+      await sendHourlyExpiredReply(ctx);
+      return;
+    }
     await sendWhatsApp(ctx.phone, confirmedMenuMessage(ctx.property, ctx.guest.fields['Guest Name']));
   },
 
@@ -6458,7 +6588,7 @@ async function autoCheckoutHandler(req, res) {
     // sweeps across properties rather than per property, so the count is the number
     // of properties in the base, read once (one extra call, included in the total).
     const propertyCountRef = { value: 0 };
-    const { summary, enquiry, holds, overdue, unattended } = await withAirtableCallCount('auto_checkout', propertyCountRef, async () => {
+    const { summary, enquiry, holds, overdue, unattended, hourlyExpiry } = await withAirtableCallCount('auto_checkout', propertyCountRef, async () => {
       propertyCountRef.value = (await airtableGet('WS_Properties', '')).length;
       const summary = await runAutoCheckout(new Date(), { deadline });
       // B19: reuse this cron for the enquiry-abandonment staleness sweep.
@@ -6468,16 +6598,18 @@ async function autoCheckoutHandler(req, res) {
       const holds = await runHoldRelease(new Date(), { deadline });
       const overdue = await runOverdueAlerts(new Date(), { deadline });
       const unattended = await runUnattendedGateSweep(new Date(), { deadline });
-      return { summary, enquiry, holds, overdue, unattended };
+      const hourlyExpiry = await runHourlyExpiry(new Date(), { deadline });
+      return { summary, enquiry, holds, overdue, unattended, hourlyExpiry };
     });
     logToAxiom('info', 'cron_duration', {
       cron: 'auto_checkout', ms: Date.now() - startedAt,
-      truncated: !!(summary.truncated || enquiry.truncated || holds.truncated || overdue.truncated || unattended.truncated)
+      truncated: !!(summary.truncated || enquiry.truncated || holds.truncated || overdue.truncated || unattended.truncated || hourlyExpiry.truncated)
     });
     res.status(200).json({
       ok: true, ...summary, ...enquiry,
       holdsReleased: holds.holdsReleased, overdueAlerts: overdue.overdueAlerts, unattendedGateArrivals: unattended.unattendedGateArrivals,
-      ...(holds.truncated || overdue.truncated || unattended.truncated ? { truncated: true } : {})
+      ...(hourlyExpiry.hourlyExpired ? { hourlyExpired: hourlyExpiry.hourlyExpired } : {}),
+      ...(holds.truncated || overdue.truncated || unattended.truncated || hourlyExpiry.truncated ? { truncated: true } : {})
     });
   } catch (err) {
     console.error('[AUTO-CHECKOUT FATAL]', err.message, err.stack);
@@ -8943,6 +9075,7 @@ module.exports.alertShawn = alertShawn;
 module.exports.getAlertPhone = getAlertPhone;
 module.exports.cronTimeBudgetMs = cronTimeBudgetMs;
 module.exports.runHoldRelease = runHoldRelease;
+module.exports.runHourlyExpiry = runHourlyExpiry;
 module.exports.runUnattendedGateSweep = runUnattendedGateSweep;
 module.exports.runOverdueAlerts = runOverdueAlerts;
 module.exports.overnightHoldExpiryIso = overnightHoldExpiryIso;
