@@ -20,9 +20,9 @@ const MIN = 60e3;
 const iso = ms => new Date(ms).toISOString();
 const ago = m => iso(Date.now() - m * MIN);
 
-const WELCOME = 'Welcome to Canary Street Guest Rooms! 🌟 Your room is *Room 01*.\n\nSomeone is on their way to help you at the gate.\n\nWhen you\'re ready to leave, reply with a number:\n1 - Check out';
+const WELCOME = 'Welcome to Canary Street Guest Rooms! Your room is *Room 01*. We\'re happy to have you here. When you\'re ready to leave, tap Check out.\n\n1 - Check out';
 const OLD_UNPAID = 'Almost there! Pop into the office to sort payment — card or EFT — and reception will get you your keys.';
-const NEW_UNPAID = 'Almost there! Please come into the office and pay by card or EFT. As soon as reception has recorded your payment, we will send you your room number here.';
+const NEW_UNPAID = 'Almost there! Please come into the office and pay by card or EFT. Reception will message you here as soon as you are checked in.';
 const ALREADY_IN = 'You are already checked in to Room 01. Reply 1 again when you are ready to leave.';
 
 function seed({ roomStatus = 'Available', guestState = 'CONFIRMED', booking = {}, testPhone = false } = {}) {
