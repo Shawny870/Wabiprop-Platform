@@ -1606,13 +1606,15 @@ function escalationTimeoutMs(property) {
   return minutes * 60 * 1000;
 }
 
-// Written with the greeting (tracking on, not a test phone): 'Last Inbound At' so
-// the abandonment sweep can see the greeting step, and, when this starts a fresh
-// attempt (guest new or back at NEW), the attempt's start and property. A restart
-// from mid-flow ("hi"/"menu") keeps the original start.
+// Written with every greeting: 'Last Inbound At', so the abandonment sweep sees the greeting step as
+// fresh. It is written for test phones and with tracking off too: without it a guest moved to
+// AWAITING_STAY_TYPE keeps an old value from an earlier session and the next 5-minute sweep resets them
+// to NEW seconds later (seen live 6 Oct 2026). Only for tracked, non-test guests, and when this starts a
+// fresh attempt (guest new or back at NEW), also the attempt's start and property. A restart from
+// mid-flow ("hi"/"menu") keeps the original start.
 function greetingTrackingFields(ctx) {
-  if (!enquiryTrackingEnabled() || isTestGuest(ctx.guest)) return {};
   const now = new Date().toISOString();
+  if (!enquiryTrackingEnabled() || isTestGuest(ctx.guest)) return { 'Last Inbound At': now };
   const state = ctx.guest && ctx.guest.fields['Session State'];
   const fresh = !ctx.guest || !state || state === 'NEW';
   return {
@@ -4360,7 +4362,7 @@ const actions = {
       // (ctx.next, written before this rate lookup ran) — no price exists to
       // ask payment for, so this downgrades straight to AWAITING_ETA instead,
       // same target the priced path reaches after payment method is chosen.
-      if (!(await advanceGuestState(ctx, { 'Session State': 'AWAITING_ETA' }))) return;
+      if (!(await advanceGuestState(ctx, { 'Session State': 'AWAITING_ETA', 'Last Inbound At': new Date().toISOString() }))) return;
       await sendWhatsApp(ctx.phone, msg('occupancyContactOwner', { guestName }));
       return;
     }
@@ -4712,7 +4714,7 @@ const actions = {
     // The booking is already Confirmed and holding its room at this point, so a
     // tripped guard here leaves a hold the guest was never told about — the
     // alert carries the booking id so reception can finish or cancel it.
-    if (!(await advanceGuestState(ctx, { 'Session State': ctx.next }, { bookingId: pending.id, bookingRef }))) return;
+    if (!(await advanceGuestState(ctx, { 'Session State': ctx.next, 'Last Inbound At': new Date().toISOString() }, { bookingId: pending.id, bookingRef }))) return;
     // B19: Booked, Hourly. Completed in one handler, so this is the single log site.
     await logEnquiry(ctx.property, ctx.phone, 'Booked', { ...enquiryTrackingOpts(ctx),
       checkInIso, checkOutIso, bookingType: 'Hourly', bookingId: pending.id
