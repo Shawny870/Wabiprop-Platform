@@ -8,6 +8,8 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 const { installEnv, installFetch, MockAirtable } = require('./harness');
+// The report payload events carry the report as one JSON string (payload_json); flatten it back for assertions.
+const unpack = e => (e ? { ...e, ...JSON.parse(e.payload_json) } : e);
 
 installEnv();
 const wh = require('../api/wabistay/webhook.js');
@@ -263,7 +265,7 @@ test('runMonthlyReport sends one live template per property, and writes no Airta
   assert.strictEqual(ctx.sends[0].to, '27732273477');
   assert.strictEqual(ctx.sends[0].template, wh.MONTHLY_REPORT_TEMPLATE);
   assert.strictEqual(ctx.airtable.log.length, 0, 'read-only, no Airtable writes');
-  const payloadEvent = ctx.axiom.find(e => e.event === 'monthly_report_payload');
+  const payloadEvent = unpack(ctx.axiom.find(e => e.event === 'monthly_report_payload'));
   assert.ok(payloadEvent);
   assert.strictEqual(payloadEvent.template, wh.MONTHLY_REPORT_TEMPLATE);
   assert.strictEqual(payloadEvent.ownerName, 'Villa Liza Owner', 'ownerName is resolved and attached, not orphaned');
@@ -466,7 +468,7 @@ test('E2E: runMonthlyReport resolves a real linked owner and logs correct 11-par
   assert.strictEqual(sent.length, 1);
   assert.strictEqual(sent.failed.length, 0);
 
-  const payloadEvent = ctx.axiom.find(e => e.event === 'monthly_report_payload');
+  const payloadEvent = unpack(ctx.axiom.find(e => e.event === 'monthly_report_payload'));
   assert.ok(payloadEvent);
   assert.strictEqual(payloadEvent.templateParams.length, 11);
   assert.strictEqual(payloadEvent.templateParams[0], 'Villa Liza Owner');

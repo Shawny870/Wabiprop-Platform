@@ -39,7 +39,7 @@ test('runOwnerSummary logs exactly one airtable_call_count event with sane total
   assert.strictEqual(e.propertyCount, 2);
   assert.ok(e.totalCalls >= 4, 'at least the 4 unconditional top-level reads (Properties/Rooms/Bookings/Guests)');
   assert.strictEqual(e.callsPerProperty, Math.round((e.totalCalls / 2) * 100) / 100);
-  assert.ok(e.breakdown && typeof e.breakdown.get === 'number', 'breakdown by call kind is present');
+  assert.ok(e.breakdown_json && typeof JSON.parse(e.breakdown_json).get === 'number', 'breakdown by call kind is present');
 });
 
 test('runDailySummary logs one airtable_call_count event keyed to properties that actually fired', async () => {

@@ -35,9 +35,8 @@
           "status": "failed",
           "timestamp": "1750000100",
           "recipient": "27821234567",
-          "errors": [
-            { "code": 131026, "title": "Message undeliverable", "message": "Message failed to send", "error_data": { "details": "recipient could not be reached" } }
-          ]
+          "errors_json": "[{\"code\":131026,\"title\":\"Message undeliverable\",\"message\":\"Message failed to send\",\"error_data\":{\"details\":\"recipient could not be reached\"}}]",
+          "error_code": 131026
         }
       }
     ]

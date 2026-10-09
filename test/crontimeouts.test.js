@@ -204,7 +204,7 @@ test('monthlyReportHandler: logs start and duration, reads the four tables toget
   assert.strictEqual(events(ctx, 'cron_started')[0].cron, 'monthly_report');
   assert.strictEqual(typeof events(ctx, 'cron_duration')[0].ms, 'number');
   const calls = events(ctx, 'airtable_call_count').find(e => e.cronName === 'monthly_report');
-  assert.ok(calls && calls.breakdown.get >= 4, 'the four table reads were counted');
+  assert.ok(calls && JSON.parse(calls.breakdown_json).get >= 4, 'the four table reads were counted');
   for (const table of ['WS_Properties', 'WS_Rooms', 'WS_Bookings', 'WS_Guests']) assert.ok(ctx.gets.includes(table), table);
 });
 

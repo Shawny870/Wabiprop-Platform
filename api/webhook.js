@@ -228,7 +228,11 @@ module.exports = async function handler(req, res) {
     if (statuses && statuses.length > 0) {
       for (const s of statuses) {
         const detail = { wamid: s.id, status: s.status, timestamp: s.timestamp, recipient: s.recipient_id, phone_number_id: phoneNumberId };
-        if (s.status === 'failed' && s.errors) detail.errors = s.errors;
+        // Meta's error array goes in as ONE string (Axiom would make a dotted field per key); the code stays queryable.
+        if (s.status === 'failed' && s.errors) {
+          detail.errors_json = JSON.stringify(s.errors);
+          detail.error_code = s.errors[0] && s.errors[0].code != null ? s.errors[0].code : null;
+        }
         // Meta's own billing verdict for this message, when the callback carries one: whether it is billable,
         // under which pricing model, and its category (utility, marketing, service...). Left off when absent.
         if (s.pricing) {

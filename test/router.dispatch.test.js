@@ -162,5 +162,7 @@ test('router: status callback (failed) includes Meta\'s errors array in the Axio
   const logged = ctx.axiom.find(e => e.event === 'whatsapp_status_callback');
   assert.ok(logged, 'whatsapp_status_callback logged to Axiom');
   assert.strictEqual(logged.status, 'failed');
-  assert.deepStrictEqual(logged.errors, status.errors, 'errors array carried through verbatim');
+  assert.deepStrictEqual(JSON.parse(logged.errors_json), status.errors, 'errors array carried through verbatim, as one JSON string');
+  assert.strictEqual(logged.error_code, 131026, 'the error code stays queryable on its own');
+  assert.ok(!('errors' in logged), 'no object-valued errors field');
 });

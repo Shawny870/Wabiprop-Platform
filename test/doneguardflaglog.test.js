@@ -157,9 +157,11 @@ test('the first request of a process logs wabistay_flags once, with no values an
 
   const flagEvents = events(ctx, 'wabistay_flags');
   assert.strictEqual(flagEvents.length, 1, 'logged once per process, not per request');
-  assert.strictEqual(flagEvents[0].flags.WABISTAY_OPS_ALERT_TEMPLATE, 'on');
-  assert.strictEqual(flagEvents[0].flags.WABISTAY_STATE_WRITE_GUARD, 'on');
-  assert.strictEqual(flagEvents[0].flags.WABISTAY_GATE_ARRIVAL_TEMPLATE, 'off');
+  const flagsLogged = JSON.parse(flagEvents[0].flags_json).flags;
+  assert.strictEqual(flagsLogged.WABISTAY_OPS_ALERT_TEMPLATE, 'on');
+  assert.strictEqual(flagsLogged.WABISTAY_STATE_WRITE_GUARD, 'on');
+  assert.strictEqual(flagsLogged.WABISTAY_GATE_ARRIVAL_TEMPLATE, 'off');
+  assert.ok(!('flags' in flagEvents[0]) && !('others' in flagEvents[0]), 'no object-valued fields: Axiom would make one dotted field per key');
   assert.ok(!JSON.stringify(ctx.axiom).includes(SECRET), 'no value in the Axiom events');
   assert.ok(!logged.join('\n').includes(SECRET), 'no value in the console log');
   assert.ok(logged.some(l => l.startsWith('[WABISTAY FLAGS]')));
@@ -205,7 +207,7 @@ test('the logged event carries the language value but neither phone number, in A
   }
 
   const event = events(ctx, 'wabistay_flags')[0];
-  assert.deepStrictEqual(event.others, {
+  assert.deepStrictEqual(JSON.parse(event.flags_json).others, {
     REPORT_TEST_MODE_PHONE: 'set', OWNER_PHONE: 'set', ownerPhoneLast4: '0111', notifyPhoneLast4: null,
     WA_TEMPLATE_LANGUAGE: 'en_US', WA_TEMPLATE_LANGUAGE_source: 'env'
   });

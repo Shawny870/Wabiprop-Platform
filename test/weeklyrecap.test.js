@@ -9,6 +9,8 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 const { installEnv, installFetch, MockAirtable } = require('./harness');
+// The report payload events carry the report as one JSON string (payload_json); flatten it back for assertions.
+const unpack = e => (e ? { ...e, ...JSON.parse(e.payload_json) } : e);
 
 installEnv();
 const wh = require('../api/wabistay/webhook.js');
@@ -169,7 +171,7 @@ test('E2E: runWeeklyRecap resolves a real linked owner and sends a live template
   assert.strictEqual(ctx.sends[0].params.length, 7);
   assert.strictEqual(ctx.sends[0].params[0], 'Villa Liza Owner');
 
-  const payloadEvent = ctx.axiom.find(e => e.event === 'weekly_recap_payload');
+  const payloadEvent = unpack(ctx.axiom.find(e => e.event === 'weekly_recap_payload'));
   assert.ok(payloadEvent);
   assert.strictEqual(payloadEvent.ownerName, 'Villa Liza Owner');
 });
