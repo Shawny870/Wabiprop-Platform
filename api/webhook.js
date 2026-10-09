@@ -272,6 +272,12 @@ module.exports = async function handler(req, res) {
 
     // Non-text message — send fallback, return 200
     if (!messageText) {
+      // WABISTAY_IGNORE_REACTIONS: an emoji reaction (e.g. a thumbs-up on an alert) is not a
+      // message to answer. Wabistay number only; stickers, audio and images still fall through.
+      if (message.type === 'reaction' && flagOn('WABISTAY_IGNORE_REACTIONS') && phoneNumberId === WS_PHONE_NUMBER_ID_CONST) {
+        logToAxiom('info', 'router_reaction_ignored', { phone, phone_number_id: phoneNumberId });
+        return res.status(200).send('OK');
+      }
       // WABISTAY_INTERACTIVE: a button/list reply on the Wabistay number goes to the
       // Wabistay handler, which turns it into canonical text. Anywhere else (the
       // flag off, another number, Wabiprop) it is still just "non-text".
