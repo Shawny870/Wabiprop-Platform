@@ -7232,8 +7232,22 @@ async function sendMonthlyReport(property, report) {
   if (!recipient) {
     throw new Error('sendMonthlyReport: no recipient phone available — property has no Notify Phone and OWNER_PHONE fallback is unset');
   }
-  await sendWhatsAppTemplate(recipient, monthlyReportTemplateName(), templateParams, { site: 'monthly_report', propertyId: property.id });
+  assertTemplateSent(
+    await sendWhatsAppTemplate(recipient, monthlyReportTemplateName(), templateParams, { site: 'monthly_report', propertyId: property.id }),
+    monthlyReportTemplateName(), 'monthly_report');
   return payload;
+}
+
+// sendWhatsAppTemplate does not throw on a Meta rejection, it returns { ok: false, error }.
+// A report send that ignores that result counts a rejected template as sent and nobody is
+// told (8 Oct 2026: wabistay_owner_weekly_recap, error 132001). Throwing here lands in the
+// run's per-property catch, which alerts with this message and carries on with the other
+// properties.
+function assertTemplateSent(result, templateName, site) {
+  if (result && result.ok) return;
+  const err = (result && result.error) || {};
+  throw new Error(`${site}: Meta rejected template ${templateName}` +
+    ` (code ${err.code != null ? err.code : 'unknown'}): ${err.message || 'no error detail'}`);
 }
 
 // A WS_Properties row with no Property Name is an empty placeholder (rec5Oo92ii3H6xmBB,
@@ -7844,7 +7858,9 @@ async function sendWeeklyRecap(property, report) {
   if (!recipient) {
     throw new Error('sendWeeklyRecap: no recipient phone available — property has no Notify Phone and OWNER_PHONE fallback is unset');
   }
-  await sendWhatsAppTemplate(recipient, weeklyRecapTemplateName(), templateParams, { site: 'weekly_recap', propertyId: property.id });
+  assertTemplateSent(
+    await sendWhatsAppTemplate(recipient, weeklyRecapTemplateName(), templateParams, { site: 'weekly_recap', propertyId: property.id }),
+    weeklyRecapTemplateName(), 'weekly_recap');
   return payload;
 }
 
