@@ -153,6 +153,22 @@ function guestEscalationTemplate() {
   return process.env.WABISTAY_GUEST_ESCALATION_TEMPLATE || null;
 }
 
+// Axiom turns every nested object key into its own dotted field, and the dataset has a hard
+// 256-field cap. Anything object-shaped or variable-keyed goes into ONE string field via this
+// helper instead (flags_json, payload_json, fields_json, errors_json, breakdown_json).
+function jsonField(v) {
+  try { return JSON.stringify(v === undefined ? null : v); } catch (_) { return String(v); }
+}
+// The four report payloads: property id/name, template and recipient stay queryable fields
+// (all long-standing names); the rest of the report is one string.
+function logReportPayload(event, payload) {
+  logToAxiom('info', event, {
+    propertyId: payload.propertyId, propertyName: payload.propertyName,
+    template: payload.template, notifyPhone: payload.notifyPhone,
+    payload_json: jsonField(payload)
+  });
+}
+
 // ─── AIRTABLE HELPERS ───────────────────────────────────────────────────────
 
 // `opts.throwOnError` (default false): every existing caller relies on the
@@ -205,7 +221,7 @@ async function withAirtableCallCount(cronName, propertyCountRef, fn) {
       propertyCount,
       totalCalls,
       callsPerProperty: propertyCount > 0 ? Math.round((totalCalls / propertyCount) * 100) / 100 : null,
-      breakdown: counter
+      breakdown_json: jsonField(counter)
     });
   }
 }
@@ -312,7 +328,7 @@ async function updateGuestState(guestId, fields, logContext = {}) {
   const result = await airtableUpdate('WS_Guests', guestId, fields);
   if (result && result.error) {
     logToAxiom('error', 'guest_state_write_failed', {
-      guestId, fields, error: JSON.stringify(result.error), ...logContext
+      guestId, fields_json: jsonField(fields), error: JSON.stringify(result.error), ...logContext
     });
   }
   return result;
@@ -474,7 +490,7 @@ function logFlagsOnce() {
     deploymentId: process.env.VERCEL_DEPLOYMENT_ID || null
   };
   console.log(`[WABISTAY FLAGS] ${JSON.stringify({ flags, others })}`);
-  logToAxiom('info', 'wabistay_flags', { flags, others, ...where });
+  logToAxiom('info', 'wabistay_flags', { flags_json: jsonField({ flags, others }), ...where });
   return flags;
 }
 
@@ -1023,6 +1039,7 @@ async function sendWhatsAppTemplate(to, templateName, rawParams = [], meta = {})
     logToAxiom('error', 'whatsapp_template_send_error', {
       to, template: templateName, status: res.status,
       error: JSON.stringify(data.error || null),
+      error_code: (data.error && data.error.code) != null ? data.error.code : null,
       // 131047 is the re-engagement rejection — the specific failure this helper
       // exists to make visible. Surfaced as its own flag so it can be alerted on.
       reEngagementRejected: !!(data.error && data.error.code === 131047),
@@ -4190,7 +4207,7 @@ const actions = {
       });
       if (guestCreate && guestCreate.error) {
         logToAxiom('error', 'guest_state_write_failed', {
-          phone: ctx.phone, fields: { 'Session State': ctx.next }, error: JSON.stringify(guestCreate.error)
+          phone: ctx.phone, fields_json: jsonField({ 'Session State': ctx.next }), error: JSON.stringify(guestCreate.error)
         });
       }
     } else {
@@ -4619,7 +4636,7 @@ const actions = {
         });
         if (guestCreate && guestCreate.error) {
           logToAxiom('error', 'guest_state_write_failed', {
-            phone: ctx.phone, fields: { 'Session State': 'AWAITING_DETAILS' }, error: JSON.stringify(guestCreate.error)
+            phone: ctx.phone, fields_json: jsonField({ 'Session State': 'AWAITING_DETAILS' }), error: JSON.stringify(guestCreate.error)
           });
         }
       }
@@ -4644,7 +4661,7 @@ const actions = {
       });
       if (guestCreate && guestCreate.error) {
         logToAxiom('error', 'guest_state_write_failed', {
-          phone: ctx.phone, fields: { 'Session State': ctx.next }, error: JSON.stringify(guestCreate.error)
+          phone: ctx.phone, fields_json: jsonField({ 'Session State': ctx.next }), error: JSON.stringify(guestCreate.error)
         });
       }
     }
@@ -6816,7 +6833,7 @@ async function sendOwnerSummary(property, summary) {
   // "Last Report Sent" is surfaced from this same owner_summary_payload
   // Axiom event instead (it already carries propertyId + the event's own
   // _time) — see the property-activity-tracker PR body for the query.
-  logToAxiom('info', 'owner_summary_payload', payload);
+  logReportPayload('owner_summary_payload', payload);
 
   // TODO(B17): `sendWhatsAppTemplate` now EXISTS (see the WhatsApp template helper
   // above) — the only thing still missing is Meta's approval of
@@ -7222,7 +7239,7 @@ async function sendMonthlyReport(property, report) {
   const reportWithOwner = { ...report, ownerName };
   const templateParams = monthlyReportTemplateParams(reportWithOwner);
   const payload = { ...reportWithOwner, template: monthlyReportTemplateName(), notifyPhone, templateParams };
-  logToAxiom('info', 'monthly_report_payload', payload);
+  logReportPayload('monthly_report_payload', payload);
 
   // LIVE as of MONTHLY_REPORT_TEMPLATE's Meta approval — routed through the
   // REPORT_TEST_MODE_PHONE gate (see resolveSendRecipient's own header
@@ -7751,7 +7768,7 @@ async function sendDailySummary(property, summary) {
   const payload = { ...summaryWithOwner, template: dailySummaryTemplateName(), notifyPhone, templateParams };
   // See the matching comment in sendOwnerSummary — deliberately no Airtable
   // write here either, for the same read-only-cron reason.
-  logToAxiom('info', 'daily_summary_payload', payload);
+  logReportPayload('daily_summary_payload', payload);
 
   // TODO(Stage 3 part 3): once DAILY_SUMMARY_TEMPLATE is approved by Meta,
   // this is now genuinely the one-line swap point — templateParams above is
@@ -7852,7 +7869,7 @@ async function sendWeeklyRecap(property, report) {
   const reportWithOwner = { ...report, ownerName };
   const templateParams = weeklyRecapTemplateParams(reportWithOwner);
   const payload = { ...reportWithOwner, template: weeklyRecapTemplateName(), notifyPhone, templateParams };
-  logToAxiom('info', 'weekly_recap_payload', payload);
+  logReportPayload('weekly_recap_payload', payload);
 
   const recipient = resolveSendRecipient(notifyPhone, 'weekly_recap', { propertyId: property.id });
   if (!recipient) {
@@ -9014,7 +9031,10 @@ module.exports = async function handler(req, res) {
     if (statuses && statuses.length > 0) {
       for (const s of statuses) {
         const detail = { wamid: s.id, status: s.status, timestamp: s.timestamp, recipient: s.recipient_id };
-        if (s.status === 'failed' && s.errors) detail.errors = s.errors;
+        if (s.status === 'failed' && s.errors) {
+          detail.errors_json = jsonField(s.errors);
+          detail.error_code = s.errors[0] && s.errors[0].code != null ? s.errors[0].code : null;
+        }
         // Meta's own billing verdict for this message, when the callback carries one: whether it is billable,
         // under which pricing model, and its category (utility, marketing, service...). Left off when absent.
         if (s.pricing) {
@@ -9149,6 +9169,8 @@ module.exports.sendWeeklyRecap = sendWeeklyRecap;
 module.exports.aggregateWeeklyRecap = aggregateWeeklyRecap;
 module.exports.weeklyRecapTemplateParams = weeklyRecapTemplateParams;
 module.exports.WEEKLY_RECAP_TEMPLATE = WEEKLY_RECAP_TEMPLATE;
+module.exports.jsonField = jsonField;
+module.exports.updateGuestState = updateGuestState;
 module.exports.resolveSendRecipient = resolveSendRecipient;
 module.exports.runDailySummary = runDailySummary;
 module.exports.dailySummaryHandler = dailySummaryHandler;

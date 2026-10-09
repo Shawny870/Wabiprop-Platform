@@ -8,6 +8,8 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 const { installEnv, installFetch, MockAirtable } = require('./harness');
+// The report payload events carry the report as one JSON string (payload_json); flatten it back for assertions.
+const unpack = e => (e ? { ...e, ...JSON.parse(e.payload_json) } : e);
 
 installEnv();
 const wh = require('../api/wabistay/webhook.js');
@@ -90,7 +92,7 @@ test('B17: a zero-booking week produces a sensible summary, not an error', async
 test('B17: the fully-assembled payload is logged to Axiom for each property (send stubbed)', async () => {
   const ctx = setup(structuredClone(seed));
   await wh.runOwnerSummary({ now: NOW });
-  const payloads = ctx.axiom.filter(e => e.event === 'owner_summary_payload');
+  const payloads = ctx.axiom.filter(e => e.event === 'owner_summary_payload').map(unpack);
   assert.strictEqual(payloads.length, 3); // one per property
   const a = payloads.find(p => p.propertyId === 'recPA');
   assert.strictEqual(a.totalRevenue, 1000);
@@ -184,7 +186,7 @@ test('B17/Stage1: a zero-booking week has zero payment lines and zero delta, not
 test('B17/Stage1: the weekly payload carries a rendered reconciliation message with a top-line total and one line per booking', async () => {
   const ctx = setup(reconSeed());
   await wh.runOwnerSummary({ now: NOW });
-  const payloads = ctx.axiom.filter(e => e.event === 'owner_summary_payload');
+  const payloads = ctx.axiom.filter(e => e.event === 'owner_summary_payload').map(unpack);
   const a = payloads.find(p => p.propertyId === 'recPA');
 
   assert.ok(a.paymentReconciliationMessage.startsWith('💰 *Payment Reconciliation — Lodge A*'));

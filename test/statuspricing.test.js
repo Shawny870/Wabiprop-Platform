@@ -71,7 +71,8 @@ for (const [name, handler] of [['router', router], ['wabistay handler', wabistay
   test(`${name}: a failed status keeps its errors array and adds nothing when there is no pricing`, async () => {
     const errors = [{ code: 131026, title: 'Message undeliverable' }];
     const [e] = await logged(handler, { ...base, status: 'failed', errors });
-    assert.deepStrictEqual(e.errors, errors);
+    assert.deepStrictEqual(JSON.parse(e.errors_json), errors);
+    assert.strictEqual(e.error_code, 131026);
     assert.ok(!('billable' in e));
   });
 }
