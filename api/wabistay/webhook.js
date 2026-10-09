@@ -7235,6 +7235,19 @@ async function sendMonthlyReport(property, report) {
   return payload;
 }
 
+// A WS_Properties row with no Property Name is an empty placeholder (rec5Oo92ii3H6xmBB,
+// 17 Jul 2026), not a property. The report loops used to try it, fail on the missing
+// owner and raise a billable ops alert every run. Skip it quietly with an info event.
+// A NAMED property with no owner link is still a real fault and still alerts.
+function skipUnnamedProperty(cron, property) {
+  // A record with no fields object at all is corrupt, not blank: let it fail and alert.
+  if (!property || !property.fields || typeof property.fields !== 'object') return false;
+  const name = property.fields['Property Name'];
+  if (typeof name === 'string' && name.trim()) return false;
+  logToAxiom('info', 'report_skipped_unnamed_property', { cron, propertyId: property && property.id });
+  return true;
+}
+
 async function runMonthlyReport(opts = {}) {
   const { now = new Date() } = opts;
   const periodDays = 30;
@@ -7263,6 +7276,7 @@ async function runMonthlyReport(opts = {}) {
   const sent = [];
   const failed = [];
   for (const property of properties) {
+    if (skipUnnamedProperty('monthly_report', property)) continue;
     // Per-property isolation + alertShawn on failure — same established
     // pattern as runOwnerSummary/runDailySummary/runWeeklyRecap.
     try {
@@ -7341,6 +7355,7 @@ async function runOwnerSummary(opts = {}) {
     const summaries = [];
     const failed = [];
     for (const property of properties) {
+      if (skipUnnamedProperty('owner_summary', property)) continue;
       // Per-property isolation, same reasoning as runDailySummary's own fix: one
       // property throwing here must not abort the rest of this run — before this
       // fix, an uncaught throw propagated straight out of the loop and silently
@@ -7855,6 +7870,7 @@ async function runWeeklyRecap(opts = {}) {
   const sent = [];
   const failed = [];
   for (const property of properties) {
+    if (skipUnnamedProperty('weekly_recap', property)) continue;
     // Per-property isolation, matching runOwnerSummary/runDailySummary/
     // runMonthlyReport's own established pattern: one property throwing
     // (including a missing ownerName) must not abort the rest of this run.
