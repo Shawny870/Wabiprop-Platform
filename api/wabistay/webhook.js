@@ -226,6 +226,49 @@ async function withAirtableCallCount(cronName, propertyCountRef, fn) {
   }
 }
 
+// ─── AIRTABLE RETRY (WABISTAY_AIRTABLE_RETRY) ──────────────────────────────────
+// Off (unset): every Airtable call behaves exactly as before, including the old habit of airtableGet logging a
+// failure and returning [] (or whatever pages it had), which callers cannot tell from "no rows". That is how a
+// 429 or 5xx on the guest lookup looks like a brand-new guest and on the rooms read looks like "fully booked".
+// On:
+//   · a call is retried on HTTP 429, on a dropped connection, and (reads and updates only) on HTTP 5xx, after
+//     250 / 750 / 1500 ms. A create is retried only on 429 (the request was refused, not processed): retrying
+//     one after a 5xx or a dropped connection could write the record twice.
+//   · a Retry-After longer than 3 s is not waited for (the function limit is 10 s): the call fails at once.
+//   · a read that still fails, or any non-2xx read, THROWS AirtableUnavailableError instead of returning [].
+//   · the webhook then answers HTTP 500 so Meta redelivers the message later; the duplicate-message guard
+//     (Last Message Id, written only after a message is fully handled) makes the redelivery safe.
+// Writes that still fail return Airtable's error object as before; every caller already checks it.
+let AIRTABLE_RETRY_DELAYS_MS = [250, 750, 1500];
+const AIRTABLE_RETRY_MAX_WAIT_MS = 3000;
+function airtableRetryEnabled() {
+  return /^(1|true)$/i.test(String(process.env.WABISTAY_AIRTABLE_RETRY || '').trim());
+}
+class AirtableUnavailableError extends Error {
+  constructor(message) { super(message); this.name = 'AirtableUnavailableError'; this.airtableUnavailable = true; }
+}
+async function airtableFetch(table, kind, url, init, idempotent) {
+  if (!airtableRetryEnabled()) return fetch(url, init);
+  for (let attempt = 0; ; attempt++) {
+    let res = null;
+    let netErr = null;
+    try { res = await fetch(url, init); } catch (e) { netErr = e; }
+    const status = res ? res.status : 0;
+    const retryable = netErr ? idempotent : (status === 429 || (idempotent && status >= 500));
+    let wait = AIRTABLE_RETRY_DELAYS_MS[attempt];
+    if (res && status === 429 && res.headers && typeof res.headers.get === 'function') {
+      const ra = Number(res.headers.get('retry-after'));
+      if (Number.isFinite(ra) && ra > 0) wait = ra * 1000;
+    }
+    if (!retryable || wait === undefined || wait > AIRTABLE_RETRY_MAX_WAIT_MS) {
+      if (netErr) throw (kind === 'get' ? new AirtableUnavailableError(`airtable ${kind} ${table}: ${netErr.message}`) : netErr);
+      return res;
+    }
+    logToAxiom('warn', 'airtable_retry', { table, status, reason: `${kind} retry ${attempt + 1} after ${wait} ms` });
+    await new Promise(r => setTimeout(r, wait));
+  }
+}
+
 async function airtableGet(table, filterFormula, opts = {}) {
   _countAirtableCall('get');
   const { throwOnError = false } = opts;
@@ -242,12 +285,17 @@ async function airtableGet(table, filterFormula, opts = {}) {
   let page = 0;
   do {
     const url = offset ? `${base}&offset=${encodeURIComponent(offset)}` : base;
-    const res = await fetch(url, {
+    const res = await airtableFetch(table, 'get', url, {
       headers: { Authorization: `Bearer ${AIRTABLE_API_KEY}` }
-    });
+    }, true);
     // F6: log HTTP status so we can see 401/403/404 in logs
     console.log(`[Airtable GET STATUS] ${table} | HTTP ${res.status} | page ${++page}`);
     const data = await res.json();
+    if (airtableRetryEnabled() && (res.status >= 400 || (!data.error && !Array.isArray(data.records)))) {
+      const detail = JSON.stringify(data.error || null);
+      logToAxiom('error', 'airtable_get_error', { table, filterFormula, status: res.status, error: detail });
+      throw new AirtableUnavailableError(`airtableGet failed: ${table} HTTP ${res.status} ${detail}`);
+    }
     if (data.error) {
       console.error(`[Airtable ERROR] ${table}:`, JSON.stringify(data.error));
       logToAxiom('error', 'airtable_get_error', { table, filterFormula, status: res.status, error: JSON.stringify(data.error) });
@@ -265,14 +313,14 @@ async function airtableGet(table, filterFormula, opts = {}) {
 async function airtableCreate(table, fields) {
   _countAirtableCall('create');
   console.log(`[Airtable CREATE] ${table}`, JSON.stringify(fields));
-  const res = await fetch(`https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(table)}`, {
+  const res = await airtableFetch(table, 'create', `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(table)}`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${AIRTABLE_API_KEY}`,
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({ fields })
-  });
+  }, false);
   console.log(`[Airtable CREATE STATUS] ${table} | HTTP ${res.status}`);
   const data = await res.json();
   if (data.error) {
@@ -293,14 +341,14 @@ async function airtableCreate(table, fields) {
 async function airtableUpdate(table, recordId, fields) {
   _countAirtableCall('update');
   console.log(`[Airtable UPDATE] ${table} ${recordId}`, JSON.stringify(fields));
-  const res = await fetch(`https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(table)}/${recordId}`, {
+  const res = await airtableFetch(table, 'update', `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(table)}/${recordId}`, {
     method: 'PATCH',
     headers: {
       Authorization: `Bearer ${AIRTABLE_API_KEY}`,
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({ fields })
-  });
+  }, true);
   console.log(`[Airtable UPDATE STATUS] ${table} | HTTP ${res.status}`);
   const data = await res.json();
   if (data.error) {
@@ -388,6 +436,7 @@ async function advanceGuestState(ctx, fields, extra = {}) {
 // deployment this log line belongs to.
 const WABISTAY_KNOWN_FLAGS = [
   'WABISTAY_AFTER_HOURS',
+  'WABISTAY_AIRTABLE_RETRY',
   'WABISTAY_CLEANER_DISPATCH_TEMPLATE',
   'WABISTAY_CLEANER_GATE_TEMPLATE',
   'WABISTAY_CHECKOUT_BUTTON',
@@ -426,7 +475,7 @@ const WABISTAY_KNOWN_FLAGS = [
 
 // Switches the code only treats as on for 1/true; for these, 'on' means that,
 // not merely 'set'.
-const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_AFTER_HOURS', 'WABISTAY_CHECKOUT_BUTTON', 'WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_GATE_REQUIRES_BOOKING', 'WABISTAY_GATE_ROOM_CHECK', 'WABISTAY_GUEST_ADDRESS', 'WABISTAY_HIDE_ONE_HOUR', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_HOURLY_EXPIRY', 'WABISTAY_IGNORE_REACTIONS', 'WABISTAY_INTERACTIVE', 'WABISTAY_LEAN_COPY', 'WABISTAY_MESSAGE_DEDUPE', 'WABISTAY_NONTEXT_REPLY', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_ONE_OPEN_BOOKING', 'WABISTAY_PAID_BY_BOOKING_REF', 'WABISTAY_PAID_ROOM_CONFIRMED', 'WABISTAY_PAY_ASSIGNS_ROOM', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD', 'WABISTAY_STAY_MENU'];
+const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_AFTER_HOURS', 'WABISTAY_AIRTABLE_RETRY', 'WABISTAY_CHECKOUT_BUTTON', 'WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_GATE_REQUIRES_BOOKING', 'WABISTAY_GATE_ROOM_CHECK', 'WABISTAY_GUEST_ADDRESS', 'WABISTAY_HIDE_ONE_HOUR', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_HOURLY_EXPIRY', 'WABISTAY_IGNORE_REACTIONS', 'WABISTAY_INTERACTIVE', 'WABISTAY_LEAN_COPY', 'WABISTAY_MESSAGE_DEDUPE', 'WABISTAY_NONTEXT_REPLY', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_ONE_OPEN_BOOKING', 'WABISTAY_PAID_BY_BOOKING_REF', 'WABISTAY_PAID_ROOM_CONFIRMED', 'WABISTAY_PAY_ASSIGNS_ROOM', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD', 'WABISTAY_STAY_MENU'];
 
 function wabistayFlagState() {
   const names = new Set([...WABISTAY_KNOWN_FLAGS, ...Object.keys(process.env).filter(k => k.startsWith('WABISTAY_'))]);
@@ -9109,6 +9158,11 @@ module.exports = async function handler(req, res) {
     } catch (err) {
       console.error('[FATAL]', err.message, err.stack);
       logToAxiom('error', 'fatal', { message: err.message, stack: err.stack });
+      if (airtableRetryEnabled() && err && err.airtableUnavailable) {
+        // Airtable could not be read: answering 200 would make Meta drop the message, so ask for a redelivery.
+        res.status(500).send('Airtable unavailable');
+        return;
+      }
     }
 
     res.status(200).send('OK');
@@ -9170,6 +9224,8 @@ module.exports.aggregateWeeklyRecap = aggregateWeeklyRecap;
 module.exports.weeklyRecapTemplateParams = weeklyRecapTemplateParams;
 module.exports.WEEKLY_RECAP_TEMPLATE = WEEKLY_RECAP_TEMPLATE;
 module.exports.jsonField = jsonField;
+module.exports.setAirtableRetryDelays = arr => { AIRTABLE_RETRY_DELAYS_MS = arr; };
+module.exports.AirtableUnavailableError = AirtableUnavailableError;
 module.exports.updateGuestState = updateGuestState;
 module.exports.resolveSendRecipient = resolveSendRecipient;
 module.exports.runDailySummary = runDailySummary;
