@@ -387,6 +387,7 @@ async function advanceGuestState(ctx, fields, extra = {}) {
 // deployment id are Vercel system variables, not secrets, and say which
 // deployment this log line belongs to.
 const WABISTAY_KNOWN_FLAGS = [
+  'WABISTAY_ACTIVITY_THROTTLE',
   'WABISTAY_AFTER_HOURS',
   'WABISTAY_CLEANER_DISPATCH_TEMPLATE',
   'WABISTAY_CLEANER_GATE_TEMPLATE',
@@ -426,7 +427,7 @@ const WABISTAY_KNOWN_FLAGS = [
 
 // Switches the code only treats as on for 1/true; for these, 'on' means that,
 // not merely 'set'.
-const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_AFTER_HOURS', 'WABISTAY_CHECKOUT_BUTTON', 'WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_GATE_REQUIRES_BOOKING', 'WABISTAY_GATE_ROOM_CHECK', 'WABISTAY_GUEST_ADDRESS', 'WABISTAY_HIDE_ONE_HOUR', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_HOURLY_EXPIRY', 'WABISTAY_IGNORE_REACTIONS', 'WABISTAY_INTERACTIVE', 'WABISTAY_LEAN_COPY', 'WABISTAY_MESSAGE_DEDUPE', 'WABISTAY_NONTEXT_REPLY', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_ONE_OPEN_BOOKING', 'WABISTAY_PAID_BY_BOOKING_REF', 'WABISTAY_PAID_ROOM_CONFIRMED', 'WABISTAY_PAY_ASSIGNS_ROOM', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD', 'WABISTAY_STAY_MENU'];
+const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_ACTIVITY_THROTTLE', 'WABISTAY_AFTER_HOURS', 'WABISTAY_CHECKOUT_BUTTON', 'WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_GATE_REQUIRES_BOOKING', 'WABISTAY_GATE_ROOM_CHECK', 'WABISTAY_GUEST_ADDRESS', 'WABISTAY_HIDE_ONE_HOUR', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_HOURLY_EXPIRY', 'WABISTAY_IGNORE_REACTIONS', 'WABISTAY_INTERACTIVE', 'WABISTAY_LEAN_COPY', 'WABISTAY_MESSAGE_DEDUPE', 'WABISTAY_NONTEXT_REPLY', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_ONE_OPEN_BOOKING', 'WABISTAY_PAID_BY_BOOKING_REF', 'WABISTAY_PAID_ROOM_CONFIRMED', 'WABISTAY_PAY_ASSIGNS_ROOM', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD', 'WABISTAY_STAY_MENU'];
 
 function wabistayFlagState() {
   const names = new Set([...WABISTAY_KNOWN_FLAGS, ...Object.keys(process.env).filter(k => k.startsWith('WABISTAY_'))]);
@@ -1505,6 +1506,21 @@ async function bumpPropertyActivity(propertyId, field) {
   } catch (err) {
     logToAxiom('warn', 'property_activity_write_failed', { propertyId, field, error: err.message });
   }
+}
+
+// WABISTAY_ACTIVITY_THROTTLE: 'Last Message Received' is read only by the dormant-property report, whose
+// threshold is measured in DAYS (DORMANT_THRESHOLD_DAYS_DEFAULT), yet it was written on every inbound
+// message: a serial Airtable PATCH of 200-300 ms in front of every reply (about 1.2 s over a 5-message
+// booking). With the flag on, the write is skipped when the value already on the property row (read fresh
+// by resolveProperty on the same request) is less than ACTIVITY_THROTTLE_MS old. Off: every message writes,
+// exactly as before. An unreadable or missing stamp always writes.
+const ACTIVITY_THROTTLE_MS = 10 * 60 * 1000;
+function activityThrottleEnabled() {
+  return /^(1|true)$/i.test(String(process.env.WABISTAY_ACTIVITY_THROTTLE || '').trim());
+}
+function messageReceivedStampIsFresh(property, nowMs = Date.now()) {
+  const last = Date.parse(property && property.fields && property.fields['Last Message Received']);
+  return Number.isFinite(last) && nowMs >= last && nowMs - last < ACTIVITY_THROTTLE_MS;
 }
 
 // ─── DORMANT-PROPERTY FLAGGING ───────────────────────────────────────────────
@@ -8692,7 +8708,11 @@ async function handleMessageInner(from, messageText, phoneNumberId, wamid, inter
   }
   noteNotifyPhones(property);
   // Best-effort, non-blocking — see bumpPropertyActivity's own comment.
-  await bumpPropertyActivity(property.id, 'Last Message Received');
+  if (activityThrottleEnabled() && messageReceivedStampIsFresh(property)) {
+    // Stamp is under ACTIVITY_THROTTLE_MS old: nothing reads it at that resolution, skip the write.
+  } else {
+    await bumpPropertyActivity(property.id, 'Last Message Received');
+  }
 
   const guestRecords = await airtableGet('WS_Guests', `{Phone Number} = '${phone}'`);
   const guest = guestRecords[0] || null;
@@ -9232,6 +9252,7 @@ module.exports.rateUnitLabel = rateUnitLabel;
 module.exports.STAY_PRODUCTS = STAY_PRODUCTS;
 module.exports.sanitizeTemplateParam = sanitizeTemplateParam;
 module.exports.bumpPropertyActivity = bumpPropertyActivity;
+module.exports.messageReceivedStampIsFresh = messageReceivedStampIsFresh;
 module.exports.dormantProperties = dormantProperties;
 module.exports.inactiveByMessageActivity = inactiveByMessageActivity;
 // Shift-routing/escalation PR 1: per-property escalation timeout, global
