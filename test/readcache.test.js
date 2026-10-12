@@ -184,3 +184,33 @@ test('flag on: resolveProperty reads Airtable every time even with no write in b
   assert.strictEqual(n(ctx, 'get WS_Properties'), 2);
   assert.strictEqual(second.fields['Subscription Status'], 'Suspended', 'the change is visible immediately');
 });
+
+test('flag on: a dropped connection on a cached read is thrown exactly as an uncached read would (the cache does not retry or hide it)', async () => {
+  const ctx = setup('1');
+  const real = global.fetch;
+  let armed = true;
+  let attempts = 0;
+  global.fetch = async (url, opts) => { if (String(url).includes('/WS_Cleaners?')) { attempts++; if (armed) { armed = false; throw new Error('simulated outage'); } } return real(url, opts); };
+  await say('hi');
+  assert.strictEqual(ctx.axiom.filter(e => e.event === 'fatal').length, 1);
+  assert.strictEqual(attempts, 1, 'one attempt was made and not repeated behind the scenes');
+});
+
+test('flag on: the rate that sets Amount Due is read fresh even when the same rate was cached a moment ago', async () => {
+  const ctx = setup('1');
+  await say('hi');                                 // greeting reads rates (cached)
+  const ratesBefore = n(ctx, 'get WS_Rates');
+  ctx.airtable.tables.WS_Guests[0] && (ctx.airtable.tables.WS_Guests[0].fields['Session State'] = 'AWAITING_DETAILS');
+  await say('Jane Doe\n1 September 2099\n2 September 2099');   // overnight booking prices from Per Night
+  assert.ok(n(ctx, 'get WS_Rates') > ratesBefore, 'the booking-time rate lookup went to Airtable');
+});
+
+test('flag on: a dropped connection on a cached RATES read is thrown too, not retried behind the scenes', async () => {
+  const ctx = setup('1');
+  const real = global.fetch;
+  let attempts = 0;
+  global.fetch = async (url, opts) => { if (String(url).includes('/WS_Rates?')) { attempts++; throw new Error('simulated outage'); } return real(url, opts); };
+  await say('hi');
+  assert.strictEqual(ctx.axiom.filter(e => e.event === 'fatal').length, 1);
+  assert.strictEqual(attempts, 1);
+});

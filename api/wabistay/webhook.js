@@ -253,6 +253,9 @@ function invalidateReadCache(table) {
   if (memo) for (const k of memo.keys()) if (k.startsWith(prefix)) memo.delete(k);
 }
 function resetReadCache() { _ttlCache.clear(); }
+// The error airtableGet({ throwOnError: true }) raises for an Airtable-reported failure: the uncached read then runs once more
+// with the old swallow-and-log behaviour. Anything else (a network exception) is not ours to hide.
+function isAirtableReadError(e) { return !!(e && /^airtableGet failed:/.test(String(e.message))); }
 async function cachedGet(table, filterFormula, scope) {
   if (!readCacheEnabled()) return airtableGet(table, filterFormula);
   const key = table + '|' + filterFormula;
@@ -265,7 +268,7 @@ async function cachedGet(table, filterFormula, scope) {
     if (memo) {
       const p = airtableGet(table, filterFormula, { throwOnError: true });
       memo.set(key, p);
-      try { return structuredClone(await p); } catch (_) { memo.delete(key); return airtableGet(table, filterFormula); }
+      try { return structuredClone(await p); } catch (e) { memo.delete(key); if (!isAirtableReadError(e)) throw e; return airtableGet(table, filterFormula); }
     }
     return airtableGet(table, filterFormula);
   }
@@ -273,7 +276,8 @@ async function cachedGet(table, filterFormula, scope) {
     const records = await airtableGet(table, filterFormula, { throwOnError: true });
     _ttlCache.set(key, { at: Date.now(), records: structuredClone(records) });
     return records;
-  } catch (_) {
+  } catch (e) {
+    if (!isAirtableReadError(e)) throw e; // a dropped connection etc. is thrown exactly as an uncached read would
     return airtableGet(table, filterFormula);
   }
 }
@@ -3475,7 +3479,7 @@ const actions = {
     let rates = null;
     let nightlyRate = null;
     if (isOvernight) {
-      const allActiveRates = await cachedGet('WS_Rates', `AND({Active} = TRUE(), {Rate Type} = 'Per Night')`, 'ttl');
+      const allActiveRates = await airtableGet('WS_Rates', `AND({Active} = TRUE(), {Rate Type} = 'Per Night')`);
       const nightlyRates = allActiveRates.filter(r => (r.fields['Property'] || []).includes(property.id));
       nightlyRate = nightlyRates.length === 1 ? nightlyRates[0] : null;
       if (!nightlyRate) {
@@ -4598,7 +4602,7 @@ const actions = {
     // closed on zero OR more than one match — never guess, never fall back to
     // array position. This mirrors F19's own fail-closed posture, just against
     // a different ambiguity (no {Occupancy Type} to disambiguate any more).
-    const allActiveRates = await cachedGet('WS_Rates', `AND({Active} = TRUE(), {Rate Type} = 'Per Night')`, 'ttl');
+    const allActiveRates = await airtableGet('WS_Rates', `AND({Active} = TRUE(), {Rate Type} = 'Per Night')`);
     const nightlyRates = allActiveRates.filter(r => (r.fields['Property'] || []).includes(ctx.property.id));
     const rate = nightlyRates.length === 1 ? nightlyRates[0] : null;
     // Whether a price actually got written and can be quoted. Starts false; a
@@ -8288,8 +8292,10 @@ function stayMenuKeysForHour(hour) {
 }
 // The single active rate row of one Rate Type for a property, or null. Same rule the
 // nightly lookup has always used: exactly one, else not priced (fail closed).
-async function singleActiveRate(property, rateType) {
-  const rows = await cachedGet('WS_Rates', "AND({Active} = TRUE(), {Rate Type} = '" + rateType + "')", 'ttl');
+async function singleActiveRate(property, rateType, { fresh = false } = {}) {
+  // fresh: the booking-time lookup that sets Amount Due is never served from the WABISTAY_READ_CACHE; the menu may be.
+  const q = "AND({Active} = TRUE(), {Rate Type} = '" + rateType + "')";
+  const rows = fresh ? await airtableGet('WS_Rates', q) : await cachedGet('WS_Rates', q, 'ttl');
   const mine = rows.filter(r => (r.fields['Property'] || []).includes(property.id));
   return mine.length === 1 ? mine[0] : null;
 }
@@ -8528,7 +8534,7 @@ async function collectStayMenuDetails(ctx, pending) {
     const hourly = hourlyRatesFor(ctx.property, [product.hours]);
     amount = hourly ? hourly[product.hours] : null;
   } else {
-    rateRow = await singleActiveRate(ctx.property, product.type === 'Day' ? 'Per Day' : 'Per Night');
+    rateRow = await singleActiveRate(ctx.property, product.type === 'Day' ? 'Per Day' : 'Per Night', { fresh: true });
     amount = rateRow ? Number(rateRow.fields['Amount']) : null;
   }
   if (!(amount > 0)) {
