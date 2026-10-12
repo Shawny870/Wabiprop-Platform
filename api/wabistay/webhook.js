@@ -569,6 +569,7 @@ const WABISTAY_KNOWN_FLAGS = [
   'WABISTAY_PAID_BY_BOOKING_REF',
   'WABISTAY_PAID_ROOM_CONFIRMED',
   'WABISTAY_PARALLEL_PREAMBLE',
+  'WABISTAY_PARALLEL_SENDS',
   'WABISTAY_PAY_ASSIGNS_ROOM',
   'WABISTAY_READ_CACHE',
   'WABISTAY_OWNER_SUMMARY_TEMPLATE',
@@ -577,12 +578,13 @@ const WABISTAY_KNOWN_FLAGS = [
   'WABISTAY_STATE_WRITE_GUARD',
   'WABISTAY_STAY_MENU',
   'WABISTAY_TIMING_LOG',
+  'WABISTAY_WA_PREWARM',
   'WABISTAY_WEEKLY_RECAP_TEMPLATE'
 ];
 
 // Switches the code only treats as on for 1/true; for these, 'on' means that,
 // not merely 'set'.
-const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_ACTIVITY_THROTTLE', 'WABISTAY_AFTER_HOURS', 'WABISTAY_AIRTABLE_RETRY', 'WABISTAY_CHECKOUT_BUTTON', 'WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_GATE_REQUIRES_BOOKING', 'WABISTAY_GATE_ROOM_CHECK', 'WABISTAY_GUEST_ADDRESS', 'WABISTAY_HIDE_ONE_HOUR', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_HOURLY_EXPIRY', 'WABISTAY_IGNORE_REACTIONS', 'WABISTAY_INTERACTIVE', 'WABISTAY_LEAN_COPY', 'WABISTAY_MESSAGE_DEDUPE', 'WABISTAY_NONTEXT_REPLY', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_ONE_OPEN_BOOKING', 'WABISTAY_PAID_BY_BOOKING_REF', 'WABISTAY_PAID_ROOM_CONFIRMED', 'WABISTAY_PARALLEL_PREAMBLE', 'WABISTAY_PAY_ASSIGNS_ROOM', 'WABISTAY_READ_CACHE', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD', 'WABISTAY_STAY_MENU', 'WABISTAY_TIMING_LOG'];
+const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_ACTIVITY_THROTTLE', 'WABISTAY_AFTER_HOURS', 'WABISTAY_AIRTABLE_RETRY', 'WABISTAY_CHECKOUT_BUTTON', 'WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_GATE_REQUIRES_BOOKING', 'WABISTAY_GATE_ROOM_CHECK', 'WABISTAY_GUEST_ADDRESS', 'WABISTAY_HIDE_ONE_HOUR', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_HOURLY_EXPIRY', 'WABISTAY_IGNORE_REACTIONS', 'WABISTAY_INTERACTIVE', 'WABISTAY_LEAN_COPY', 'WABISTAY_MESSAGE_DEDUPE', 'WABISTAY_NONTEXT_REPLY', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_ONE_OPEN_BOOKING', 'WABISTAY_PAID_BY_BOOKING_REF', 'WABISTAY_PAID_ROOM_CONFIRMED', 'WABISTAY_PARALLEL_PREAMBLE', 'WABISTAY_PARALLEL_SENDS', 'WABISTAY_PAY_ASSIGNS_ROOM', 'WABISTAY_READ_CACHE', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD', 'WABISTAY_STAY_MENU', 'WABISTAY_TIMING_LOG', 'WABISTAY_WA_PREWARM'];
 
 function wabistayFlagState() {
   const names = new Set([...WABISTAY_KNOWN_FLAGS, ...Object.keys(process.env).filter(k => k.startsWith('WABISTAY_'))]);
@@ -4757,6 +4759,7 @@ const actions = {
     // the guest had any price, which meant reception got an alert for an
     // enquiry the guest might abandon before ever seeing a number.
     const newBookingTo = operationalAlertPhone(ctx.property);
+    await alongsideOwnerAlert(async () => {
     if (newBookingTo) {
       logOwnerSendWindow('new_booking', newBookingTo, ctx.phone); // B17 instrumentation
       // Rule 30 step 2, slice 2: checked but non-fatal — courtesy notification,
@@ -4775,6 +4778,7 @@ const actions = {
         });
       }
     }
+    }, async () => {
 
     if (!priced) {
       // Session State was already advanced to AWAITING_PAYMENT_METHOD above
@@ -4791,6 +4795,7 @@ const actions = {
       rateLine: `*Rate:* R${rate.fields['Amount']} per night`
     }));
     await sendPaymentMethodMenu(ctx);
+    });
   },
 
   // NEW / AWAITING_DETAILS + "HOURLY": enter the short-stay flow (closes F10 —
@@ -5147,6 +5152,7 @@ const actions = {
       checkOutText: formatSastDateTime(checkOutIso)
     };
     const hourlyBookingTo = operationalAlertPhone(ctx.property);
+    await alongsideOwnerAlert(async () => {
     if (hourlyBookingTo) {
       logOwnerSendWindow('hourly_new_booking', hourlyBookingTo, ctx.phone); // B17 instrumentation
       // Rule 30 step 2, slice 2: checked but non-fatal, same shape as
@@ -5164,8 +5170,10 @@ const actions = {
         });
       }
     }
+    }, async () => {
     await sendWhatsApp(ctx.phone, msg('hourlyBookingReceived', view));
     await sendPaymentMethodMenu(ctx);
+    });
   },
 
   // AWAITING_PAYMENT_METHOD (payment build, CEO 2026-09-29): guest chooses
@@ -8698,6 +8706,7 @@ async function collectStayMenuDetails(ctx, pending) {
     checkOutText: formatSastDateTime(coIso)
   };
   const alertTo = operationalAlertPhone(ctx.property);
+  await alongsideOwnerAlert(async () => {
   if (alertTo) {
     logOwnerSendWindow('stay_menu_new_booking', alertTo, ctx.phone);
     const ownerSend = await sendNewBookingAlert(alertTo, newBookingTemplateParams({
@@ -8711,9 +8720,49 @@ async function collectStayMenuDetails(ctx, pending) {
       logToAxiom('error', 'owner_stay_menu_booking_notify_failed', { bookingId: pending.id, error: JSON.stringify(ownerSend.error) });
     }
   }
+  }, async () => {
   await sendWhatsApp(ctx.phone, msg('stayMenuBookingReceived', view));
   await sendPaymentMethodMenu(ctx);
+  });
   return true;
+}
+
+// ─── PARALLEL SENDS (WABISTAY_PARALLEL_SENDS) ──────────────────────────────────
+// When a booking is made the owner/reception alert and the guest's confirmation used to go out one after the other,
+// so the guest waited for the alert's round trip to Meta (0.4-0.9 s measured) before their own message started.
+// With the flag on both start together. Both are awaited before the handler returns (so before the 200): neither
+// can be lost to the function being frozen, and an error from either still reaches the same catch as before
+// (the owner alert never lost its own failure logging). The guest's confirmation and the payment menu that follows
+// it keep their order; only the owner alert moves alongside them. Off: alert first, then the guest, exactly as before.
+function parallelSendsEnabled() {
+  return /^(1|true)$/i.test(String(process.env.WABISTAY_PARALLEL_SENDS || '').trim());
+}
+async function alongsideOwnerAlert(ownerAlert, guestFlow) {
+  if (!parallelSendsEnabled()) {
+    await ownerAlert();
+    return guestFlow();
+  }
+  const alertDone = ownerAlert().then(() => null, err => err); // never rejects before the guest flow has finished
+  let result;
+  let guestErr = null;
+  try { result = await guestFlow(); } catch (e) { guestErr = e; }
+  const alertErr = await alertDone;
+  if (guestErr) throw guestErr;
+  if (alertErr) throw alertErr;
+  return result;
+}
+
+// ─── WHATSAPP CONNECTION PRE-WARM (WABISTAY_WA_PREWARM) ────────────────────────
+// Node's fetch keeps connections to a host alive only for a few seconds, so the first send of most messages pays for
+// a fresh TLS handshake to graph.facebook.com (measured 880-950 ms for the first send against 400-590 ms for the
+// next ones). With the flag on, a cheap HEAD request opens that connection at the start of the message, while the
+// Airtable lookups run, so the first real send finds it ready. Sends use the same origin, so they reuse it.
+// Failures and slowness are ignored (1.5 s cap); the request waits for it with the rest of the background work.
+function waPrewarmEnabled() {
+  return /^(1|true)$/i.test(String(process.env.WABISTAY_WA_PREWARM || '').trim());
+}
+function prewarmWhatsApp() {
+  return fetch('https://graph.facebook.com/', { method: 'HEAD', signal: AbortSignal.timeout(1500) }).then(() => null, () => null);
 }
 
 // ─── PARALLEL PREAMBLE (WABISTAY_PARALLEL_PREAMBLE) ─────────────────────────────
@@ -8784,6 +8833,7 @@ async function handleMessageTracked(from, messageText, phoneNumberId, wamid, int
   // One request-scoped memo per inbound message (used only when WABISTAY_READ_CACHE is on).
   return _requestMemo.run(new Map(), async () => {
     const dedupe = { guestId: null, skipped: false, pending: [] };
+    if (waPrewarmEnabled()) dedupe.pending.push(prewarmWhatsApp());
     try {
       await handleMessageInner(from, messageText, phoneNumberId, wamid, interactive, dedupe);
     } finally {

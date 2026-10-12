@@ -153,6 +153,7 @@ function installFetch(ctx) {
     }
 
     if (u.hostname === 'graph.facebook.com') {
+      if (method === 'HEAD') { ctx.prewarms = (ctx.prewarms || 0) + 1; return jsonRes({}); } // WABISTAY_WA_PREWARM connection warm-up
       const body = JSON.parse(opts.body);
       if (body.type === 'template') {
         // Template sends carry no free-form text. `body` is left as the rendered
