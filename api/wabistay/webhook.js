@@ -470,6 +470,7 @@ const WABISTAY_KNOWN_FLAGS = [
   'WABISTAY_OVERDUE_ALERT_TEMPLATE',
   'WABISTAY_PAID_BY_BOOKING_REF',
   'WABISTAY_PAID_ROOM_CONFIRMED',
+  'WABISTAY_PARALLEL_PREAMBLE',
   'WABISTAY_PAY_ASSIGNS_ROOM',
   'WABISTAY_READ_CACHE',
   'WABISTAY_OWNER_SUMMARY_TEMPLATE',
@@ -482,7 +483,7 @@ const WABISTAY_KNOWN_FLAGS = [
 
 // Switches the code only treats as on for 1/true; for these, 'on' means that,
 // not merely 'set'.
-const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_ACTIVITY_THROTTLE', 'WABISTAY_AFTER_HOURS', 'WABISTAY_CHECKOUT_BUTTON', 'WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_GATE_REQUIRES_BOOKING', 'WABISTAY_GATE_ROOM_CHECK', 'WABISTAY_GUEST_ADDRESS', 'WABISTAY_HIDE_ONE_HOUR', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_HOURLY_EXPIRY', 'WABISTAY_IGNORE_REACTIONS', 'WABISTAY_INTERACTIVE', 'WABISTAY_LEAN_COPY', 'WABISTAY_MESSAGE_DEDUPE', 'WABISTAY_NONTEXT_REPLY', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_ONE_OPEN_BOOKING', 'WABISTAY_PAID_BY_BOOKING_REF', 'WABISTAY_PAID_ROOM_CONFIRMED', 'WABISTAY_PAY_ASSIGNS_ROOM', 'WABISTAY_READ_CACHE', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD', 'WABISTAY_STAY_MENU'];
+const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_ACTIVITY_THROTTLE', 'WABISTAY_AFTER_HOURS', 'WABISTAY_CHECKOUT_BUTTON', 'WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_GATE_REQUIRES_BOOKING', 'WABISTAY_GATE_ROOM_CHECK', 'WABISTAY_GUEST_ADDRESS', 'WABISTAY_HIDE_ONE_HOUR', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_HOURLY_EXPIRY', 'WABISTAY_IGNORE_REACTIONS', 'WABISTAY_INTERACTIVE', 'WABISTAY_LEAN_COPY', 'WABISTAY_MESSAGE_DEDUPE', 'WABISTAY_NONTEXT_REPLY', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_ONE_OPEN_BOOKING', 'WABISTAY_PAID_BY_BOOKING_REF', 'WABISTAY_PAID_ROOM_CONFIRMED', 'WABISTAY_PARALLEL_PREAMBLE', 'WABISTAY_PAY_ASSIGNS_ROOM', 'WABISTAY_READ_CACHE', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD', 'WABISTAY_STAY_MENU'];
 
 function wabistayFlagState() {
   const names = new Set([...WABISTAY_KNOWN_FLAGS, ...Object.keys(process.env).filter(k => k.startsWith('WABISTAY_'))]);
@@ -3089,7 +3090,7 @@ const guards = {
     const parsed = parseStartCleaningCommand(ctx.messageText);
     if (!parsed) return false;
 
-    const cleaners = await cachedGet('WS_Cleaners', `{Phone Number} = '${ctx.phone}'`, 'request');
+    const cleaners = await cleanersForPhone(ctx);
     if (cleaners.length === 0) {
       logToAxiom('warn', 'cleaning_start_unauthorised_sender', { phone: ctx.phone });
       return false;
@@ -3109,7 +3110,7 @@ const guards = {
   // cleanerNothingToClean rather than a guest greeting. When a room IS in
   // Cleaning the sender is always claimed, exactly as before.
   async senderIsCleaner(ctx) {
-    const cleanerRecords = await cachedGet('WS_Cleaners', `{Phone Number} = '${ctx.phone}'`, 'request');
+    const cleanerRecords = await cleanersForPhone(ctx);
     ctx.cleaner = cleanerRecords[0] || null;
     if (cleanerRecords.length === 0) return false;
 
@@ -3137,7 +3138,7 @@ const guards = {
     // global must not preempt it. Targeted addition only; the rest of the guard
     // (which behaves correctly for genuine cleaner room-naming) is unchanged.
     if (guestStateExpectsInput(ctx.guest, ctx.text)) return false;
-    const cleanerRecords = await cachedGet('WS_Cleaners', `{Phone Number} = '${ctx.phone}'`, 'request');
+    const cleanerRecords = await cleanersForPhone(ctx);
     if (cleanerRecords.length === 0) return false;
     const cleaningRooms = await airtableGet('WS_Rooms', `{Status} = 'Cleaning'`);
     const match = cleaningRooms.find(r => roomMatchesText(r, ctx.text));
@@ -8607,6 +8608,25 @@ async function collectStayMenuDetails(ctx, pending) {
   return true;
 }
 
+// ─── PARALLEL PREAMBLE (WABISTAY_PARALLEL_PREAMBLE) ─────────────────────────────
+// Every inbound message used to run four Airtable calls one after another before any real work: the property
+// lookup, the property's 'Last Message Received' stamp, the guest lookup and the cleaner lookup (the global
+// guards ask about cleaners for every text). Measured 464-749 ms per message. With the flag on the property,
+// guest and cleaner lookups start together (they depend only on the phone and the phone-number id), and the
+// stamp write starts as soon as the property is known and finishes in the background of the handler: the
+// request still waits for it before answering Meta (handleMessage awaits dedupe.pending), so nothing is left
+// running after the 200. Reads only, plus the one stamp write: no guest-state write is moved, so
+// WABISTAY_STATE_WRITE_GUARD (which acts on the result of the state write that precedes each reply) is
+// untouched. Off: the old sequence, call for call.
+function parallelPreambleEnabled() {
+  return /^(1|true)$/i.test(String(process.env.WABISTAY_PARALLEL_PREAMBLE || '').trim());
+}
+// The cleaner lookup for ctx.phone. With the flag on it is the one started at the top of the message and shared
+// by every guard that asks; off, each guard queries for itself exactly as before.
+function cleanersForPhone(ctx) {
+  return ctx.cleanersLookup || cachedGet('WS_Cleaners', `{Phone Number} = '${ctx.phone}'`, 'request');
+}
+
 // ─── MESSAGE DEDUPE (WABISTAY_MESSAGE_DEDUPE) ────────────────────────────────
 // Meta can deliver the same inbound message twice ("these retries can result in
 // duplicate webhook notifications"). With the flag on, a message is skipped only when
@@ -8640,8 +8660,13 @@ async function recordHandledMessageId(phone, wamid, guestId) {
 async function handleMessage(from, messageText, phoneNumberId, wamid, interactive = null) {
   // One request-scoped memo per inbound message (used only when WABISTAY_READ_CACHE is on).
   return _requestMemo.run(new Map(), async () => {
-    const dedupe = { guestId: null, skipped: false };
-    await handleMessageInner(from, messageText, phoneNumberId, wamid, interactive, dedupe);
+    const dedupe = { guestId: null, skipped: false, pending: [] };
+    try {
+      await handleMessageInner(from, messageText, phoneNumberId, wamid, interactive, dedupe);
+    } finally {
+      // Work started in the background by the parallel preamble must finish before we answer Meta.
+      if (dedupe.pending.length) await Promise.allSettled(dedupe.pending);
+    }
     if (messageDedupeEnabled() && wamid && dedupe.guestId && !dedupe.skipped) {
       await recordHandledMessageId(formatPhone(from), wamid, dedupe.guestId);
     }
@@ -8761,7 +8786,26 @@ async function handleMessageInner(from, messageText, phoneNumberId, wamid, inter
 
   // 6.4: resolve property before anything else — no action may run for an
   // unconfigured number, and no property's data may leak to another's guest.
-  const property = await resolveProperty(phoneNumberId);
+  let property;
+  let prefetchedGuests = null;
+  let cleanersLookup = null;
+  if (parallelPreambleEnabled()) {
+    const propertyLookup = resolveProperty(phoneNumberId).then(p => {
+      // As soon as the property is known its stamp write starts, alongside the guest read.
+      if (p && !(activityThrottleEnabled() && messageReceivedStampIsFresh(p))) (dedupe.pending = dedupe.pending || []).push(bumpPropertyActivity(p.id, 'Last Message Received'));
+      return p;
+    });
+    const guestLookup = airtableGet('WS_Guests', `{Phone Number} = '${phone}'`);
+    cleanersLookup = airtableGet('WS_Cleaners', `{Phone Number} = '${phone}'`);
+    cleanersLookup.catch(() => {}); // a lookup no guard ends up awaiting must not become an unhandled rejection
+    const [pr, gr] = await Promise.allSettled([propertyLookup, guestLookup]);
+    if (pr.status === 'rejected') throw pr.reason;
+    if (gr.status === 'rejected') throw gr.reason;
+    property = pr.value;
+    prefetchedGuests = gr.value;
+  } else {
+    property = await resolveProperty(phoneNumberId);
+  }
   if (!property) {
     console.error(`[Dispatch] no WS_Properties match for phone_number_id: ${phoneNumberId} — refusing dispatch`);
     logToAxiom('info', 'message_received', { phone, text: messageText.slice(0, 100), sessionState: null });
@@ -8770,13 +8814,11 @@ async function handleMessageInner(from, messageText, phoneNumberId, wamid, inter
   }
   noteNotifyPhones(property);
   // Best-effort, non-blocking — see bumpPropertyActivity's own comment.
-  if (activityThrottleEnabled() && messageReceivedStampIsFresh(property)) {
-    // Stamp is under ACTIVITY_THROTTLE_MS old: nothing reads it at that resolution, skip the write.
-  } else {
+  if (!prefetchedGuests && !(activityThrottleEnabled() && messageReceivedStampIsFresh(property))) {
     await bumpPropertyActivity(property.id, 'Last Message Received');
   }
 
-  const guestRecords = await airtableGet('WS_Guests', `{Phone Number} = '${phone}'`);
+  const guestRecords = prefetchedGuests || await airtableGet('WS_Guests', `{Phone Number} = '${phone}'`);
   const guest = guestRecords[0] || null;
   const sessionState = guest ? guest.fields['Session State'] : null;
   console.log(`[State] guest: ${guest ? guest.id : 'none'} | state: ${sessionState}`);
@@ -9025,7 +9067,8 @@ async function handleMessageInner(from, messageText, phoneNumberId, wamid, inter
   const ctx = {
     phone, text, messageText, wamid, guest, next: null, cleaner: null, property,
     stepOnArrival: sessionState || null,
-    attemptStartedAt: (guest && guest.fields['Attempt Started At']) || null
+    attemptStartedAt: (guest && guest.fields['Attempt Started At']) || null,
+    cleanersLookup
   };
 
   // Global transitions (cleaner DONE) — guard decides, any state
