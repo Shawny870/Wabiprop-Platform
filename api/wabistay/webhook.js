@@ -12,6 +12,7 @@
 // FIX LOG: see FIXLOG.md (F1–F14 from the WS1 build, referenced inline below).
 
 const STATES = require('../../states.json');
+const { AsyncLocalStorage } = require('node:async_hooks');
 
 const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID;
 const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY;
@@ -269,7 +270,107 @@ async function airtableFetch(table, kind, url, init, idempotent) {
   }
 }
 
+// ─── READ CACHE (WABISTAY_READ_CACHE) ───────────────────────────────────────────
+// Off (unset): cachedGet is a plain airtableGet, nothing is stored. On, two scopes, both opt-in per call site:
+//   · 'request' - the result is kept for the rest of ONE inbound message (AsyncLocalStorage, so concurrent
+//     messages on a warm instance never share it). Used only for room lists that have nothing to do with
+//     availability timing: findAvailableRoom's WS_Rooms read, and the greeting's two 'Available' reads (one
+//     fetch, the unassigned-room diagnostic is filtered from it). WS_Bookings is NEVER cached: the second
+//     findAvailableRoom call (the P1a 'stillFree' re-check) exists to see a booking written in the last
+//     second, so it stays a fresh read.
+//   · 'ttl' - kept READ_CACHE_TTL_MS on this warm instance. Used for WS_Rates only: config that changes by hand,
+//     rarely. An edit made in Airtable shows up within the TTL. WS_Properties is deliberately NOT cached: it holds
+//     'Subscription Status' (the suspended-property block), the EFT bank details and the redirect/notify phones.
+// Any write to a table made by this instance drops that table's entries. A failed read is never cached (it is
+// re-run uncached so the old swallow-and-log behaviour is unchanged). Callers get a copy, never the stored one.
+const READ_CACHE_TTL_MS = 30 * 1000;
+const _requestMemo = new AsyncLocalStorage();
+const _ttlCache = new Map(); // key -> { at, records }
+function readCacheEnabled() {
+  return /^(1|true)$/i.test(String(process.env.WABISTAY_READ_CACHE || '').trim());
+}
+function invalidateReadCache(table) {
+  const prefix = table + '|';
+  for (const k of _ttlCache.keys()) if (k.startsWith(prefix)) _ttlCache.delete(k);
+  const memo = _requestMemo.getStore();
+  if (memo) for (const k of memo.keys()) if (k.startsWith(prefix)) memo.delete(k);
+}
+function resetReadCache() { _ttlCache.clear(); }
+// The error airtableGet({ throwOnError: true }) raises for an Airtable-reported failure: the uncached read then runs once more
+// with the old swallow-and-log behaviour. Anything else (a network exception) is not ours to hide.
+function isAirtableReadError(e) { return !!(e && !e.airtableUnavailable && /^airtableGet failed:/.test(String(e.message))); } // an AirtableUnavailableError (WABISTAY_AIRTABLE_RETRY) has already been retried: rethrow it, do not retry again
+async function cachedGet(table, filterFormula, scope) {
+  if (!readCacheEnabled()) return airtableGet(table, filterFormula);
+  const key = table + '|' + filterFormula;
+  if (scope === 'ttl') {
+    const hit = _ttlCache.get(key);
+    if (hit && Date.now() - hit.at < READ_CACHE_TTL_MS) return structuredClone(hit.records);
+  } else {
+    const memo = _requestMemo.getStore();
+    if (memo && memo.has(key)) return structuredClone(await memo.get(key));
+    if (memo) {
+      const p = airtableGet(table, filterFormula, { throwOnError: true });
+      memo.set(key, p);
+      try { return structuredClone(await p); } catch (e) { memo.delete(key); if (!isAirtableReadError(e)) throw e; return airtableGet(table, filterFormula); }
+    }
+    return airtableGet(table, filterFormula);
+  }
+  try {
+    const records = await airtableGet(table, filterFormula, { throwOnError: true });
+    _ttlCache.set(key, { at: Date.now(), records: structuredClone(records) });
+    return records;
+  } catch (e) {
+    if (!isAirtableReadError(e)) throw e; // a dropped connection etc. is thrown exactly as an uncached read would
+    return airtableGet(table, filterFormula);
+  }
+}
+
+// ─── REQUEST TIMING (WABISTAY_TIMING_LOG) ──────────────────────────────────────
+// Off (unset): timed() runs the call and nothing else. On: every inbound message records how long each Airtable
+// call and each WhatsApp send took, and handleMessage logs ONE Axiom event, request_timing, carrying a single JSON
+// string field (timing_json) plus the long-standing flat fields phone_number_id and wamid. One string, not an
+// object: Axiom makes a dotted field per object key and the dataset is capped at 256 fields. Labels are table
+// names and call kinds only; no phone number, message text or filter formula is recorded.
+const _timingStore = new AsyncLocalStorage();
+let _timingFirstRequestInProcess = true;
+function timingLogEnabled() {
+  return /^(1|true)$/i.test(String(process.env.WABISTAY_TIMING_LOG || '').trim());
+}
+async function timed(kind, label, fn) {
+  const store = _timingStore.getStore();
+  if (!store) return fn();
+  const start = Date.now();
+  try {
+    return await fn();
+  } finally {
+    const end = Date.now();
+    store.calls.push([kind, label, end - start, start - store.t0]);
+  }
+}
+function summariseTiming(store, endMs) {
+  const sum = kinds => store.calls.filter(c => kinds.includes(c[0])).reduce((n, c) => n + c[2], 0);
+  const count = kinds => store.calls.filter(c => kinds.includes(c[0])).length;
+  return {
+    total_ms: endMs - store.t0,
+    airtable_ms: sum(['at_get', 'at_create', 'at_update']),
+    airtable_calls: count(['at_get', 'at_create', 'at_update']),
+    whatsapp_ms: sum(['wa_text', 'wa_template', 'wa_interactive']),
+    whatsapp_sends: count(['wa_text', 'wa_template', 'wa_interactive']),
+    cold: store.cold,
+    region: process.env.VERCEL_REGION || null,
+    calls: store.calls // [kind, table-or-label, duration_ms, started_at_ms_after_handler_start]
+  };
+}
 async function airtableGet(table, filterFormula, opts = {}) {
+  return timed('at_get', table, () => airtableGetRaw(table, filterFormula, opts));
+}
+async function airtableCreate(table, fields) {
+  return timed('at_create', table, () => airtableCreateRaw(table, fields));
+}
+async function airtableUpdate(table, recordId, fields) {
+  return timed('at_update', table, () => airtableUpdateRaw(table, recordId, fields));
+}
+async function airtableGetRaw(table, filterFormula, opts = {}) {
   _countAirtableCall('get');
   const { throwOnError = false } = opts;
   // B10.5 BUG 1: Airtable's list API returns at most 100 records per response and
@@ -310,7 +411,7 @@ async function airtableGet(table, filterFormula, opts = {}) {
   return records;
 }
 
-async function airtableCreate(table, fields) {
+async function airtableCreateRaw(table, fields) {
   _countAirtableCall('create');
   console.log(`[Airtable CREATE] ${table}`, JSON.stringify(fields));
   const res = await airtableFetch(table, 'create', `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(table)}`, {
@@ -323,6 +424,7 @@ async function airtableCreate(table, fields) {
   }, false);
   console.log(`[Airtable CREATE STATUS] ${table} | HTTP ${res.status}`);
   const data = await res.json();
+  invalidateReadCache(table);
   if (data.error) {
     console.error(`[Airtable CREATE ERROR] ${table}:`, JSON.stringify(data.error));
     logToAxiom('error', 'airtable_create_error', { table, status: res.status, error: JSON.stringify(data.error) });
@@ -338,7 +440,7 @@ async function airtableCreate(table, fields) {
   return data;
 }
 
-async function airtableUpdate(table, recordId, fields) {
+async function airtableUpdateRaw(table, recordId, fields) {
   _countAirtableCall('update');
   console.log(`[Airtable UPDATE] ${table} ${recordId}`, JSON.stringify(fields));
   const res = await airtableFetch(table, 'update', `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(table)}/${recordId}`, {
@@ -351,6 +453,7 @@ async function airtableUpdate(table, recordId, fields) {
   }, true);
   console.log(`[Airtable UPDATE STATUS] ${table} | HTTP ${res.status}`);
   const data = await res.json();
+  invalidateReadCache(table);
   if (data.error) {
     console.error(`[Airtable UPDATE ERROR] ${table}:`, JSON.stringify(data.error));
     logToAxiom('error', 'airtable_update_error', { table, recordId, status: res.status, error: JSON.stringify(data.error) });
@@ -435,6 +538,7 @@ async function advanceGuestState(ctx, fields, extra = {}) {
 // deployment id are Vercel system variables, not secrets, and say which
 // deployment this log line belongs to.
 const WABISTAY_KNOWN_FLAGS = [
+  'WABISTAY_ACTIVITY_THROTTLE',
   'WABISTAY_AFTER_HOURS',
   'WABISTAY_AIRTABLE_RETRY',
   'WABISTAY_CLEANER_DISPATCH_TEMPLATE',
@@ -464,18 +568,21 @@ const WABISTAY_KNOWN_FLAGS = [
   'WABISTAY_OVERDUE_ALERT_TEMPLATE',
   'WABISTAY_PAID_BY_BOOKING_REF',
   'WABISTAY_PAID_ROOM_CONFIRMED',
+  'WABISTAY_PARALLEL_PREAMBLE',
   'WABISTAY_PAY_ASSIGNS_ROOM',
+  'WABISTAY_READ_CACHE',
   'WABISTAY_OWNER_SUMMARY_TEMPLATE',
   'WABISTAY_RECEPTION_PAYMENT_TEMPLATE',
   'WABISTAY_ROOM_ORDER',
   'WABISTAY_STATE_WRITE_GUARD',
   'WABISTAY_STAY_MENU',
+  'WABISTAY_TIMING_LOG',
   'WABISTAY_WEEKLY_RECAP_TEMPLATE'
 ];
 
 // Switches the code only treats as on for 1/true; for these, 'on' means that,
 // not merely 'set'.
-const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_AFTER_HOURS', 'WABISTAY_AIRTABLE_RETRY', 'WABISTAY_CHECKOUT_BUTTON', 'WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_GATE_REQUIRES_BOOKING', 'WABISTAY_GATE_ROOM_CHECK', 'WABISTAY_GUEST_ADDRESS', 'WABISTAY_HIDE_ONE_HOUR', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_HOURLY_EXPIRY', 'WABISTAY_IGNORE_REACTIONS', 'WABISTAY_INTERACTIVE', 'WABISTAY_LEAN_COPY', 'WABISTAY_MESSAGE_DEDUPE', 'WABISTAY_NONTEXT_REPLY', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_ONE_OPEN_BOOKING', 'WABISTAY_PAID_BY_BOOKING_REF', 'WABISTAY_PAID_ROOM_CONFIRMED', 'WABISTAY_PAY_ASSIGNS_ROOM', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD', 'WABISTAY_STAY_MENU'];
+const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_ACTIVITY_THROTTLE', 'WABISTAY_AFTER_HOURS', 'WABISTAY_AIRTABLE_RETRY', 'WABISTAY_CHECKOUT_BUTTON', 'WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_GATE_REQUIRES_BOOKING', 'WABISTAY_GATE_ROOM_CHECK', 'WABISTAY_GUEST_ADDRESS', 'WABISTAY_HIDE_ONE_HOUR', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_HOURLY_EXPIRY', 'WABISTAY_IGNORE_REACTIONS', 'WABISTAY_INTERACTIVE', 'WABISTAY_LEAN_COPY', 'WABISTAY_MESSAGE_DEDUPE', 'WABISTAY_NONTEXT_REPLY', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_ONE_OPEN_BOOKING', 'WABISTAY_PAID_BY_BOOKING_REF', 'WABISTAY_PAID_ROOM_CONFIRMED', 'WABISTAY_PARALLEL_PREAMBLE', 'WABISTAY_PAY_ASSIGNS_ROOM', 'WABISTAY_READ_CACHE', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD', 'WABISTAY_STAY_MENU', 'WABISTAY_TIMING_LOG'];
 
 function wabistayFlagState() {
   const names = new Set([...WABISTAY_KNOWN_FLAGS, ...Object.keys(process.env).filter(k => k.startsWith('WABISTAY_'))]);
@@ -995,6 +1102,9 @@ async function sendNewBookingAlert(to, params, freeForm, correlation = {}) {
 // ─── WHATSAPP HELPER ────────────────────────────────────────────────────────
 
 async function sendWhatsApp(to, message) {
+  return timed('wa_text', 'text', () => sendWhatsAppRaw(to, message));
+}
+async function sendWhatsAppRaw(to, message) {
   console.log(`[WhatsApp SEND] to: ${to} | msg: ${message.slice(0, 80)}...`);
   // F3: was v19.0 — now v25.0 to match webhook subscription version
   const res = await fetch(`https://graph.facebook.com/v25.0/${WA_PHONE_NUMBER_ID}/messages`, {
@@ -1048,6 +1158,9 @@ function sanitizeTemplateParam(value) {
 }
 
 async function sendWhatsAppTemplate(to, templateName, rawParams = [], meta = {}) {
+  return timed('wa_template', templateName, () => sendWhatsAppTemplateRaw(to, templateName, rawParams, meta));
+}
+async function sendWhatsAppTemplateRaw(to, templateName, rawParams = [], meta = {}) {
   const { languageCode = TEMPLATE_LANGUAGE_CODE, ...correlation } = meta;
   // Meta rejects a template send whose text parameter contains a newline, a
   // tab, or four or more consecutive spaces (error 132018). Params carry
@@ -1463,7 +1576,8 @@ function logToAxiom(level, event, detail = {}) {
     source: 'wabistay',
     ...detail
   }];
-  fetch(`https://api.axiom.co/v1/datasets/${AXIOM_DATASET}/ingest`, {
+  // Returns the ingest promise so a caller that must not lose its event (request_timing) can wait for it; every other caller ignores it.
+  return fetch(`https://api.axiom.co/v1/datasets/${AXIOM_DATASET}/ingest`, {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${AXIOM_TOKEN}`,
@@ -1513,6 +1627,8 @@ function msg(key, vars = {}) {
 // — standard equality match, not a linked-record lookup, so no FIND/ARRAYJOIN needed here.
 
 async function resolveProperty(phoneNumberId) {
+  // Never cached (WABISTAY_READ_CACHE): the property row carries 'Subscription Status' (the suspended-property block),
+  // the EFT bank details and the Notify/redirect phones, which must always be what Airtable holds right now.
   const properties = await airtableGet('WS_Properties', `{Phone Number ID} = '${phoneNumberId}'`);
   if (properties.length === 0) {
     logToAxiom('error', 'property_resolution_failed', { phone_number_id: phoneNumberId });
@@ -1554,6 +1670,21 @@ async function bumpPropertyActivity(propertyId, field) {
   } catch (err) {
     logToAxiom('warn', 'property_activity_write_failed', { propertyId, field, error: err.message });
   }
+}
+
+// WABISTAY_ACTIVITY_THROTTLE: 'Last Message Received' is read only by the dormant-property report, whose
+// threshold is measured in DAYS (DORMANT_THRESHOLD_DAYS_DEFAULT), yet it was written on every inbound
+// message: a serial Airtable PATCH of 200-300 ms in front of every reply (about 1.2 s over a 5-message
+// booking). With the flag on, the write is skipped when the value already on the property row (read fresh
+// by resolveProperty on the same request) is less than ACTIVITY_THROTTLE_MS old. Off: every message writes,
+// exactly as before. An unreadable or missing stamp always writes.
+const ACTIVITY_THROTTLE_MS = 10 * 60 * 1000;
+function activityThrottleEnabled() {
+  return /^(1|true)$/i.test(String(process.env.WABISTAY_ACTIVITY_THROTTLE || '').trim());
+}
+function messageReceivedStampIsFresh(property, nowMs = Date.now()) {
+  const last = Date.parse(property && property.fields && property.fields['Last Message Received']);
+  return Number.isFinite(last) && nowMs >= last && nowMs - last < ACTIVITY_THROTTLE_MS;
 }
 
 // ─── DORMANT-PROPERTY FLAGGING ───────────────────────────────────────────────
@@ -2540,7 +2671,7 @@ const WALKIN_ROLE_TYPES = ['Owner', 'Manager', 'Reception'];
 // and the table currently contains blank rows, which a formula match would have
 // to special-case anyway.
 async function activeWalkinRoleForPhone(phone) {
-  const roles = await airtableGet('WS_Roles', `{Active} = TRUE()`);
+  const roles = await cachedGet('WS_Roles', `{Active} = TRUE()`, 'request');
   return roles.find(r => {
     if (!WALKIN_ROLE_TYPES.includes(r.fields['Role Type'])) return false;
     const raw = r.fields['Current Phone'];
@@ -2557,7 +2688,7 @@ async function activeWalkinRoleForPhone(phone) {
 // deactivated seat is still found — the caller decides what "found but inactive"
 // means, rather than the query silently discarding the distinction.
 async function walkinRoleRecordForPhone(phone) {
-  const roles = await airtableGet('WS_Roles', orFormula('Role Type', WALKIN_ROLE_TYPES));
+  const roles = await cachedGet('WS_Roles', orFormula('Role Type', WALKIN_ROLE_TYPES), 'request');
   return roles.find(r => {
     const raw = r.fields['Current Phone'];
     if (!raw) return false;
@@ -2588,7 +2719,7 @@ const PAID_COMMAND_ROLE_TYPES = ['Reception', 'On Duty'];
 // generalisation of it: rule 26 — no refactor while adding a feature. The two
 // converge when B18 lands and owns seat resolution properly.
 async function activePaidRoleForPhone(phone) {
-  const roles = await airtableGet('WS_Roles', `{Active} = TRUE()`);
+  const roles = await cachedGet('WS_Roles', `{Active} = TRUE()`, 'request');
   return roles.find(r => {
     if (!PAID_COMMAND_ROLE_TYPES.includes(r.fields['Role Type'])) return false;
     const raw = r.fields['Current Phone'];
@@ -2602,7 +2733,7 @@ async function activePaidRoleForPhone(phone) {
 // matches linked-record fields on their display value, which is not id-safe.
 async function activeReceptionRolesForProperty(propertyId) {
   if (!propertyId) return [];
-  const roles = await airtableGet('WS_Roles', `{Active} = TRUE()`);
+  const roles = await cachedGet('WS_Roles', `{Active} = TRUE()`, 'request');
   return roles.filter(r =>
     PAID_ROLE_TYPES.includes(r.fields['Role Type']) &&
     (r.fields['Property'] || []).includes(propertyId) &&
@@ -2655,7 +2786,7 @@ const ESCALATION_TIER_ROLE_TYPES = ['On Duty', 'Backup', 'Manager'];
 // not id — not safe here either).
 async function activeEscalationRolesForProperty(propertyId) {
   if (!propertyId) return [];
-  const roles = await airtableGet('WS_Roles', `{Active} = TRUE()`);
+  const roles = await cachedGet('WS_Roles', `{Active} = TRUE()`, 'request');
   return roles.filter(r =>
     ESCALATION_TIER_ROLE_TYPES.includes(r.fields['Role Type']) &&
     (r.fields['Property'] || []).includes(propertyId) &&
@@ -2812,7 +2943,7 @@ function orFormula(field, values) {
 // function. Shared by the greeting's room count and the legacy no-date-range
 // gate-arrival fallback so the two can't drift apart again.
 async function getGuestVisibleAvailableRooms(propertyId) {
-  const allAvailableRooms = await airtableGet('WS_Rooms', `{Status} = 'Available'`);
+  const allAvailableRooms = await cachedGet('WS_Rooms', `{Status} = 'Available'`, 'request');
   return allAvailableRooms.filter(r => (r.fields['Property'] || []).includes(propertyId) && r.fields['Active'] === true);
 }
 
@@ -2887,7 +3018,7 @@ async function findAvailableRoom(propertyId, checkInIso, checkOutIso, opts = {})
   // wire — only `=== true` can tell a deliberately-enabled room from
   // everything else, matching the existing fail-closed posture this function
   // already uses for Maintenance (comment above BOOKABLE_ROOM_STATUSES).
-  const allRooms = await airtableGet('WS_Rooms', orFormula('Status', BOOKABLE_ROOM_STATUSES));
+  const allRooms = await cachedGet('WS_Rooms', orFormula('Status', BOOKABLE_ROOM_STATUSES), 'request');
   const rooms = allRooms.filter(r => (r.fields['Property'] || []).includes(propertyId) && r.fields['Active'] === true);
   if (rooms.length === 0) return null;
 
@@ -3065,7 +3196,7 @@ const guards = {
     const parsed = parseStartCleaningCommand(ctx.messageText);
     if (!parsed) return false;
 
-    const cleaners = await airtableGet('WS_Cleaners', `{Phone Number} = '${ctx.phone}'`);
+    const cleaners = await cleanersForPhone(ctx);
     if (cleaners.length === 0) {
       logToAxiom('warn', 'cleaning_start_unauthorised_sender', { phone: ctx.phone });
       return false;
@@ -3085,7 +3216,7 @@ const guards = {
   // cleanerNothingToClean rather than a guest greeting. When a room IS in
   // Cleaning the sender is always claimed, exactly as before.
   async senderIsCleaner(ctx) {
-    const cleanerRecords = await airtableGet('WS_Cleaners', `{Phone Number} = '${ctx.phone}'`);
+    const cleanerRecords = await cleanersForPhone(ctx);
     ctx.cleaner = cleanerRecords[0] || null;
     if (cleanerRecords.length === 0) return false;
 
@@ -3113,7 +3244,7 @@ const guards = {
     // global must not preempt it. Targeted addition only; the rest of the guard
     // (which behaves correctly for genuine cleaner room-naming) is unchanged.
     if (guestStateExpectsInput(ctx.guest, ctx.text)) return false;
-    const cleanerRecords = await airtableGet('WS_Cleaners', `{Phone Number} = '${ctx.phone}'`);
+    const cleanerRecords = await cleanersForPhone(ctx);
     if (cleanerRecords.length === 0) return false;
     const cleaningRooms = await airtableGet('WS_Rooms', `{Status} = 'Cleaning'`);
     const match = cleaningRooms.find(r => roomMatchesText(r, ctx.text));
@@ -4220,8 +4351,10 @@ const actions = {
     // Rates are checked here too (even though rateText itself now builds later,
     // in selectStayType) so this diagnostic still fires on every first contact,
     // unchanged from before the reorder.
-    const unassignedRooms = await airtableGet('WS_Rooms', `AND({Status} = 'Available', {Property} = BLANK())`);
-    const unassignedRates = await airtableGet('WS_Rates', `AND({Active} = TRUE(), {Property} = BLANK())`);
+    const unassignedRooms = readCacheEnabled()
+      ? (await cachedGet('WS_Rooms', `{Status} = 'Available'`, 'request')).filter(r => (r.fields['Property'] || []).length === 0)
+      : await airtableGet('WS_Rooms', `AND({Status} = 'Available', {Property} = BLANK())`);
+    const unassignedRates = await cachedGet('WS_Rates', `AND({Active} = TRUE(), {Property} = BLANK())`, 'ttl');
     if (unassignedRooms.length > 0 || unassignedRates.length > 0) {
       logToAxiom('warn', 'property_unassigned_rows', {
         phone: ctx.phone,
@@ -8203,7 +8336,7 @@ async function afterHoursPrelude(ctx, { restart = false } = {}) {
   const lastWelcome = guest && guest.fields['After Hours Reply At'];
   if (lastWelcome && Date.parse(lastWelcome) >= Date.parse(w.startIso)) return null;
   // A staff number is not a guest (same identity checks as the consent notice).
-  const isCleaner = (await airtableGet('WS_Cleaners', `{Phone Number} = '${ctx.phone}'`)).length > 0;
+  const isCleaner = (await cachedGet('WS_Cleaners', `{Phone Number} = '${ctx.phone}'`, 'request')).length > 0;
   if (isCleaner || isOwnerSideNumber(ctx.phone, ctx.property) || (await activeWalkinRoleForPhone(ctx.phone)) !== null) return null;
   await sendWhatsApp(ctx.phone, msg(w.tomorrow ? 'afterHoursWelcomeTomorrow' : 'afterHoursWelcomeToday'));
   logToAxiom('info', 'after_hours_welcome_sent', { phone: ctx.phone, tomorrow: w.tomorrow });
@@ -8261,8 +8394,10 @@ function stayMenuKeysForHour(hour) {
 }
 // The single active rate row of one Rate Type for a property, or null. Same rule the
 // nightly lookup has always used: exactly one, else not priced (fail closed).
-async function singleActiveRate(property, rateType) {
-  const rows = await airtableGet('WS_Rates', "AND({Active} = TRUE(), {Rate Type} = '" + rateType + "')");
+async function singleActiveRate(property, rateType, { fresh = false } = {}) {
+  // fresh: the booking-time lookup that sets Amount Due is never served from the WABISTAY_READ_CACHE; the menu may be.
+  const q = "AND({Active} = TRUE(), {Rate Type} = '" + rateType + "')";
+  const rows = fresh ? await airtableGet('WS_Rates', q) : await cachedGet('WS_Rates', q, 'ttl');
   const mine = rows.filter(r => (r.fields['Property'] || []).includes(property.id));
   return mine.length === 1 ? mine[0] : null;
 }
@@ -8501,7 +8636,7 @@ async function collectStayMenuDetails(ctx, pending) {
     const hourly = hourlyRatesFor(ctx.property, [product.hours]);
     amount = hourly ? hourly[product.hours] : null;
   } else {
-    rateRow = await singleActiveRate(ctx.property, product.type === 'Day' ? 'Per Day' : 'Per Night');
+    rateRow = await singleActiveRate(ctx.property, product.type === 'Day' ? 'Per Day' : 'Per Night', { fresh: true });
     amount = rateRow ? Number(rateRow.fields['Amount']) : null;
   }
   if (!(amount > 0)) {
@@ -8581,6 +8716,25 @@ async function collectStayMenuDetails(ctx, pending) {
   return true;
 }
 
+// ─── PARALLEL PREAMBLE (WABISTAY_PARALLEL_PREAMBLE) ─────────────────────────────
+// Every inbound message used to run four Airtable calls one after another before any real work: the property
+// lookup, the property's 'Last Message Received' stamp, the guest lookup and the cleaner lookup (the global
+// guards ask about cleaners for every text). Measured 464-749 ms per message. With the flag on the property,
+// guest and cleaner lookups start together (they depend only on the phone and the phone-number id), and the
+// stamp write starts as soon as the property is known and finishes in the background of the handler: the
+// request still waits for it before answering Meta (handleMessage awaits dedupe.pending), so nothing is left
+// running after the 200. Reads only, plus the one stamp write: no guest-state write is moved, so
+// WABISTAY_STATE_WRITE_GUARD (which acts on the result of the state write that precedes each reply) is
+// untouched. Off: the old sequence, call for call.
+function parallelPreambleEnabled() {
+  return /^(1|true)$/i.test(String(process.env.WABISTAY_PARALLEL_PREAMBLE || '').trim());
+}
+// The cleaner lookup for ctx.phone. With the flag on it is the one started at the top of the message and shared
+// by every guard that asks; off, each guard queries for itself exactly as before.
+function cleanersForPhone(ctx) {
+  return ctx.cleanersLookup || cachedGet('WS_Cleaners', `{Phone Number} = '${ctx.phone}'`, 'request');
+}
+
 // ─── MESSAGE DEDUPE (WABISTAY_MESSAGE_DEDUPE) ────────────────────────────────
 // Meta can deliver the same inbound message twice ("these retries can result in
 // duplicate webhook notifications"). With the flag on, a message is skipped only when
@@ -8612,11 +8766,34 @@ async function recordHandledMessageId(phone, wamid, guestId) {
 // tells us who to stamp (dedupe.guestId) or that this is a duplicate (dedupe.skipped).
 // If the inner function throws, the throw propagates and nothing is written.
 async function handleMessage(from, messageText, phoneNumberId, wamid, interactive = null) {
-  const dedupe = { guestId: null, skipped: false };
-  await handleMessageInner(from, messageText, phoneNumberId, wamid, interactive, dedupe);
-  if (messageDedupeEnabled() && wamid && dedupe.guestId && !dedupe.skipped) {
-    await recordHandledMessageId(formatPhone(from), wamid, dedupe.guestId);
+  if (!timingLogEnabled()) return handleMessageTracked(from, messageText, phoneNumberId, wamid, interactive);
+  const store = { t0: Date.now(), calls: [], cold: _timingFirstRequestInProcess };
+  _timingFirstRequestInProcess = false;
+  try {
+    return await _timingStore.run(store, () => handleMessageTracked(from, messageText, phoneNumberId, wamid, interactive));
+  } finally {
+    // The last event of a request is the one most likely to be cut off when Vercel freezes the function after the
+    // 200, so this one (only) waits for its ingest, capped at 1 s.
+    const ingest = logToAxiom('info', 'request_timing', {
+      phone_number_id: phoneNumberId, wamid: wamid || null, timing_json: jsonField(summariseTiming(store, Date.now()))
+    });
+    if (ingest) await Promise.race([ingest, new Promise(r => setTimeout(r, 1000))]);
   }
+}
+async function handleMessageTracked(from, messageText, phoneNumberId, wamid, interactive = null) {
+  // One request-scoped memo per inbound message (used only when WABISTAY_READ_CACHE is on).
+  return _requestMemo.run(new Map(), async () => {
+    const dedupe = { guestId: null, skipped: false, pending: [] };
+    try {
+      await handleMessageInner(from, messageText, phoneNumberId, wamid, interactive, dedupe);
+    } finally {
+      // Work started in the background by the parallel preamble must finish before we answer Meta.
+      if (dedupe.pending.length) await Promise.allSettled(dedupe.pending);
+    }
+    if (messageDedupeEnabled() && wamid && dedupe.guestId && !dedupe.skipped) {
+      await recordHandledMessageId(formatPhone(from), wamid, dedupe.guestId);
+    }
+  });
 }
 
 // ─── INTERACTIVE REPLIES (WABISTAY_INTERACTIVE) ──────────────────────────────
@@ -8674,7 +8851,10 @@ function validateReplyButtons({ body, buttons, footer }) {
 
 // Reply buttons only. Validated BEFORE sending: an over-limit message is never sent.
 // Returns { ok, invalid?, error?, wamid? }; callers fall back to the text menu.
-async function sendInteractiveButtons(to, { body, buttons, footer }) {
+async function sendInteractiveButtons(to, opts) {
+  return timed('wa_interactive', 'buttons', () => sendInteractiveButtonsRaw(to, opts));
+}
+async function sendInteractiveButtonsRaw(to, { body, buttons, footer }) {
   const invalid = validateReplyButtons({ body, buttons, footer });
   if (invalid) {
     logToAxiom('error', 'interactive_invalid', { to, reason: invalid });
@@ -8732,7 +8912,26 @@ async function handleMessageInner(from, messageText, phoneNumberId, wamid, inter
 
   // 6.4: resolve property before anything else — no action may run for an
   // unconfigured number, and no property's data may leak to another's guest.
-  const property = await resolveProperty(phoneNumberId);
+  let property;
+  let prefetchedGuests = null;
+  let cleanersLookup = null;
+  if (parallelPreambleEnabled()) {
+    const propertyLookup = resolveProperty(phoneNumberId).then(p => {
+      // As soon as the property is known its stamp write starts, alongside the guest read.
+      if (p && !(activityThrottleEnabled() && messageReceivedStampIsFresh(p))) (dedupe.pending = dedupe.pending || []).push(bumpPropertyActivity(p.id, 'Last Message Received'));
+      return p;
+    });
+    const guestLookup = airtableGet('WS_Guests', `{Phone Number} = '${phone}'`);
+    cleanersLookup = cachedGet('WS_Cleaners', `{Phone Number} = '${phone}'`, 'request');
+    cleanersLookup.catch(() => {}); // a lookup no guard ends up awaiting must not become an unhandled rejection
+    const [pr, gr] = await Promise.allSettled([propertyLookup, guestLookup]);
+    if (pr.status === 'rejected') throw pr.reason;
+    if (gr.status === 'rejected') throw gr.reason;
+    property = pr.value;
+    prefetchedGuests = gr.value;
+  } else {
+    property = await resolveProperty(phoneNumberId);
+  }
   if (!property) {
     console.error(`[Dispatch] no WS_Properties match for phone_number_id: ${phoneNumberId} — refusing dispatch`);
     logToAxiom('info', 'message_received', { phone, text: messageText.slice(0, 100), sessionState: null });
@@ -8741,9 +8940,11 @@ async function handleMessageInner(from, messageText, phoneNumberId, wamid, inter
   }
   noteNotifyPhones(property);
   // Best-effort, non-blocking — see bumpPropertyActivity's own comment.
-  await bumpPropertyActivity(property.id, 'Last Message Received');
+  if (!prefetchedGuests && !(activityThrottleEnabled() && messageReceivedStampIsFresh(property))) {
+    await bumpPropertyActivity(property.id, 'Last Message Received');
+  }
 
-  const guestRecords = await airtableGet('WS_Guests', `{Phone Number} = '${phone}'`);
+  const guestRecords = prefetchedGuests || await airtableGet('WS_Guests', `{Phone Number} = '${phone}'`);
   const guest = guestRecords[0] || null;
   const sessionState = guest ? guest.fields['Session State'] : null;
   console.log(`[State] guest: ${guest ? guest.id : 'none'} | state: ${sessionState}`);
@@ -8819,7 +9020,7 @@ async function handleMessageInner(from, messageText, phoneNumberId, wamid, inter
     // uses, run here first instead — cost is one extra pair of reads, paid
     // only on the rare message that is literally "stop", not on every inbound
     // message.
-    const isCleanerNumber = (await airtableGet('WS_Cleaners', `{Phone Number} = '${phone}'`)).length > 0;
+    const isCleanerNumber = (await cachedGet('WS_Cleaners', `{Phone Number} = '${phone}'`, 'request')).length > 0;
     const isOwnerNumber = isOwnerSideNumber(phone, property);
     const isStaffNumber = isCleanerNumber || isOwnerNumber || (await activeWalkinRoleForPhone(phone)) !== null;
     if (isStaffNumber) {
@@ -8972,7 +9173,7 @@ async function handleMessageInner(from, messageText, phoneNumberId, wamid, inter
   // STOP line references B14 (Step 6 of this sprint) — valid by merge time, since
   // both branches merge together (ordering dependency noted in the PR).
   if (!guest) {
-    const isCleaner = (await airtableGet('WS_Cleaners', `{Phone Number} = '${phone}'`)).length > 0;
+    const isCleaner = (await cachedGet('WS_Cleaners', `{Phone Number} = '${phone}'`, 'request')).length > 0;
     const isOwner = isOwnerSideNumber(phone, property);
     // B7: a staff seat is not a guest. Without this, the first WALKIN ever sent
     // from a reception handset answers with a POPIA notice about that person's
@@ -8992,7 +9193,8 @@ async function handleMessageInner(from, messageText, phoneNumberId, wamid, inter
   const ctx = {
     phone, text, messageText, wamid, guest, next: null, cleaner: null, property,
     stepOnArrival: sessionState || null,
-    attemptStartedAt: (guest && guest.fields['Attempt Started At']) || null
+    attemptStartedAt: (guest && guest.fields['Attempt Started At']) || null,
+    cleanersLookup
   };
 
   // Global transitions (cleaner DONE) — guard decides, any state
@@ -9226,6 +9428,10 @@ module.exports.WEEKLY_RECAP_TEMPLATE = WEEKLY_RECAP_TEMPLATE;
 module.exports.jsonField = jsonField;
 module.exports.setAirtableRetryDelays = arr => { AIRTABLE_RETRY_DELAYS_MS = arr; };
 module.exports.AirtableUnavailableError = AirtableUnavailableError;
+module.exports.resetReadCache = resetReadCache;
+module.exports.resolveProperty = resolveProperty;
+module.exports.runInRequestScope = fn => _requestMemo.run(new Map(), fn);
+module.exports.findAvailableRoom = findAvailableRoom;
 module.exports.updateGuestState = updateGuestState;
 module.exports.resolveSendRecipient = resolveSendRecipient;
 module.exports.runDailySummary = runDailySummary;
@@ -9288,6 +9494,7 @@ module.exports.rateUnitLabel = rateUnitLabel;
 module.exports.STAY_PRODUCTS = STAY_PRODUCTS;
 module.exports.sanitizeTemplateParam = sanitizeTemplateParam;
 module.exports.bumpPropertyActivity = bumpPropertyActivity;
+module.exports.messageReceivedStampIsFresh = messageReceivedStampIsFresh;
 module.exports.dormantProperties = dormantProperties;
 module.exports.inactiveByMessageActivity = inactiveByMessageActivity;
 // Shift-routing/escalation PR 1: per-property escalation timeout, global

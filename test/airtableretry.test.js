@@ -152,3 +152,13 @@ test('a failed write that exhausts its retries still returns the error object an
   assert.strictEqual(res.statusCode, 200, 'the property stamp is best-effort and never blocks a guest');
   assert.strictEqual(n(ctx, 'PATCH WS_Properties'), 4);
 });
+
+test('with the read cache on as well, a persistent failure is retried once (not twice over) and then thrown', async () => {
+  process.env.WABISTAY_READ_CACHE = '1';
+  try {
+    const ctx = setup('1', [{ table: 'WS_Rooms', method: 'GET', fails: 'always' }], { WS_Guests: [] });
+    const res = await say('hi');
+    assert.strictEqual(res.statusCode, 500);
+    assert.strictEqual(n(ctx, 'GET WS_Rooms'), 4, 'first try plus three retries, not eight');
+  } finally { delete process.env.WABISTAY_READ_CACHE; }
+});

@@ -116,6 +116,8 @@ function jsonRes(obj, status = 200) {
 }
 
 function installFetch(ctx) {
+  // A fresh mock Airtable is a fresh world: drop anything WABISTAY_READ_CACHE kept from the previous test.
+  try { require('../api/wabistay/webhook.js').resetReadCache(); } catch (_) { /* module not loaded yet or no cache */ }
   global.fetch = async (url, opts = {}) => {
     const method = (opts.method || 'GET').toUpperCase();
     const u = new URL(url);
