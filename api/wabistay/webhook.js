@@ -235,8 +235,9 @@ async function withAirtableCallCount(cronName, propertyCountRef, fn) {
 //     fetch, the unassigned-room diagnostic is filtered from it). WS_Bookings is NEVER cached: the second
 //     findAvailableRoom call (the P1a 'stillFree' re-check) exists to see a booking written in the last
 //     second, so it stays a fresh read.
-//   · 'ttl' - kept READ_CACHE_TTL_MS on this warm instance. Used for WS_Properties (resolved by Phone Number
-//     ID) and WS_Rates: config that changes by hand, rarely. An edit made in Airtable shows up within the TTL.
+//   · 'ttl' - kept READ_CACHE_TTL_MS on this warm instance. Used for WS_Rates only: config that changes by hand,
+//     rarely. An edit made in Airtable shows up within the TTL. WS_Properties is deliberately NOT cached: it holds
+//     'Subscription Status' (the suspended-property block), the EFT bank details and the redirect/notify phones.
 // Any write to a table made by this instance drops that table's entries. A failed read is never cached (it is
 // re-run uncached so the old swallow-and-log behaviour is unchanged). Callers get a copy, never the stored one.
 const READ_CACHE_TTL_MS = 30 * 1000;
@@ -245,18 +246,9 @@ const _ttlCache = new Map(); // key -> { at, records }
 function readCacheEnabled() {
   return /^(1|true)$/i.test(String(process.env.WABISTAY_READ_CACHE || '').trim());
 }
-const ACTIVITY_ONLY_FIELDS = ['Last Message Received', 'Last Owner App Open'];
-function invalidateReadCache(table, recordId, fields) {
+function invalidateReadCache(table) {
   const prefix = table + '|';
-  // A successful write of only the two activity stamps to a property is patched into the cached copy:
-  // dropping it would make every message re-read the property (each message stamps it).
-  const activityOnly = table === 'WS_Properties' && recordId && fields && Object.keys(fields).length > 0
-    && Object.keys(fields).every(f => ACTIVITY_ONLY_FIELDS.includes(f));
-  for (const [k, v] of _ttlCache.entries()) {
-    if (!k.startsWith(prefix)) continue;
-    if (activityOnly) { const rec = v.records.find(r => r.id === recordId); if (rec) { Object.assign(rec.fields, fields); continue; } }
-    _ttlCache.delete(k);
-  }
+  for (const k of _ttlCache.keys()) if (k.startsWith(prefix)) _ttlCache.delete(k);
   const memo = _requestMemo.getStore();
   if (memo) for (const k of memo.keys()) if (k.startsWith(prefix)) memo.delete(k);
 }
@@ -364,7 +356,7 @@ async function airtableUpdate(table, recordId, fields) {
   });
   console.log(`[Airtable UPDATE STATUS] ${table} | HTTP ${res.status}`);
   const data = await res.json();
-  invalidateReadCache(table, recordId, data.error ? null : fields);
+  invalidateReadCache(table);
   if (data.error) {
     console.error(`[Airtable UPDATE ERROR] ${table}:`, JSON.stringify(data.error));
     logToAxiom('error', 'airtable_update_error', { table, recordId, status: res.status, error: JSON.stringify(data.error) });
@@ -1527,7 +1519,9 @@ function msg(key, vars = {}) {
 // — standard equality match, not a linked-record lookup, so no FIND/ARRAYJOIN needed here.
 
 async function resolveProperty(phoneNumberId) {
-  const properties = await cachedGet('WS_Properties', `{Phone Number ID} = '${phoneNumberId}'`, 'ttl');
+  // Never cached (WABISTAY_READ_CACHE): the property row carries 'Subscription Status' (the suspended-property block),
+  // the EFT bank details and the Notify/redirect phones, which must always be what Airtable holds right now.
+  const properties = await airtableGet('WS_Properties', `{Phone Number ID} = '${phoneNumberId}'`);
   if (properties.length === 0) {
     logToAxiom('error', 'property_resolution_failed', { phone_number_id: phoneNumberId });
     return null;
@@ -9239,6 +9233,7 @@ module.exports.weeklyRecapTemplateParams = weeklyRecapTemplateParams;
 module.exports.WEEKLY_RECAP_TEMPLATE = WEEKLY_RECAP_TEMPLATE;
 module.exports.jsonField = jsonField;
 module.exports.resetReadCache = resetReadCache;
+module.exports.resolveProperty = resolveProperty;
 module.exports.runInRequestScope = fn => _requestMemo.run(new Map(), fn);
 module.exports.findAvailableRoom = findAvailableRoom;
 module.exports.updateGuestState = updateGuestState;

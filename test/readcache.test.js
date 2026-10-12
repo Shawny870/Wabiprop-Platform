@@ -48,53 +48,56 @@ const say = text => wh({ method: 'POST', body: metaTextPayload(PHONE, text) }, m
 const n = (ctx, k) => ctx.counts[k] || 0;
 async function throughDuration(ctx) { for (const t of ['hi', '1', 'John\n3pm']) await say(t); }
 
-test('flag off: the property is read from Airtable on every message', async () => {
-  const ctx = setup(undefined);
-  await say('hi'); await say('hi');
-  assert.strictEqual(n(ctx, 'get WS_Properties'), 2);
-});
-
-test('flag on: the property is read once, then served from the cache for later messages', async () => {
-  const ctx = setup('1');
+test('flag on: WS_Properties is NEVER cached — it holds Subscription Status and the bank details, so it is read fresh on every message', async () => {
+  const off = setup(undefined);
   await say('hi'); await say('hi'); await say('hi');
-  assert.strictEqual(n(ctx, 'get WS_Properties'), 1);
+  const on = setup('1');
+  await say('hi'); await say('hi'); await say('hi');
+  assert.strictEqual(n(off, 'get WS_Properties'), 3);
+  assert.strictEqual(n(on, 'get WS_Properties'), 3);
 });
 
-test('flag on: the activity stamp written on each message is patched into the cached property, not a reason to re-read it', async () => {
-  const ctx = setup('1');
-  await say('hi'); await say('hi');
-  assert.strictEqual(n(ctx, 'update WS_Properties'), 2, 'the stamp itself is still written (that is the throttle flag\'s job)');
-  assert.strictEqual(n(ctx, 'get WS_Properties'), 1);
-});
-
-test('flag on: a cached property is dropped when anything else about it is written', async () => {
+test('flag on: a property suspended in Airtable between two messages blocks the second message immediately (no 30 s staleness)', async () => {
   const ctx = setup('1');
   await say('hi');
-  assert.strictEqual(n(ctx, 'get WS_Properties'), 1);
-  // a non-activity write through the module's own write path (the Rate-limited owner copy etc.)
-  await wh.bumpPropertyActivity('recP1', 'Last Owner App Open');
+  ctx.airtable.tables.WS_Properties[0].fields['Subscription Status'] = 'Suspended';
+  const before = ctx.sends.length;
   await say('hi');
-  assert.strictEqual(n(ctx, 'get WS_Properties'), 1, 'activity-only writes keep the cache');
-  const { airtableUpdate } = wh;
-  if (airtableUpdate) {
-    await airtableUpdate('WS_Properties', 'recP1', { 'Notify Phone': '27700000009' });
-    await say('hi');
-    assert.strictEqual(n(ctx, 'get WS_Properties'), 2, 'a real edit forces a re-read');
-  }
+  assert.ok(ctx.sends.length > before, 'the second message was answered');
+  assert.ok(ctx.sends.slice(before).some(s => /can.t take bookings through this chat/.test(s.body)), 'the suspended-property redirect was sent straight away');
+  assert.strictEqual(n(ctx, 'get WS_Properties'), 2, 'the suspended flag was read from Airtable, not from a cache');
 });
 
-test('flag on: a failed property read is not cached — the next message reads again', async () => {
+test('flag on: WS_Rates is read once and then served from the cache for later messages; flag off reads it every time', async () => {
+  const on = setup('1');
+  await say('hi'); await say('hi'); await say('hi');
+  const off = setup(undefined);
+  await say('hi'); await say('hi'); await say('hi');
+  assert.strictEqual(n(on, 'get WS_Rates'), 1);
+  assert.strictEqual(n(off, 'get WS_Rates'), 3);
+});
+
+test('flag on: a write to WS_Rates drops the cached rates', async () => {
+  const ctx = setup('1');
+  await say('hi');
+  assert.strictEqual(n(ctx, 'get WS_Rates'), 1);
+  await wh.airtableUpdate('WS_Rates', 'recRate', { Amount: 999 });
+  await say('hi');
+  assert.strictEqual(n(ctx, 'get WS_Rates'), 2);
+});
+
+test('flag on: a failed rates read is not cached — the next message reads again', async () => {
   const ctx = setup('1');
   const real = global.fetch;
   let failOnce = true;
   global.fetch = async (url, opts) => {
-    if (failOnce && String(url).includes('/WS_Properties?')) { failOnce = false; return { status: 500, json: async () => ({ error: { type: 'SERVER_ERROR' } }) }; }
+    if (failOnce && String(url).includes('/WS_Rates?')) { failOnce = false; return { status: 500, json: async () => ({ error: { type: 'SERVER_ERROR' } }) }; }
     return real(url, opts);
   };
   await say('hi');
   await say('hi');
-  assert.ok(ctx.sends.length >= 1, 'a later message was answered');
   assert.strictEqual(failOnce, false);
+  assert.strictEqual(n(ctx, 'get WS_Rates'), 2, 'the failure was not cached as an empty result');
 });
 
 test('the greeting reads WS_Rooms once with the flag on, twice with it off', async () => {
@@ -142,7 +145,7 @@ test('flag on: room reads are request-scoped — a second message does not reuse
   assert.strictEqual(n(ctx, 'get WS_Rooms'), 2, 'one per message, not one per process');
 });
 
-test('flag on: the cached property expires after 30 seconds', async () => {
+test('flag on: cached rates expire after 30 seconds', async () => {
   const ctx = setup('1');
   const t0 = Date.now();
   mock.timers.enable({ apis: ['Date'], now: t0 });
@@ -150,10 +153,10 @@ test('flag on: the cached property expires after 30 seconds', async () => {
     await say('hi');
     mock.timers.setTime(t0 + 29000);
     await say('hi');
-    assert.strictEqual(n(ctx, 'get WS_Properties'), 1, 'still cached at 29 s');
+    assert.strictEqual(n(ctx, 'get WS_Rates'), 1, 'still cached at 29 s');
     mock.timers.setTime(t0 + 31000);
     await say('hi');
-    assert.strictEqual(n(ctx, 'get WS_Properties'), 2, 're-read after 31 s');
+    assert.strictEqual(n(ctx, 'get WS_Rates'), 2, 're-read after 31 s');
   } finally { mock.timers.reset(); }
 });
 
@@ -171,4 +174,13 @@ test('flag on: even with no write in between, two availability checks in one mes
   assert.strictEqual(second, null, 'taken at the second check');
   assert.strictEqual(n(ctx, 'get WS_Rooms'), 1, 'but the room list was read once');
   assert.strictEqual(n(ctx, 'get WS_Bookings'), 2);
+});
+
+test('flag on: resolveProperty reads Airtable every time even with no write in between (nothing about the property is cached)', async () => {
+  const ctx = setup('1');
+  await wh.resolveProperty('111000111000');
+  ctx.airtable.tables.WS_Properties[0].fields['Subscription Status'] = 'Suspended';
+  const second = await wh.resolveProperty('111000111000');
+  assert.strictEqual(n(ctx, 'get WS_Properties'), 2);
+  assert.strictEqual(second.fields['Subscription Status'], 'Suspended', 'the change is visible immediately');
 });
