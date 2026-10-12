@@ -547,6 +547,7 @@ const WABISTAY_KNOWN_FLAGS = [
   'WABISTAY_ENQUIRY_TRACKING',
   'WABISTAY_GATE_ALERT_UNPAID',
   'WABISTAY_GATE_ARRIVAL_TEMPLATE',
+  'WABISTAY_GATE_PAY_FLOW',
   'WABISTAY_GATE_REQUIRES_BOOKING',
   'WABISTAY_GATE_ROOM_CHECK',
   'WABISTAY_GUEST_ADDRESS',
@@ -584,7 +585,7 @@ const WABISTAY_KNOWN_FLAGS = [
 
 // Switches the code only treats as on for 1/true; for these, 'on' means that,
 // not merely 'set'.
-const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_ACTIVITY_THROTTLE', 'WABISTAY_AFTER_HOURS', 'WABISTAY_AIRTABLE_RETRY', 'WABISTAY_CHECKOUT_BUTTON', 'WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_GATE_REQUIRES_BOOKING', 'WABISTAY_GATE_ROOM_CHECK', 'WABISTAY_GUEST_ADDRESS', 'WABISTAY_HIDE_ONE_HOUR', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_HOURLY_EXPIRY', 'WABISTAY_IGNORE_REACTIONS', 'WABISTAY_INTERACTIVE', 'WABISTAY_LEAN_COPY', 'WABISTAY_MESSAGE_DEDUPE', 'WABISTAY_NONTEXT_REPLY', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_ONE_OPEN_BOOKING', 'WABISTAY_PAID_BY_BOOKING_REF', 'WABISTAY_PAID_ROOM_CONFIRMED', 'WABISTAY_PARALLEL_PREAMBLE', 'WABISTAY_PARALLEL_SENDS', 'WABISTAY_PAY_ASSIGNS_ROOM', 'WABISTAY_READ_CACHE', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD', 'WABISTAY_STAY_MENU', 'WABISTAY_TIMING_LOG', 'WABISTAY_WA_PREWARM'];
+const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_ACTIVITY_THROTTLE', 'WABISTAY_AFTER_HOURS', 'WABISTAY_AIRTABLE_RETRY', 'WABISTAY_CHECKOUT_BUTTON', 'WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_GATE_PAY_FLOW', 'WABISTAY_GATE_REQUIRES_BOOKING', 'WABISTAY_GATE_ROOM_CHECK', 'WABISTAY_GUEST_ADDRESS', 'WABISTAY_HIDE_ONE_HOUR', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_HOURLY_EXPIRY', 'WABISTAY_IGNORE_REACTIONS', 'WABISTAY_INTERACTIVE', 'WABISTAY_LEAN_COPY', 'WABISTAY_MESSAGE_DEDUPE', 'WABISTAY_NONTEXT_REPLY', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_ONE_OPEN_BOOKING', 'WABISTAY_PAID_BY_BOOKING_REF', 'WABISTAY_PAID_ROOM_CONFIRMED', 'WABISTAY_PARALLEL_PREAMBLE', 'WABISTAY_PARALLEL_SENDS', 'WABISTAY_PAY_ASSIGNS_ROOM', 'WABISTAY_READ_CACHE', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD', 'WABISTAY_STAY_MENU', 'WABISTAY_TIMING_LOG', 'WABISTAY_WA_PREWARM'];
 
 function wabistayFlagState() {
   const names = new Set([...WABISTAY_KNOWN_FLAGS, ...Object.keys(process.env).filter(k => k.startsWith('WABISTAY_'))]);
@@ -2144,8 +2145,28 @@ async function supersedeOlderBookings(ctx, fresh) {
 // checking the guest out. An automatic check-in is recognised from the booking's own timestamps: the
 // gate tap came first, payment after it, and the check-in within two minutes of the payment.
 function payAssignsRoomEnabled() {
-  return /^(1|true)$/i.test(String(process.env.WABISTAY_PAY_ASSIGNS_ROOM || '').trim());
+  return /^(1|true)$/i.test(String(process.env.WABISTAY_PAY_ASSIGNS_ROOM || '').trim()) || gatePayFlowEnabled();
 }
+// WABISTAY_GATE_PAY_FLOW (1 or true; off by default): the at-the-gate-before-paying journey, end to end.
+//   (a) the unpaid "I'm at the gate" reply says reception knows, to come to the office, and that the room follows;
+//   (b) reception recording payment for a guest who has pressed 1 checks them in and sends the Welcome (it turns
+//       on the WABISTAY_PAY_ASSIGNS_ROOM behaviour above; nothing is sent when the guest's 24 h window is closed
+//       or they have not pressed 1 yet), and a redelivery or a concurrent duplicate cannot send it twice;
+//   (c) free text from a guest who has pressed 1 gets a short "reception knows you're here" reply, not the menu;
+//   (d) choosing Card says "When you arrive, reply 1 so we can open the gate."
+// Off: all of the above is exactly as before.
+function gatePayFlowEnabled() {
+  return /^(1|true)$/i.test(String(process.env.WABISTAY_GATE_PAY_FLOW || '').trim());
+}
+// " No reply in 5 minutes? Call 073 026 0871." from the property's own Guest Redirect Phone; nothing when it has none.
+function gatePayCallLine(property) {
+  const raw = String((property && property.fields && property.fields['Guest Redirect Phone']) || '').replace(/[^\d+]/g, '');
+  if (!raw) return '';
+  const shown = /^0\d{9}$/.test(raw) ? `${raw.slice(0, 3)} ${raw.slice(3, 6)} ${raw.slice(6)}` : raw;
+  return ` No reply in 5 minutes? Call ${shown}.`;
+}
+// A booking whose guest has pressed "I'm at the gate" and is still waiting for the office.
+const _autoCheckInInFlight = new Set();
 const PAY_ASSIGNS_GUARD_MS = 10 * 60 * 1000;
 const PAY_ASSIGNS_CHECKIN_AFTER_PAID_MS = 2 * 60 * 1000;
 const PAY_ASSIGNS_TAP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
@@ -3844,6 +3865,19 @@ const actions = {
   // opts.reportTo: who gets the one-line outcome (default: whoever recorded the payment); opts.requirePaid: DONE-triggered.
   // Returns true when the guest was checked in.
   async autoCheckInAfterPayment(ctx, booking, opts = {}) {
+    if (!gatePayFlowEnabled()) return actions.autoCheckInAfterPaymentRun(ctx, booking, opts);
+    if (_autoCheckInInFlight.has(booking.id)) {
+      logToAxiom('info', 'pay_assigns_room_skipped', { bookingId: booking.id, reason: 'already_in_progress' });
+      return false;
+    }
+    _autoCheckInInFlight.add(booking.id);
+    try {
+      return await actions.autoCheckInAfterPaymentRun(ctx, booking, opts);
+    } finally {
+      _autoCheckInInFlight.delete(booking.id);
+    }
+  },
+  async autoCheckInAfterPaymentRun(ctx, booking, opts = {}) {
     const reportTo = opts.reportTo === undefined ? ctx.phone : opts.reportTo;
     const tapAge = Date.now() - Date.parse(booking.fields['Gate Tap At']);
     const guestId = (booking.fields['Guest'] || [])[0];
@@ -3851,9 +3885,19 @@ const actions = {
     const skip = async (reason) => {
       logToAxiom('info', 'pay_assigns_room_skipped', { bookingId: booking.id, reason });
     };
-    if (!(tapAge >= 0 && tapAge <= PAY_ASSIGNS_TAP_MAX_AGE_MS)) return skip('gate_tap_too_old');
+    if (!gatePayFlowEnabled() && !(tapAge >= 0 && tapAge <= PAY_ASSIGNS_TAP_MAX_AGE_MS)) return skip('gate_tap_too_old');
     if (opts.requirePaid && booking.fields['Payment Status'] !== 'Paid') return skip('not_paid');
     if (!guest || guest.fields['Session State'] !== 'CONFIRMED') return skip('guest_not_waiting');
+    if (gatePayFlowEnabled()) {
+      // The Welcome is a free-form message: only inside the 24 h window opened by the guest's last message (their gate
+      // tap is one). Closed window: send nothing and say so; the guest's next message runs the normal flow.
+      const lastInbound = Math.max(Date.parse(guest.fields['Last Inbound At'] || '') || 0, Date.parse(booking.fields['Gate Tap At'] || '') || 0);
+      if (!(tapAge >= 0) || !(Date.now() - lastInbound < PAY_ASSIGNS_TAP_MAX_AGE_MS)) return skip('window_closed');
+      // One automatic check-in per booking at a time, and only while the booking is still waiting (fresh read):
+      // a Meta redelivery of the payment, or two copies arriving together, cannot send the Welcome twice.
+      const fresh = (await airtableGet('WS_Bookings', `RECORD_ID() = '${booking.id}'`))[0];
+      if (!fresh || fresh.fields['Status'] !== 'Confirmed' || fresh.fields['Checked In At']) return skip('already_checked_in');
+    }
     const open = await airtableGetBookingsByGuestId(guest.id, 'Confirmed');
     if (open.length !== 1 || open[0].id !== booking.id) return skip('not_the_guests_only_confirmed_booking');
     const guestPhone = formatPhone(String(guest.fields['Phone Number'] || ''));
@@ -5240,7 +5284,7 @@ const actions = {
         });
       }
       if (!(await advanceGuestState(ctx, { 'Session State': nextState, 'Last Inbound At': new Date().toISOString() }, { bookingId: booking.id }))) return;
-      await sendWhatsApp(ctx.phone, msg('paymentCardChosen'));
+      await sendWhatsApp(ctx.phone, msg(gatePayFlowEnabled() ? 'paymentCardChosenGate' : 'paymentCardChosen'));
       await sendWhatsApp(ctx.phone, isHourly ? confirmedMenuMessage(ctx.property, guestName) : msg('askEta'));
       return;
     }
@@ -5425,9 +5469,11 @@ const actions = {
       // No writes, no state change (CEO requirement): the guest can send
       // "I'm at the gate" again after paying, and this same check re-runs
       // fresh — nothing about this turn is remembered or needs undoing.
-      await sendWhatsApp(ctx.phone, msg(payAssignsRoomEnabled() ? 'paymentNotYetConfirmedAuto' : 'paymentNotYetConfirmed', {
-        guestName: ctx.guest.fields['Guest Name']
-      }));
+      await sendWhatsApp(ctx.phone, gatePayFlowEnabled()
+        ? msg('paymentNotYetConfirmedGate', { guestName: ctx.guest.fields['Guest Name'], callLine: gatePayCallLine(ctx.property) })
+        : msg(payAssignsRoomEnabled() ? 'paymentNotYetConfirmedAuto' : 'paymentNotYetConfirmed', {
+          guestName: ctx.guest.fields['Guest Name']
+        }));
       // Tell the office the guest is on their way to it. After the guest's reply
       // and fenced off, so an alert problem can never cost the guest their answer.
       if (gateAlertUnpaidEnabled()) {
@@ -5698,6 +5744,16 @@ const actions = {
     if (hourlyExpiryEnabled() && (await airtableGetBookingsByGuestId(ctx.guest.id, 'Confirmed')).length === 0 && await findHourlyExpiredBooking(ctx.guest.id)) {
       await sendHourlyExpiredReply(ctx);
       return;
+    }
+    // WABISTAY_GATE_PAY_FLOW: a guest who has already pressed "I'm at the gate" is waiting for the office: tell them
+    // so, briefly, instead of offering the menu (whose option 1 is the button they already pressed).
+    if (gatePayFlowEnabled()) {
+      const waiting = (await airtableGetBookingsByGuestId(ctx.guest.id, 'Confirmed')).some(b => b.fields['Gate Tap At']);
+      if (waiting) {
+        logToAxiom('info', 'gate_waiting_reply', { phone: ctx.phone, guestId: ctx.guest.id });
+        await sendWhatsApp(ctx.phone, msg('gateWaitingReply', { guestName: ctx.guest.fields['Guest Name'], callLine: gatePayCallLine(ctx.property) }));
+        return;
+      }
     }
     await sendWhatsApp(ctx.phone, confirmedMenuMessage(ctx.property, ctx.guest.fields['Guest Name']));
   },
@@ -9476,6 +9532,7 @@ module.exports.aggregateWeeklyRecap = aggregateWeeklyRecap;
 module.exports.weeklyRecapTemplateParams = weeklyRecapTemplateParams;
 module.exports.WEEKLY_RECAP_TEMPLATE = WEEKLY_RECAP_TEMPLATE;
 module.exports.jsonField = jsonField;
+module.exports.actions = actions;
 module.exports.setAirtableRetryDelays = arr => { AIRTABLE_RETRY_DELAYS_MS = arr; };
 module.exports.AirtableUnavailableError = AirtableUnavailableError;
 module.exports.resetReadCache = resetReadCache;
