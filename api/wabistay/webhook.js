@@ -545,8 +545,11 @@ const WABISTAY_KNOWN_FLAGS = [
   'WABISTAY_CLEANER_GATE_TEMPLATE',
   'WABISTAY_CHECKOUT_BUTTON',
   'WABISTAY_ENQUIRY_TRACKING',
+  'WABISTAY_GATE_ACK',
+  'WABISTAY_GATE_ACK_TEMPLATE',
   'WABISTAY_GATE_ALERT_UNPAID',
   'WABISTAY_GATE_ARRIVAL_TEMPLATE',
+  'WABISTAY_GATE_ESCALATION_TEMPLATE',
   'WABISTAY_GATE_REQUIRES_BOOKING',
   'WABISTAY_GATE_ROOM_CHECK',
   'WABISTAY_GUEST_ADDRESS',
@@ -584,7 +587,7 @@ const WABISTAY_KNOWN_FLAGS = [
 
 // Switches the code only treats as on for 1/true; for these, 'on' means that,
 // not merely 'set'.
-const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_ACTIVITY_THROTTLE', 'WABISTAY_AFTER_HOURS', 'WABISTAY_AIRTABLE_RETRY', 'WABISTAY_CHECKOUT_BUTTON', 'WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_GATE_REQUIRES_BOOKING', 'WABISTAY_GATE_ROOM_CHECK', 'WABISTAY_GUEST_ADDRESS', 'WABISTAY_HIDE_ONE_HOUR', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_HOURLY_EXPIRY', 'WABISTAY_IGNORE_REACTIONS', 'WABISTAY_INTERACTIVE', 'WABISTAY_LEAN_COPY', 'WABISTAY_MESSAGE_DEDUPE', 'WABISTAY_NONTEXT_REPLY', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_ONE_OPEN_BOOKING', 'WABISTAY_PAID_BY_BOOKING_REF', 'WABISTAY_PAID_ROOM_CONFIRMED', 'WABISTAY_PARALLEL_PREAMBLE', 'WABISTAY_PARALLEL_SENDS', 'WABISTAY_PAY_ASSIGNS_ROOM', 'WABISTAY_READ_CACHE', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD', 'WABISTAY_STAY_MENU', 'WABISTAY_TIMING_LOG', 'WABISTAY_WA_PREWARM'];
+const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_ACTIVITY_THROTTLE', 'WABISTAY_AFTER_HOURS', 'WABISTAY_AIRTABLE_RETRY', 'WABISTAY_CHECKOUT_BUTTON', 'WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ACK', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_GATE_REQUIRES_BOOKING', 'WABISTAY_GATE_ROOM_CHECK', 'WABISTAY_GUEST_ADDRESS', 'WABISTAY_HIDE_ONE_HOUR', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_HOURLY_EXPIRY', 'WABISTAY_IGNORE_REACTIONS', 'WABISTAY_INTERACTIVE', 'WABISTAY_LEAN_COPY', 'WABISTAY_MESSAGE_DEDUPE', 'WABISTAY_NONTEXT_REPLY', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_ONE_OPEN_BOOKING', 'WABISTAY_PAID_BY_BOOKING_REF', 'WABISTAY_PAID_ROOM_CONFIRMED', 'WABISTAY_PARALLEL_PREAMBLE', 'WABISTAY_PARALLEL_SENDS', 'WABISTAY_PAY_ASSIGNS_ROOM', 'WABISTAY_READ_CACHE', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD', 'WABISTAY_STAY_MENU', 'WABISTAY_TIMING_LOG', 'WABISTAY_WA_PREWARM'];
 
 function wabistayFlagState() {
   const names = new Set([...WABISTAY_KNOWN_FLAGS, ...Object.keys(process.env).filter(k => k.startsWith('WABISTAY_'))]);
@@ -876,7 +879,7 @@ async function notifyReceptionOfPayment({ propertyId, bookingId, bookingRef, roo
 // moment a guest arrives, so free-form would 200 and vanish outside the 24h
 // window. Params are positional and fixed by the approved template:
 // {{1}} property, {{2}} guest, {{3}} room, {{4}} room status, {{5}} guest phone.
-async function notifyReceptionOfArrival({ propertyId, propertyName, guestName, roomName, roomStatus, guestPhone }) {
+async function notifyReceptionOfArrival({ propertyId, propertyName, guestName, roomName, roomStatus, guestPhone }, opts = {}) {
   const correlation = { site: 'gate_arrival_reception', propertyId, guestPhone };
   const seats = await activeReceptionRolesForProperty(propertyId);
 
@@ -887,7 +890,9 @@ async function notifyReceptionOfArrival({ propertyId, propertyName, guestName, r
     return { sent: 0 };
   }
 
-  const templateName = receptionGateArrivalTemplate();
+  // WABISTAY_GATE_ACK: the template whose fixed body asks for a YES (same five variables), when configured.
+  const askTemplate = opts.ack && gateAckEnabled() ? gateAckTemplate() : null;
+  const templateName = askTemplate || receptionGateArrivalTemplate();
   const params = [propertyName, guestName, roomName, roomStatus, guestPhone];
   let sent = 0;
 
@@ -912,7 +917,63 @@ async function notifyReceptionOfArrival({ propertyId, propertyName, guestName, r
       sent++;
     }
   }
-  return { sent };
+  return { sent, ask: !!askTemplate && sent > 0 };
+}
+
+// ─── GATE ACK ESCALATION (WABISTAY_GATE_ACK) ───────────────────────────────────
+// A gate alert asks the office to reply YES. If nobody does within the grace period the alert is escalated once,
+// up the On Duty / Backup / Manager chain. Off (unset): none of this runs and no alert changes.
+//   · The ask: the free-form copy to the Notify Phone ends "Reply YES once you have seen this."; the template alert to the
+//     Reception seats uses WABISTAY_GATE_ACK_TEMPLATE, whose FIXED body carries the same sentence (it has the same five
+//     variables as the normal gate-arrival template; the ask is not a variable). Without that template the seats get the
+//     normal alert, which does not ask, so an alert is only tracked when an ask-bearing message was actually delivered.
+//   · Tracking: WS_Bookings 'Gate Notify Sent At' (stamped when an ask-bearing alert is delivered, which also clears
+//     'Gate Notify Acked At' and 'Gate Escalated At': a new alert is a new cycle), 'Gate Notify Acked At', 'Gate Escalated At'.
+//   · A YES (or Y) from a Notify Phone / Reception / On Duty / Backup / Manager number of the property acknowledges EVERY
+//     alert of that property still waiting for one (including ones already escalated) and the reply lists who was cleared.
+//     It is never taken from anyone else, and never when the sender's own guest step has "yes" as a valid answer.
+//   · Grace period: the property's 'Escalation Timeout Minutes'; if that is blank or invalid, GATE_ACK_GRACE_MS (ms);
+//     if that is unset or invalid, ESCALATION_TIMEOUT_DEFAULT_MINUTES (15).
+function gateAckEnabled() {
+  return /^(1|true)$/i.test(String(process.env.WABISTAY_GATE_ACK || '').trim());
+}
+function gateAckTemplate() {
+  return String(process.env.WABISTAY_GATE_ACK_TEMPLATE || '').trim() || null;
+}
+function gateEscalationTemplate() {
+  return String(process.env.WABISTAY_GATE_ESCALATION_TEMPLATE || '').trim() || null;
+}
+function gateAckGraceMs(property) {
+  const raw = property && property.fields && property.fields['Escalation Timeout Minutes'];
+  const minutes = Number(raw);
+  if (raw !== undefined && raw !== null && raw !== '' && Number.isFinite(minutes) && minutes > 0) return minutes * 60 * 1000;
+  const envMs = Number(process.env.GATE_ACK_GRACE_MS);
+  if (Number.isFinite(envMs) && envMs > 0) return envMs;
+  return escalationTimeoutMs(property);
+}
+const GATE_ACK_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+// Starts (or restarts) the ask cycle for a booking: the alert that carries the ask has been delivered.
+async function markGateAskSent(booking, propertyId) {
+  if (!booking) return;
+  try {
+    const fields = { 'Gate Notify Sent At': new Date().toISOString(), 'Gate Notify Acked At': null, 'Gate Escalated At': null };
+    if (!(booking.fields['WS_Property'] || []).length && propertyId) fields['WS_Property'] = [propertyId];
+    const write = await airtableUpdate('WS_Bookings', booking.id, fields);
+    if (write && write.error) {
+      logToAxiom('error', 'gate_ack_stamp_write_failed', { bookingId: booking.id, error: JSON.stringify(write.error) });
+    }
+  } catch (err) {
+    logToAxiom('error', 'gate_ack_stamp_write_failed', { bookingId: booking.id, message: err.message });
+  }
+}
+// Alerts of one property that asked for a YES and have not had one (escalated ones included), newest 24 h only.
+async function pendingGateAcks(propertyId, nowMs = Date.now()) {
+  const rows = await airtableGet('WS_Bookings', orFormula('Status', ['Confirmed', 'Checked In']));
+  return rows.filter(b => {
+    const sent = Date.parse(b.fields['Gate Notify Sent At'] || '');
+    return Number.isFinite(sent) && nowMs - sent < GATE_ACK_MAX_AGE_MS && !b.fields['Gate Notify Acked At'] &&
+      bookingPropertyId(b, null) === propertyId;
+  });
 }
 
 // Unpaid gate arrival (Doc 1b follow-up, 02 Oct 2026). Until now a guest who
@@ -945,14 +1006,16 @@ function gateRoomCheckEnabled() {
 async function alertRoomNotReadyAtGate(ctx, booking, room, notifyPhone) {
   const roomName = room.fields['Room Name'];
   const roomStatus = room.fields['Status'] || 'Unknown';
-  await notifyReceptionOfArrival({
+  let askDelivered = false;
+  const reception = await notifyReceptionOfArrival({
     propertyId: ctx.property.id,
     propertyName: ctx.property.fields['Property Name'],
     guestName: ctx.guest.fields['Guest Name'],
     roomName,
     roomStatus,
     guestPhone: ctx.phone
-  });
+  }, { ack: true });
+  if (reception && reception.ask) askDelivered = true;
   if (notifyPhone) {
     logOwnerSendWindow('gate_room_not_ready', notifyPhone, ctx.phone);
     const ownerSend = await sendWhatsApp(notifyPhone, msg('gateNotifyRoomNotReady', {
@@ -961,13 +1024,16 @@ async function alertRoomNotReadyAtGate(ctx, booking, room, notifyPhone) {
       ref: (booking && (booking.fields['Booking Ref'] || `WS-${booking.id.slice(-6).toUpperCase()}`)) || 'no booking',
       roomName,
       roomStatus
-    }));
+    }) + (gateAckEnabled() ? msg('gateAckAsk') : ''));
     if (ownerSend && ownerSend.error) {
       logToAxiom('error', 'gate_room_not_ready_owner_send_failed', {
         bookingId: booking ? booking.id : null, error: JSON.stringify(ownerSend.error)
       });
+    } else if (gateAckEnabled()) {
+      askDelivered = true;
     }
   }
+  if (askDelivered && booking) await markGateAskSent(booking, ctx.property.id);
 }
 
 async function alertUnpaidGateArrival(ctx, booking, heldRoomId, notifyPhone) {
@@ -990,6 +1056,7 @@ async function alertUnpaidGateArrival(ctx, booking, heldRoomId, notifyPhone) {
     : 'payment not confirmed';
 
   let anySent = false;
+  let askDelivered = false;
 
   const reception = await notifyReceptionOfArrival({
     propertyId: ctx.property.id,
@@ -998,8 +1065,9 @@ async function alertUnpaidGateArrival(ctx, booking, heldRoomId, notifyPhone) {
     roomName,
     roomStatus,
     guestPhone: ctx.phone
-  });
+  }, { ack: true });
   if (reception && reception.sent > 0) anySent = true;
+  if (reception && reception.ask) askDelivered = true;
 
   if (notifyPhone) {
     logOwnerSendWindow('gate_arrival_unpaid', notifyPhone, ctx.phone);
@@ -1011,13 +1079,14 @@ async function alertUnpaidGateArrival(ctx, booking, heldRoomId, notifyPhone) {
       ref: booking.fields['Booking Ref'] || `WS-${booking.id.slice(-6).toUpperCase()}`,
       amountDue: booking.fields['Amount Due'],
       roomName
-    }));
+    }) + (gateAckEnabled() ? msg('gateAckAsk') : ''));
     if (ownerSend && ownerSend.error) {
       logToAxiom('error', 'gate_alert_unpaid_owner_send_failed', {
         bookingId: booking.id, error: JSON.stringify(ownerSend.error)
       });
     } else {
       anySent = true;
+      if (gateAckEnabled()) askDelivered = true;
     }
   }
 
@@ -1032,6 +1101,7 @@ async function alertUnpaidGateArrival(ctx, booking, heldRoomId, notifyPhone) {
     }
     logToAxiom('info', 'gate_alert_unpaid_sent', { phone: ctx.phone, bookingId: booking.id });
   }
+  if (askDelivered) await markGateAskSent(booking, ctx.property.id);
 }
 
 // Rands, two decimals, no currency symbol — the symbol belongs to the template
@@ -3103,6 +3173,27 @@ function guestStateExpectsInput(guest, text) {
 }
 
 const guards = {
+  // WABISTAY_GATE_ACK: a YES from the office. Registered in states.json's global list. It must NEVER take a guest's "yes":
+  // it answers false (and the message goes on to the normal flow) unless (1) the flag is on, (2) the sender's own guest step
+  // does not treat the word as an answer, (3) the sender is staff of THIS property (Notify Phone, or an active Reception /
+  // On Duty / Backup / Manager seat) and (4) at least one gate alert of this property is still waiting for a YES.
+  async senderConfirmingGateAck(ctx) {
+    if (!gateAckEnabled()) return false;
+    if (guestStateExpectsInput(ctx.guest, ctx.text)) return false;
+    const notifyRaw = ctx.property && ctx.property.fields && ctx.property.fields['Notify Phone'];
+    let staff = !!notifyRaw && formatPhone(String(notifyRaw)) === ctx.phone;
+    if (!staff) {
+      const roles = await cachedGet('WS_Roles', `{Active} = TRUE()`, 'request');
+      const seatTypes = [...PAID_ROLE_TYPES, ...ESCALATION_TIER_ROLE_TYPES];
+      staff = roles.some(r => seatTypes.includes(r.fields['Role Type']) && (r.fields['Property'] || []).includes(ctx.property.id) &&
+        r.fields['Current Phone'] && formatPhone(String(r.fields['Current Phone'])) === ctx.phone);
+    }
+    if (!staff) return false;
+    const pending = await pendingGateAcks(ctx.property.id);
+    if (pending.length === 0) return false;
+    ctx.gatePending = pending;
+    return true;
+  },
   // B7 (WALKIN). Registered FIRST in states.json's global list, ahead of the
   // cleaner-naming-room global: that guard matches \b<number>\b anywhere in the
   // message, so `WALKIN ROOM 2 2HRS` from a phone that is also a cleaner would
@@ -3501,6 +3592,24 @@ async function resolveRoomClean(ctx, room) {
 // The Session State it writes comes from the transition's `next` in states.json.
 
 const actions = {
+  // WABISTAY_GATE_ACK: acknowledge every waiting alert of the property and say which ones were cleared.
+  async gateAckConfirm(ctx) {
+    const now = new Date().toISOString();
+    const cleared = [];
+    for (const b of ctx.gatePending || []) {
+      const write = await airtableUpdate('WS_Bookings', b.id, { 'Gate Notify Acked At': now });
+      if (write && write.error) {
+        logToAxiom('error', 'gate_ack_write_failed', { bookingId: b.id, phone: ctx.phone, error: JSON.stringify(write.error) });
+        continue;
+      }
+      const guestId = (b.fields['Guest'] || [])[0];
+      const guest = guestId ? (await airtableGet('WS_Guests', `RECORD_ID() = '${guestId}'`))[0] || null : null;
+      cleared.push(`${(guest && guest.fields['Guest Name']) || 'a guest'} (${b.fields['Booking Ref'] || b.id})`);
+      logToAxiom('info', 'gate_ack_confirmed', { bookingId: b.id, phone: ctx.phone });
+    }
+    if (cleared.length > 0) await sendWhatsApp(ctx.phone, msg('gateAckThanks', { list: cleared.join(', ') }));
+  },
+
   // B7 (WALKIN): staff-initiated booking, no guest thread. Reached only through
   // senderIsAuthorizedWalkin, so by the time this runs the sender IS authorised
   // and every reply below is safe to send — an outsider never gets here.
@@ -5590,6 +5699,7 @@ const actions = {
     logToAxiom('info', 'state_transition', { phone: ctx.phone, guestId: ctx.guest.id, from: 'CONFIRMED', to: ctx.next, assignedRoom: assignedRoomName || null });
 
     // Step 6: notify party
+    let gateAskDelivered = false;
     if (notifyPhone) {
       logOwnerSendWindow('gate_arrival', notifyPhone, ctx.phone); // B17 instrumentation
       // Rule 30 step 2, slice 2: checked but non-fatal — courtesy notification.
@@ -5602,24 +5712,28 @@ const actions = {
           : msg('gateNoRoomInfo'),
         roomStatus: assignedRoomStatus,
         phone: ctx.phone
-      }));
+      }) + (gateAckEnabled() ? msg('gateAckAsk') : ''));
       if (ownerSend && ownerSend.error) {
         logToAxiom('error', 'gate_arrival_notify_failed', {
           bookingId: booking ? booking.id : null, error: JSON.stringify(ownerSend.error)
         });
+      } else if (gateAckEnabled()) {
+        gateAskDelivered = true;
       }
     }
 
     // Step 6a: Reception seats, by template. Outside the notifyPhone branch on
     // purpose — a property with no Notify Phone still has Reception to tell.
-    await notifyReceptionOfArrival({
+    const receptionResult = await notifyReceptionOfArrival({
       propertyId: ctx.property.id,
       propertyName: ctx.property.fields['Property Name'],
       guestName: ctx.guest.fields['Guest Name'],
       roomName: assignedRoomName || 'an unassigned room',
       roomStatus: assignedRoomStatus,
       guestPhone: ctx.phone
-    });
+    }, { ack: true });
+    if (receptionResult && receptionResult.ask) gateAskDelivered = true;
+    if (gateAskDelivered && booking) await markGateAskSent(booking, ctx.property.id);
 
     // Step 6b: notify the property's cleaner. IN ADDITION to the owner send
     // above, never instead of it — the owner still gets `gateNotify` unchanged.
@@ -6468,6 +6582,77 @@ async function runUnattendedGateSweep(now = new Date(), opts = {}) {
   return summary;
 }
 
+// WABISTAY_GATE_ACK sweep. One read of the open (Confirmed / Checked In) bookings per run; nothing else is read or written
+// until an alert is actually overdue. An overdue alert (sent more than the grace period ago, never acknowledged, not
+// escalated yet) is sent once to the first seat of the escalation chain; 'Gate Escalated At' is stamped only after the send
+// landed, so a failed send is retried on the next tick, and the booking is re-read first so a YES that just arrived wins.
+async function runGateAckEscalation(now = new Date(), opts = {}) {
+  const { deadline = Infinity } = opts;
+  const summary = { gateAckEscalated: 0 };
+  if (!gateAckEnabled()) return summary;
+  const nowMs = now.getTime();
+  const open = await airtableGet('WS_Bookings', orFormula('Status', ['Confirmed', 'Checked In']));
+  const waiting = open.filter(b => b.fields['Gate Notify Sent At'] && !b.fields['Gate Notify Acked At'] && !b.fields['Gate Escalated At']);
+  if (waiting.length === 0) return summary;
+  const properties = new Map();
+  for (const candidate of waiting) {
+    if (Date.now() > deadline) {
+      summary.truncated = true;
+      logToAxiom('warn', 'cron_time_budget_hit', { cron: 'auto_checkout', stage: 'gate_ack', leftFrom: candidate.id });
+      break;
+    }
+    const propertyId = bookingPropertyId(candidate, null);
+    if (!propertyId) continue;
+    if (!properties.has(propertyId)) properties.set(propertyId, (await airtableGet('WS_Properties', `RECORD_ID() = '${propertyId}'`))[0] || null);
+    const property = properties.get(propertyId);
+    if (nowMs < Date.parse(candidate.fields['Gate Notify Sent At']) + gateAckGraceMs(property)) continue;
+    const fresh = (await airtableGet('WS_Bookings', `RECORD_ID() = '${candidate.id}'`))[0] || null;
+    if (!fresh || fresh.fields['Gate Notify Acked At'] || fresh.fields['Gate Escalated At']) continue;
+    const guestId = (fresh.fields['Guest'] || [])[0];
+    const guest = guestId ? (await airtableGet('WS_Guests', `RECORD_ID() = '${guestId}'`))[0] || null : null;
+    const alert = {
+      guestName: (guest && guest.fields['Guest Name']) || 'A guest',
+      guestPhone: guest ? guest.fields['Phone Number'] : 'unknown',
+      propertyName: (property && property.fields['Property Name']) || 'the property',
+      minutes: Math.round((nowMs - Date.parse(fresh.fields['Gate Notify Sent At'])) / 60000)
+    };
+    const sent = await sendGateEscalation(propertyId, property, fresh, alert);
+    if (!sent) continue;
+    const stamp = await airtableUpdate('WS_Bookings', fresh.id, { 'Gate Escalated At': now.toISOString() });
+    if (stamp && stamp.error) {
+      logToAxiom('error', 'gate_escalated_stamp_write_failed', { bookingId: fresh.id, error: JSON.stringify(stamp.error) });
+    }
+    logToAxiom('warn', 'gate_ack_escalated', { bookingId: fresh.id, propertyId, minutes: alert.minutes });
+    summary.gateAckEscalated++;
+  }
+  return summary;
+}
+// First seat of the escalation chain, by template when WABISTAY_GATE_ESCALATION_TEMPLATE is configured (variables:
+// property, guest name, room and status, minutes waiting, guest phone; fixed body asks for a YES), else free-form
+// (24 h window). No seat at all: the ops alert number is told instead. Returns true when something was delivered.
+async function sendGateEscalation(propertyId, property, booking, alert) {
+  const chain = await resolveEscalationChain(propertyId, property);
+  if (chain.length === 0) {
+    logToAxiom('error', 'gate_ack_escalation_no_recipient', { propertyId, bookingId: booking.id });
+    await alertShawn('gate_ack_escalation', 'no escalation contact for an unacknowledged gate alert', { propertyId, bookingId: booking.id, guest: alert.guestName });
+    return true;
+  }
+  const { tier, roleId, phone } = chain[0];
+  const to = formatPhone(phone);
+  const templateName = gateEscalationTemplate();
+  const roomInfo = booking.fields['Payment Status'] === 'Paid' ? 'paid, waiting' : 'payment not confirmed';
+  const result = templateName
+    ? await sendWhatsAppTemplate(to, templateName, [alert.propertyName, alert.guestName, roomInfo, String(alert.minutes), String(alert.guestPhone)],
+      { site: 'gate_ack_escalation', propertyId, tier }).catch(e => ({ ok: false, error: { message: e.message } }))
+    : await sendWhatsApp(to, msg('gateAckEscalationText', alert)).catch(e => ({ error: { message: e.message } }));
+  const failed = templateName ? !(result && result.ok) : !!(result && result.error);
+  if (failed) {
+    logToAxiom('error', 'gate_ack_escalation_send_failed', { propertyId, tier, roleId: roleId || null, error: JSON.stringify((result && result.error) || null) });
+    return false;
+  }
+  return true;
+}
+
 // Cron time budget (Doc 1b PR 5). Every function is cut at maxDuration and the
 // 5-minute auto-checkout was being cut at 10s (504) near the top of the hour. The
 // sweeps are idempotent, so the safe response to running long is to stop
@@ -6850,7 +7035,7 @@ async function autoCheckoutHandler(req, res) {
     // sweeps across properties rather than per property, so the count is the number
     // of properties in the base, read once (one extra call, included in the total).
     const propertyCountRef = { value: 0 };
-    const { summary, enquiry, holds, overdue, unattended, hourlyExpiry } = await withAirtableCallCount('auto_checkout', propertyCountRef, async () => {
+    const { summary, enquiry, holds, overdue, unattended, hourlyExpiry, gateAck } = await withAirtableCallCount('auto_checkout', propertyCountRef, async () => {
       propertyCountRef.value = (await airtableGet('WS_Properties', '')).length;
       const summary = await runAutoCheckout(new Date(), { deadline });
       // B19: reuse this cron for the enquiry-abandonment staleness sweep.
@@ -6861,17 +7046,19 @@ async function autoCheckoutHandler(req, res) {
       const overdue = await runOverdueAlerts(new Date(), { deadline });
       const unattended = await runUnattendedGateSweep(new Date(), { deadline });
       const hourlyExpiry = await runHourlyExpiry(new Date(), { deadline });
-      return { summary, enquiry, holds, overdue, unattended, hourlyExpiry };
+      const gateAck = await runGateAckEscalation(new Date(), { deadline });
+      return { summary, enquiry, holds, overdue, unattended, hourlyExpiry, gateAck };
     });
     logToAxiom('info', 'cron_duration', {
       cron: 'auto_checkout', ms: Date.now() - startedAt,
-      truncated: !!(summary.truncated || enquiry.truncated || holds.truncated || overdue.truncated || unattended.truncated || hourlyExpiry.truncated)
+      truncated: !!(summary.truncated || enquiry.truncated || holds.truncated || overdue.truncated || unattended.truncated || hourlyExpiry.truncated || gateAck.truncated)
     });
     res.status(200).json({
       ok: true, ...summary, ...enquiry,
       holdsReleased: holds.holdsReleased, overdueAlerts: overdue.overdueAlerts, unattendedGateArrivals: unattended.unattendedGateArrivals,
       ...(hourlyExpiry.hourlyExpired ? { hourlyExpired: hourlyExpiry.hourlyExpired } : {}),
-      ...(holds.truncated || overdue.truncated || unattended.truncated || hourlyExpiry.truncated ? { truncated: true } : {})
+      ...(gateAck.gateAckEscalated ? { gateAckEscalated: gateAck.gateAckEscalated } : {}),
+      ...(holds.truncated || overdue.truncated || unattended.truncated || hourlyExpiry.truncated || gateAck.truncated ? { truncated: true } : {})
     });
   } catch (err) {
     console.error('[AUTO-CHECKOUT FATAL]', err.message, err.stack);
@@ -9476,6 +9663,9 @@ module.exports.aggregateWeeklyRecap = aggregateWeeklyRecap;
 module.exports.weeklyRecapTemplateParams = weeklyRecapTemplateParams;
 module.exports.WEEKLY_RECAP_TEMPLATE = WEEKLY_RECAP_TEMPLATE;
 module.exports.jsonField = jsonField;
+module.exports.runGateAckEscalation = runGateAckEscalation;
+module.exports.gateAckGraceMs = gateAckGraceMs;
+module.exports.actions = actions;
 module.exports.setAirtableRetryDelays = arr => { AIRTABLE_RETRY_DELAYS_MS = arr; };
 module.exports.AirtableUnavailableError = AirtableUnavailableError;
 module.exports.resetReadCache = resetReadCache;
