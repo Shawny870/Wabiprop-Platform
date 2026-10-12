@@ -12,6 +12,7 @@
 // FIX LOG: see FIXLOG.md (F1–F14 from the WS1 build, referenced inline below).
 
 const STATES = require('../../states.json');
+const { AsyncLocalStorage } = require('node:async_hooks');
 
 const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID;
 const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY;
@@ -226,6 +227,57 @@ async function withAirtableCallCount(cronName, propertyCountRef, fn) {
   }
 }
 
+// ─── READ CACHE (WABISTAY_READ_CACHE) ───────────────────────────────────────────
+// Off (unset): cachedGet is a plain airtableGet, nothing is stored. On, two scopes, both opt-in per call site:
+//   · 'request' - the result is kept for the rest of ONE inbound message (AsyncLocalStorage, so concurrent
+//     messages on a warm instance never share it). Used only for room lists that have nothing to do with
+//     availability timing: findAvailableRoom's WS_Rooms read, and the greeting's two 'Available' reads (one
+//     fetch, the unassigned-room diagnostic is filtered from it). WS_Bookings is NEVER cached: the second
+//     findAvailableRoom call (the P1a 'stillFree' re-check) exists to see a booking written in the last
+//     second, so it stays a fresh read.
+//   · 'ttl' - kept READ_CACHE_TTL_MS on this warm instance. Used for WS_Rates only: config that changes by hand,
+//     rarely. An edit made in Airtable shows up within the TTL. WS_Properties is deliberately NOT cached: it holds
+//     'Subscription Status' (the suspended-property block), the EFT bank details and the redirect/notify phones.
+// Any write to a table made by this instance drops that table's entries. A failed read is never cached (it is
+// re-run uncached so the old swallow-and-log behaviour is unchanged). Callers get a copy, never the stored one.
+const READ_CACHE_TTL_MS = 30 * 1000;
+const _requestMemo = new AsyncLocalStorage();
+const _ttlCache = new Map(); // key -> { at, records }
+function readCacheEnabled() {
+  return /^(1|true)$/i.test(String(process.env.WABISTAY_READ_CACHE || '').trim());
+}
+function invalidateReadCache(table) {
+  const prefix = table + '|';
+  for (const k of _ttlCache.keys()) if (k.startsWith(prefix)) _ttlCache.delete(k);
+  const memo = _requestMemo.getStore();
+  if (memo) for (const k of memo.keys()) if (k.startsWith(prefix)) memo.delete(k);
+}
+function resetReadCache() { _ttlCache.clear(); }
+async function cachedGet(table, filterFormula, scope) {
+  if (!readCacheEnabled()) return airtableGet(table, filterFormula);
+  const key = table + '|' + filterFormula;
+  if (scope === 'ttl') {
+    const hit = _ttlCache.get(key);
+    if (hit && Date.now() - hit.at < READ_CACHE_TTL_MS) return structuredClone(hit.records);
+  } else {
+    const memo = _requestMemo.getStore();
+    if (memo && memo.has(key)) return structuredClone(await memo.get(key));
+    if (memo) {
+      const p = airtableGet(table, filterFormula, { throwOnError: true });
+      memo.set(key, p);
+      try { return structuredClone(await p); } catch (_) { memo.delete(key); return airtableGet(table, filterFormula); }
+    }
+    return airtableGet(table, filterFormula);
+  }
+  try {
+    const records = await airtableGet(table, filterFormula, { throwOnError: true });
+    _ttlCache.set(key, { at: Date.now(), records: structuredClone(records) });
+    return records;
+  } catch (_) {
+    return airtableGet(table, filterFormula);
+  }
+}
+
 async function airtableGet(table, filterFormula, opts = {}) {
   _countAirtableCall('get');
   const { throwOnError = false } = opts;
@@ -275,6 +327,7 @@ async function airtableCreate(table, fields) {
   });
   console.log(`[Airtable CREATE STATUS] ${table} | HTTP ${res.status}`);
   const data = await res.json();
+  invalidateReadCache(table);
   if (data.error) {
     console.error(`[Airtable CREATE ERROR] ${table}:`, JSON.stringify(data.error));
     logToAxiom('error', 'airtable_create_error', { table, status: res.status, error: JSON.stringify(data.error) });
@@ -303,6 +356,7 @@ async function airtableUpdate(table, recordId, fields) {
   });
   console.log(`[Airtable UPDATE STATUS] ${table} | HTTP ${res.status}`);
   const data = await res.json();
+  invalidateReadCache(table);
   if (data.error) {
     console.error(`[Airtable UPDATE ERROR] ${table}:`, JSON.stringify(data.error));
     logToAxiom('error', 'airtable_update_error', { table, recordId, status: res.status, error: JSON.stringify(data.error) });
@@ -417,6 +471,7 @@ const WABISTAY_KNOWN_FLAGS = [
   'WABISTAY_PAID_BY_BOOKING_REF',
   'WABISTAY_PAID_ROOM_CONFIRMED',
   'WABISTAY_PAY_ASSIGNS_ROOM',
+  'WABISTAY_READ_CACHE',
   'WABISTAY_OWNER_SUMMARY_TEMPLATE',
   'WABISTAY_RECEPTION_PAYMENT_TEMPLATE',
   'WABISTAY_ROOM_ORDER',
@@ -427,7 +482,7 @@ const WABISTAY_KNOWN_FLAGS = [
 
 // Switches the code only treats as on for 1/true; for these, 'on' means that,
 // not merely 'set'.
-const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_ACTIVITY_THROTTLE', 'WABISTAY_AFTER_HOURS', 'WABISTAY_CHECKOUT_BUTTON', 'WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_GATE_REQUIRES_BOOKING', 'WABISTAY_GATE_ROOM_CHECK', 'WABISTAY_GUEST_ADDRESS', 'WABISTAY_HIDE_ONE_HOUR', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_HOURLY_EXPIRY', 'WABISTAY_IGNORE_REACTIONS', 'WABISTAY_INTERACTIVE', 'WABISTAY_LEAN_COPY', 'WABISTAY_MESSAGE_DEDUPE', 'WABISTAY_NONTEXT_REPLY', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_ONE_OPEN_BOOKING', 'WABISTAY_PAID_BY_BOOKING_REF', 'WABISTAY_PAID_ROOM_CONFIRMED', 'WABISTAY_PAY_ASSIGNS_ROOM', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD', 'WABISTAY_STAY_MENU'];
+const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_ACTIVITY_THROTTLE', 'WABISTAY_AFTER_HOURS', 'WABISTAY_CHECKOUT_BUTTON', 'WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_GATE_REQUIRES_BOOKING', 'WABISTAY_GATE_ROOM_CHECK', 'WABISTAY_GUEST_ADDRESS', 'WABISTAY_HIDE_ONE_HOUR', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_HOURLY_EXPIRY', 'WABISTAY_IGNORE_REACTIONS', 'WABISTAY_INTERACTIVE', 'WABISTAY_LEAN_COPY', 'WABISTAY_MESSAGE_DEDUPE', 'WABISTAY_NONTEXT_REPLY', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_ONE_OPEN_BOOKING', 'WABISTAY_PAID_BY_BOOKING_REF', 'WABISTAY_PAID_ROOM_CONFIRMED', 'WABISTAY_PAY_ASSIGNS_ROOM', 'WABISTAY_READ_CACHE', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD', 'WABISTAY_STAY_MENU'];
 
 function wabistayFlagState() {
   const names = new Set([...WABISTAY_KNOWN_FLAGS, ...Object.keys(process.env).filter(k => k.startsWith('WABISTAY_'))]);
@@ -1465,6 +1520,8 @@ function msg(key, vars = {}) {
 // — standard equality match, not a linked-record lookup, so no FIND/ARRAYJOIN needed here.
 
 async function resolveProperty(phoneNumberId) {
+  // Never cached (WABISTAY_READ_CACHE): the property row carries 'Subscription Status' (the suspended-property block),
+  // the EFT bank details and the Notify/redirect phones, which must always be what Airtable holds right now.
   const properties = await airtableGet('WS_Properties', `{Phone Number ID} = '${phoneNumberId}'`);
   if (properties.length === 0) {
     logToAxiom('error', 'property_resolution_failed', { phone_number_id: phoneNumberId });
@@ -2507,7 +2564,7 @@ const WALKIN_ROLE_TYPES = ['Owner', 'Manager', 'Reception'];
 // and the table currently contains blank rows, which a formula match would have
 // to special-case anyway.
 async function activeWalkinRoleForPhone(phone) {
-  const roles = await airtableGet('WS_Roles', `{Active} = TRUE()`);
+  const roles = await cachedGet('WS_Roles', `{Active} = TRUE()`, 'request');
   return roles.find(r => {
     if (!WALKIN_ROLE_TYPES.includes(r.fields['Role Type'])) return false;
     const raw = r.fields['Current Phone'];
@@ -2524,7 +2581,7 @@ async function activeWalkinRoleForPhone(phone) {
 // deactivated seat is still found — the caller decides what "found but inactive"
 // means, rather than the query silently discarding the distinction.
 async function walkinRoleRecordForPhone(phone) {
-  const roles = await airtableGet('WS_Roles', orFormula('Role Type', WALKIN_ROLE_TYPES));
+  const roles = await cachedGet('WS_Roles', orFormula('Role Type', WALKIN_ROLE_TYPES), 'request');
   return roles.find(r => {
     const raw = r.fields['Current Phone'];
     if (!raw) return false;
@@ -2555,7 +2612,7 @@ const PAID_COMMAND_ROLE_TYPES = ['Reception', 'On Duty'];
 // generalisation of it: rule 26 — no refactor while adding a feature. The two
 // converge when B18 lands and owns seat resolution properly.
 async function activePaidRoleForPhone(phone) {
-  const roles = await airtableGet('WS_Roles', `{Active} = TRUE()`);
+  const roles = await cachedGet('WS_Roles', `{Active} = TRUE()`, 'request');
   return roles.find(r => {
     if (!PAID_COMMAND_ROLE_TYPES.includes(r.fields['Role Type'])) return false;
     const raw = r.fields['Current Phone'];
@@ -2569,7 +2626,7 @@ async function activePaidRoleForPhone(phone) {
 // matches linked-record fields on their display value, which is not id-safe.
 async function activeReceptionRolesForProperty(propertyId) {
   if (!propertyId) return [];
-  const roles = await airtableGet('WS_Roles', `{Active} = TRUE()`);
+  const roles = await cachedGet('WS_Roles', `{Active} = TRUE()`, 'request');
   return roles.filter(r =>
     PAID_ROLE_TYPES.includes(r.fields['Role Type']) &&
     (r.fields['Property'] || []).includes(propertyId) &&
@@ -2622,7 +2679,7 @@ const ESCALATION_TIER_ROLE_TYPES = ['On Duty', 'Backup', 'Manager'];
 // not id — not safe here either).
 async function activeEscalationRolesForProperty(propertyId) {
   if (!propertyId) return [];
-  const roles = await airtableGet('WS_Roles', `{Active} = TRUE()`);
+  const roles = await cachedGet('WS_Roles', `{Active} = TRUE()`, 'request');
   return roles.filter(r =>
     ESCALATION_TIER_ROLE_TYPES.includes(r.fields['Role Type']) &&
     (r.fields['Property'] || []).includes(propertyId) &&
@@ -2779,7 +2836,7 @@ function orFormula(field, values) {
 // function. Shared by the greeting's room count and the legacy no-date-range
 // gate-arrival fallback so the two can't drift apart again.
 async function getGuestVisibleAvailableRooms(propertyId) {
-  const allAvailableRooms = await airtableGet('WS_Rooms', `{Status} = 'Available'`);
+  const allAvailableRooms = await cachedGet('WS_Rooms', `{Status} = 'Available'`, 'request');
   return allAvailableRooms.filter(r => (r.fields['Property'] || []).includes(propertyId) && r.fields['Active'] === true);
 }
 
@@ -2854,7 +2911,7 @@ async function findAvailableRoom(propertyId, checkInIso, checkOutIso, opts = {})
   // wire — only `=== true` can tell a deliberately-enabled room from
   // everything else, matching the existing fail-closed posture this function
   // already uses for Maintenance (comment above BOOKABLE_ROOM_STATUSES).
-  const allRooms = await airtableGet('WS_Rooms', orFormula('Status', BOOKABLE_ROOM_STATUSES));
+  const allRooms = await cachedGet('WS_Rooms', orFormula('Status', BOOKABLE_ROOM_STATUSES), 'request');
   const rooms = allRooms.filter(r => (r.fields['Property'] || []).includes(propertyId) && r.fields['Active'] === true);
   if (rooms.length === 0) return null;
 
@@ -3032,7 +3089,7 @@ const guards = {
     const parsed = parseStartCleaningCommand(ctx.messageText);
     if (!parsed) return false;
 
-    const cleaners = await airtableGet('WS_Cleaners', `{Phone Number} = '${ctx.phone}'`);
+    const cleaners = await cachedGet('WS_Cleaners', `{Phone Number} = '${ctx.phone}'`, 'request');
     if (cleaners.length === 0) {
       logToAxiom('warn', 'cleaning_start_unauthorised_sender', { phone: ctx.phone });
       return false;
@@ -3052,7 +3109,7 @@ const guards = {
   // cleanerNothingToClean rather than a guest greeting. When a room IS in
   // Cleaning the sender is always claimed, exactly as before.
   async senderIsCleaner(ctx) {
-    const cleanerRecords = await airtableGet('WS_Cleaners', `{Phone Number} = '${ctx.phone}'`);
+    const cleanerRecords = await cachedGet('WS_Cleaners', `{Phone Number} = '${ctx.phone}'`, 'request');
     ctx.cleaner = cleanerRecords[0] || null;
     if (cleanerRecords.length === 0) return false;
 
@@ -3080,7 +3137,7 @@ const guards = {
     // global must not preempt it. Targeted addition only; the rest of the guard
     // (which behaves correctly for genuine cleaner room-naming) is unchanged.
     if (guestStateExpectsInput(ctx.guest, ctx.text)) return false;
-    const cleanerRecords = await airtableGet('WS_Cleaners', `{Phone Number} = '${ctx.phone}'`);
+    const cleanerRecords = await cachedGet('WS_Cleaners', `{Phone Number} = '${ctx.phone}'`, 'request');
     if (cleanerRecords.length === 0) return false;
     const cleaningRooms = await airtableGet('WS_Rooms', `{Status} = 'Cleaning'`);
     const match = cleaningRooms.find(r => roomMatchesText(r, ctx.text));
@@ -3417,7 +3474,7 @@ const actions = {
     let rates = null;
     let nightlyRate = null;
     if (isOvernight) {
-      const allActiveRates = await airtableGet('WS_Rates', `AND({Active} = TRUE(), {Rate Type} = 'Per Night')`);
+      const allActiveRates = await cachedGet('WS_Rates', `AND({Active} = TRUE(), {Rate Type} = 'Per Night')`, 'ttl');
       const nightlyRates = allActiveRates.filter(r => (r.fields['Property'] || []).includes(property.id));
       nightlyRate = nightlyRates.length === 1 ? nightlyRates[0] : null;
       if (!nightlyRate) {
@@ -4187,8 +4244,10 @@ const actions = {
     // Rates are checked here too (even though rateText itself now builds later,
     // in selectStayType) so this diagnostic still fires on every first contact,
     // unchanged from before the reorder.
-    const unassignedRooms = await airtableGet('WS_Rooms', `AND({Status} = 'Available', {Property} = BLANK())`);
-    const unassignedRates = await airtableGet('WS_Rates', `AND({Active} = TRUE(), {Property} = BLANK())`);
+    const unassignedRooms = readCacheEnabled()
+      ? (await cachedGet('WS_Rooms', `{Status} = 'Available'`, 'request')).filter(r => (r.fields['Property'] || []).length === 0)
+      : await airtableGet('WS_Rooms', `AND({Status} = 'Available', {Property} = BLANK())`);
+    const unassignedRates = await cachedGet('WS_Rates', `AND({Active} = TRUE(), {Property} = BLANK())`, 'ttl');
     if (unassignedRooms.length > 0 || unassignedRates.length > 0) {
       logToAxiom('warn', 'property_unassigned_rows', {
         phone: ctx.phone,
@@ -4538,7 +4597,7 @@ const actions = {
     // closed on zero OR more than one match — never guess, never fall back to
     // array position. This mirrors F19's own fail-closed posture, just against
     // a different ambiguity (no {Occupancy Type} to disambiguate any more).
-    const allActiveRates = await airtableGet('WS_Rates', `AND({Active} = TRUE(), {Rate Type} = 'Per Night')`);
+    const allActiveRates = await cachedGet('WS_Rates', `AND({Active} = TRUE(), {Rate Type} = 'Per Night')`, 'ttl');
     const nightlyRates = allActiveRates.filter(r => (r.fields['Property'] || []).includes(ctx.property.id));
     const rate = nightlyRates.length === 1 ? nightlyRates[0] : null;
     // Whether a price actually got written and can be quoted. Starts false; a
@@ -8170,7 +8229,7 @@ async function afterHoursPrelude(ctx, { restart = false } = {}) {
   const lastWelcome = guest && guest.fields['After Hours Reply At'];
   if (lastWelcome && Date.parse(lastWelcome) >= Date.parse(w.startIso)) return null;
   // A staff number is not a guest (same identity checks as the consent notice).
-  const isCleaner = (await airtableGet('WS_Cleaners', `{Phone Number} = '${ctx.phone}'`)).length > 0;
+  const isCleaner = (await cachedGet('WS_Cleaners', `{Phone Number} = '${ctx.phone}'`, 'request')).length > 0;
   if (isCleaner || isOwnerSideNumber(ctx.phone, ctx.property) || (await activeWalkinRoleForPhone(ctx.phone)) !== null) return null;
   await sendWhatsApp(ctx.phone, msg(w.tomorrow ? 'afterHoursWelcomeTomorrow' : 'afterHoursWelcomeToday'));
   logToAxiom('info', 'after_hours_welcome_sent', { phone: ctx.phone, tomorrow: w.tomorrow });
@@ -8229,7 +8288,7 @@ function stayMenuKeysForHour(hour) {
 // The single active rate row of one Rate Type for a property, or null. Same rule the
 // nightly lookup has always used: exactly one, else not priced (fail closed).
 async function singleActiveRate(property, rateType) {
-  const rows = await airtableGet('WS_Rates', "AND({Active} = TRUE(), {Rate Type} = '" + rateType + "')");
+  const rows = await cachedGet('WS_Rates', "AND({Active} = TRUE(), {Rate Type} = '" + rateType + "')", 'ttl');
   const mine = rows.filter(r => (r.fields['Property'] || []).includes(property.id));
   return mine.length === 1 ? mine[0] : null;
 }
@@ -8579,11 +8638,14 @@ async function recordHandledMessageId(phone, wamid, guestId) {
 // tells us who to stamp (dedupe.guestId) or that this is a duplicate (dedupe.skipped).
 // If the inner function throws, the throw propagates and nothing is written.
 async function handleMessage(from, messageText, phoneNumberId, wamid, interactive = null) {
-  const dedupe = { guestId: null, skipped: false };
-  await handleMessageInner(from, messageText, phoneNumberId, wamid, interactive, dedupe);
-  if (messageDedupeEnabled() && wamid && dedupe.guestId && !dedupe.skipped) {
-    await recordHandledMessageId(formatPhone(from), wamid, dedupe.guestId);
-  }
+  // One request-scoped memo per inbound message (used only when WABISTAY_READ_CACHE is on).
+  return _requestMemo.run(new Map(), async () => {
+    const dedupe = { guestId: null, skipped: false };
+    await handleMessageInner(from, messageText, phoneNumberId, wamid, interactive, dedupe);
+    if (messageDedupeEnabled() && wamid && dedupe.guestId && !dedupe.skipped) {
+      await recordHandledMessageId(formatPhone(from), wamid, dedupe.guestId);
+    }
+  });
 }
 
 // ─── INTERACTIVE REPLIES (WABISTAY_INTERACTIVE) ──────────────────────────────
@@ -8790,7 +8852,7 @@ async function handleMessageInner(from, messageText, phoneNumberId, wamid, inter
     // uses, run here first instead — cost is one extra pair of reads, paid
     // only on the rare message that is literally "stop", not on every inbound
     // message.
-    const isCleanerNumber = (await airtableGet('WS_Cleaners', `{Phone Number} = '${phone}'`)).length > 0;
+    const isCleanerNumber = (await cachedGet('WS_Cleaners', `{Phone Number} = '${phone}'`, 'request')).length > 0;
     const isOwnerNumber = isOwnerSideNumber(phone, property);
     const isStaffNumber = isCleanerNumber || isOwnerNumber || (await activeWalkinRoleForPhone(phone)) !== null;
     if (isStaffNumber) {
@@ -8943,7 +9005,7 @@ async function handleMessageInner(from, messageText, phoneNumberId, wamid, inter
   // STOP line references B14 (Step 6 of this sprint) — valid by merge time, since
   // both branches merge together (ordering dependency noted in the PR).
   if (!guest) {
-    const isCleaner = (await airtableGet('WS_Cleaners', `{Phone Number} = '${phone}'`)).length > 0;
+    const isCleaner = (await cachedGet('WS_Cleaners', `{Phone Number} = '${phone}'`, 'request')).length > 0;
     const isOwner = isOwnerSideNumber(phone, property);
     // B7: a staff seat is not a guest. Without this, the first WALKIN ever sent
     // from a reception handset answers with a POPIA notice about that person's
@@ -9190,6 +9252,10 @@ module.exports.aggregateWeeklyRecap = aggregateWeeklyRecap;
 module.exports.weeklyRecapTemplateParams = weeklyRecapTemplateParams;
 module.exports.WEEKLY_RECAP_TEMPLATE = WEEKLY_RECAP_TEMPLATE;
 module.exports.jsonField = jsonField;
+module.exports.resetReadCache = resetReadCache;
+module.exports.resolveProperty = resolveProperty;
+module.exports.runInRequestScope = fn => _requestMemo.run(new Map(), fn);
+module.exports.findAvailableRoom = findAvailableRoom;
 module.exports.updateGuestState = updateGuestState;
 module.exports.resolveSendRecipient = resolveSendRecipient;
 module.exports.runDailySummary = runDailySummary;
