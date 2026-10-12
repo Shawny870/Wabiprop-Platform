@@ -8873,7 +8873,7 @@ async function handleMessageInner(from, messageText, phoneNumberId, wamid, inter
       return p;
     });
     const guestLookup = airtableGet('WS_Guests', `{Phone Number} = '${phone}'`);
-    cleanersLookup = airtableGet('WS_Cleaners', `{Phone Number} = '${phone}'`);
+    cleanersLookup = cachedGet('WS_Cleaners', `{Phone Number} = '${phone}'`, 'request');
     cleanersLookup.catch(() => {}); // a lookup no guard ends up awaiting must not become an unhandled rejection
     const [pr, gr] = await Promise.allSettled([propertyLookup, guestLookup]);
     if (pr.status === 'rejected') throw pr.reason;

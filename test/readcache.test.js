@@ -11,6 +11,11 @@ installEnv();
 const wh = require('../api/wabistay/webhook.js');
 const ENV = ['WABISTAY_READ_CACHE', 'WABISTAY_INTERACTIVE'];
 const saved = Object.fromEntries(ENV.map(k => [k, process.env[k]]));
+// These tests assert one flag in isolation: the other performance flags are cleared for the file, then restored.
+const OTHER_PERF_FLAGS = ['WABISTAY_ACTIVITY_THROTTLE', 'WABISTAY_READ_CACHE', 'WABISTAY_PARALLEL_PREAMBLE', 'WABISTAY_TIMING_LOG', 'WABISTAY_AIRTABLE_RETRY'].filter(k => k !== 'WABISTAY_READ_CACHE');
+const savedOther = Object.fromEntries(OTHER_PERF_FLAGS.map(k => [k, process.env[k]]));
+for (const k of OTHER_PERF_FLAGS) delete process.env[k];
+require('node:test').after(() => { for (const k of OTHER_PERF_FLAGS) { if (savedOther[k] === undefined) delete process.env[k]; else process.env[k] = savedOther[k]; } });
 beforeEach(() => wh.resetReadCache());
 afterEach(() => { for (const k of ENV) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; } });
 
