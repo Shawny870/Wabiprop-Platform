@@ -282,7 +282,52 @@ async function cachedGet(table, filterFormula, scope) {
   }
 }
 
+// ─── REQUEST TIMING (WABISTAY_TIMING_LOG) ──────────────────────────────────────
+// Off (unset): timed() runs the call and nothing else. On: every inbound message records how long each Airtable
+// call and each WhatsApp send took, and handleMessage logs ONE Axiom event, request_timing, carrying a single JSON
+// string field (timing_json) plus the long-standing flat fields phone_number_id and wamid. One string, not an
+// object: Axiom makes a dotted field per object key and the dataset is capped at 256 fields. Labels are table
+// names and call kinds only; no phone number, message text or filter formula is recorded.
+const _timingStore = new AsyncLocalStorage();
+let _timingFirstRequestInProcess = true;
+function timingLogEnabled() {
+  return /^(1|true)$/i.test(String(process.env.WABISTAY_TIMING_LOG || '').trim());
+}
+async function timed(kind, label, fn) {
+  const store = _timingStore.getStore();
+  if (!store) return fn();
+  const start = Date.now();
+  try {
+    return await fn();
+  } finally {
+    const end = Date.now();
+    store.calls.push([kind, label, end - start, start - store.t0]);
+  }
+}
+function summariseTiming(store, endMs) {
+  const sum = kinds => store.calls.filter(c => kinds.includes(c[0])).reduce((n, c) => n + c[2], 0);
+  const count = kinds => store.calls.filter(c => kinds.includes(c[0])).length;
+  return {
+    total_ms: endMs - store.t0,
+    airtable_ms: sum(['at_get', 'at_create', 'at_update']),
+    airtable_calls: count(['at_get', 'at_create', 'at_update']),
+    whatsapp_ms: sum(['wa_text', 'wa_template', 'wa_interactive']),
+    whatsapp_sends: count(['wa_text', 'wa_template', 'wa_interactive']),
+    cold: store.cold,
+    region: process.env.VERCEL_REGION || null,
+    calls: store.calls // [kind, table-or-label, duration_ms, started_at_ms_after_handler_start]
+  };
+}
 async function airtableGet(table, filterFormula, opts = {}) {
+  return timed('at_get', table, () => airtableGetRaw(table, filterFormula, opts));
+}
+async function airtableCreate(table, fields) {
+  return timed('at_create', table, () => airtableCreateRaw(table, fields));
+}
+async function airtableUpdate(table, recordId, fields) {
+  return timed('at_update', table, () => airtableUpdateRaw(table, recordId, fields));
+}
+async function airtableGetRaw(table, filterFormula, opts = {}) {
   _countAirtableCall('get');
   const { throwOnError = false } = opts;
   // B10.5 BUG 1: Airtable's list API returns at most 100 records per response and
@@ -318,7 +363,7 @@ async function airtableGet(table, filterFormula, opts = {}) {
   return records;
 }
 
-async function airtableCreate(table, fields) {
+async function airtableCreateRaw(table, fields) {
   _countAirtableCall('create');
   console.log(`[Airtable CREATE] ${table}`, JSON.stringify(fields));
   const res = await fetch(`https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(table)}`, {
@@ -347,7 +392,7 @@ async function airtableCreate(table, fields) {
   return data;
 }
 
-async function airtableUpdate(table, recordId, fields) {
+async function airtableUpdateRaw(table, recordId, fields) {
   _countAirtableCall('update');
   console.log(`[Airtable UPDATE] ${table} ${recordId}`, JSON.stringify(fields));
   const res = await fetch(`https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(table)}/${recordId}`, {
@@ -482,12 +527,13 @@ const WABISTAY_KNOWN_FLAGS = [
   'WABISTAY_ROOM_ORDER',
   'WABISTAY_STATE_WRITE_GUARD',
   'WABISTAY_STAY_MENU',
+  'WABISTAY_TIMING_LOG',
   'WABISTAY_WEEKLY_RECAP_TEMPLATE'
 ];
 
 // Switches the code only treats as on for 1/true; for these, 'on' means that,
 // not merely 'set'.
-const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_ACTIVITY_THROTTLE', 'WABISTAY_AFTER_HOURS', 'WABISTAY_CHECKOUT_BUTTON', 'WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_GATE_REQUIRES_BOOKING', 'WABISTAY_GATE_ROOM_CHECK', 'WABISTAY_GUEST_ADDRESS', 'WABISTAY_HIDE_ONE_HOUR', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_HOURLY_EXPIRY', 'WABISTAY_IGNORE_REACTIONS', 'WABISTAY_INTERACTIVE', 'WABISTAY_LEAN_COPY', 'WABISTAY_MESSAGE_DEDUPE', 'WABISTAY_NONTEXT_REPLY', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_ONE_OPEN_BOOKING', 'WABISTAY_PAID_BY_BOOKING_REF', 'WABISTAY_PAID_ROOM_CONFIRMED', 'WABISTAY_PARALLEL_PREAMBLE', 'WABISTAY_PAY_ASSIGNS_ROOM', 'WABISTAY_READ_CACHE', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD', 'WABISTAY_STAY_MENU'];
+const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_ACTIVITY_THROTTLE', 'WABISTAY_AFTER_HOURS', 'WABISTAY_CHECKOUT_BUTTON', 'WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_GATE_REQUIRES_BOOKING', 'WABISTAY_GATE_ROOM_CHECK', 'WABISTAY_GUEST_ADDRESS', 'WABISTAY_HIDE_ONE_HOUR', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_HOURLY_EXPIRY', 'WABISTAY_IGNORE_REACTIONS', 'WABISTAY_INTERACTIVE', 'WABISTAY_LEAN_COPY', 'WABISTAY_MESSAGE_DEDUPE', 'WABISTAY_NONTEXT_REPLY', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_ONE_OPEN_BOOKING', 'WABISTAY_PAID_BY_BOOKING_REF', 'WABISTAY_PAID_ROOM_CONFIRMED', 'WABISTAY_PARALLEL_PREAMBLE', 'WABISTAY_PAY_ASSIGNS_ROOM', 'WABISTAY_READ_CACHE', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD', 'WABISTAY_STAY_MENU', 'WABISTAY_TIMING_LOG'];
 
 function wabistayFlagState() {
   const names = new Set([...WABISTAY_KNOWN_FLAGS, ...Object.keys(process.env).filter(k => k.startsWith('WABISTAY_'))]);
@@ -1007,6 +1053,9 @@ async function sendNewBookingAlert(to, params, freeForm, correlation = {}) {
 // ─── WHATSAPP HELPER ────────────────────────────────────────────────────────
 
 async function sendWhatsApp(to, message) {
+  return timed('wa_text', 'text', () => sendWhatsAppRaw(to, message));
+}
+async function sendWhatsAppRaw(to, message) {
   console.log(`[WhatsApp SEND] to: ${to} | msg: ${message.slice(0, 80)}...`);
   // F3: was v19.0 — now v25.0 to match webhook subscription version
   const res = await fetch(`https://graph.facebook.com/v25.0/${WA_PHONE_NUMBER_ID}/messages`, {
@@ -1060,6 +1109,9 @@ function sanitizeTemplateParam(value) {
 }
 
 async function sendWhatsAppTemplate(to, templateName, rawParams = [], meta = {}) {
+  return timed('wa_template', templateName, () => sendWhatsAppTemplateRaw(to, templateName, rawParams, meta));
+}
+async function sendWhatsAppTemplateRaw(to, templateName, rawParams = [], meta = {}) {
   const { languageCode = TEMPLATE_LANGUAGE_CODE, ...correlation } = meta;
   // Meta rejects a template send whose text parameter contains a newline, a
   // tab, or four or more consecutive spaces (error 132018). Params carry
@@ -1475,7 +1527,8 @@ function logToAxiom(level, event, detail = {}) {
     source: 'wabistay',
     ...detail
   }];
-  fetch(`https://api.axiom.co/v1/datasets/${AXIOM_DATASET}/ingest`, {
+  // Returns the ingest promise so a caller that must not lose its event (request_timing) can wait for it; every other caller ignores it.
+  return fetch(`https://api.axiom.co/v1/datasets/${AXIOM_DATASET}/ingest`, {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${AXIOM_TOKEN}`,
@@ -8664,6 +8717,21 @@ async function recordHandledMessageId(phone, wamid, guestId) {
 // tells us who to stamp (dedupe.guestId) or that this is a duplicate (dedupe.skipped).
 // If the inner function throws, the throw propagates and nothing is written.
 async function handleMessage(from, messageText, phoneNumberId, wamid, interactive = null) {
+  if (!timingLogEnabled()) return handleMessageTracked(from, messageText, phoneNumberId, wamid, interactive);
+  const store = { t0: Date.now(), calls: [], cold: _timingFirstRequestInProcess };
+  _timingFirstRequestInProcess = false;
+  try {
+    return await _timingStore.run(store, () => handleMessageTracked(from, messageText, phoneNumberId, wamid, interactive));
+  } finally {
+    // The last event of a request is the one most likely to be cut off when Vercel freezes the function after the
+    // 200, so this one (only) waits for its ingest, capped at 1 s.
+    const ingest = logToAxiom('info', 'request_timing', {
+      phone_number_id: phoneNumberId, wamid: wamid || null, timing_json: jsonField(summariseTiming(store, Date.now()))
+    });
+    if (ingest) await Promise.race([ingest, new Promise(r => setTimeout(r, 1000))]);
+  }
+}
+async function handleMessageTracked(from, messageText, phoneNumberId, wamid, interactive = null) {
   // One request-scoped memo per inbound message (used only when WABISTAY_READ_CACHE is on).
   return _requestMemo.run(new Map(), async () => {
     const dedupe = { guestId: null, skipped: false, pending: [] };
@@ -8734,7 +8802,10 @@ function validateReplyButtons({ body, buttons, footer }) {
 
 // Reply buttons only. Validated BEFORE sending: an over-limit message is never sent.
 // Returns { ok, invalid?, error?, wamid? }; callers fall back to the text menu.
-async function sendInteractiveButtons(to, { body, buttons, footer }) {
+async function sendInteractiveButtons(to, opts) {
+  return timed('wa_interactive', 'buttons', () => sendInteractiveButtonsRaw(to, opts));
+}
+async function sendInteractiveButtonsRaw(to, { body, buttons, footer }) {
   const invalid = validateReplyButtons({ body, buttons, footer });
   if (invalid) {
     logToAxiom('error', 'interactive_invalid', { to, reason: invalid });
