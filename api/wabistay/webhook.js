@@ -564,6 +564,7 @@ const WABISTAY_KNOWN_FLAGS = [
   'WABISTAY_NONTEXT_REPLY',
   'WABISTAY_NOTIFY_ROUTING',
   'WABISTAY_ONE_OPEN_BOOKING',
+  'WABISTAY_OVERNIGHT_AMOUNT_NIGHTS',
   'WABISTAY_OPS_ALERT_TEMPLATE',
   'WABISTAY_OVERDUE_ALERT_TEMPLATE',
   'WABISTAY_PAID_BY_BOOKING_REF',
@@ -584,7 +585,7 @@ const WABISTAY_KNOWN_FLAGS = [
 
 // Switches the code only treats as on for 1/true; for these, 'on' means that,
 // not merely 'set'.
-const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_ACTIVITY_THROTTLE', 'WABISTAY_AFTER_HOURS', 'WABISTAY_AIRTABLE_RETRY', 'WABISTAY_CHECKOUT_BUTTON', 'WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_GATE_REQUIRES_BOOKING', 'WABISTAY_GATE_ROOM_CHECK', 'WABISTAY_GUEST_ADDRESS', 'WABISTAY_HIDE_ONE_HOUR', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_HOURLY_EXPIRY', 'WABISTAY_IGNORE_REACTIONS', 'WABISTAY_INTERACTIVE', 'WABISTAY_LEAN_COPY', 'WABISTAY_MESSAGE_DEDUPE', 'WABISTAY_NONTEXT_REPLY', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_ONE_OPEN_BOOKING', 'WABISTAY_PAID_BY_BOOKING_REF', 'WABISTAY_PAID_ROOM_CONFIRMED', 'WABISTAY_PARALLEL_PREAMBLE', 'WABISTAY_PARALLEL_SENDS', 'WABISTAY_PAY_ASSIGNS_ROOM', 'WABISTAY_READ_CACHE', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD', 'WABISTAY_STAY_MENU', 'WABISTAY_TIMING_LOG', 'WABISTAY_WA_PREWARM'];
+const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_ACTIVITY_THROTTLE', 'WABISTAY_AFTER_HOURS', 'WABISTAY_AIRTABLE_RETRY', 'WABISTAY_CHECKOUT_BUTTON', 'WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_GATE_REQUIRES_BOOKING', 'WABISTAY_GATE_ROOM_CHECK', 'WABISTAY_GUEST_ADDRESS', 'WABISTAY_HIDE_ONE_HOUR', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_HOURLY_EXPIRY', 'WABISTAY_IGNORE_REACTIONS', 'WABISTAY_INTERACTIVE', 'WABISTAY_LEAN_COPY', 'WABISTAY_MESSAGE_DEDUPE', 'WABISTAY_NONTEXT_REPLY', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_ONE_OPEN_BOOKING', 'WABISTAY_OVERNIGHT_AMOUNT_NIGHTS', 'WABISTAY_PAID_BY_BOOKING_REF', 'WABISTAY_PAID_ROOM_CONFIRMED', 'WABISTAY_PARALLEL_PREAMBLE', 'WABISTAY_PARALLEL_SENDS', 'WABISTAY_PAY_ASSIGNS_ROOM', 'WABISTAY_READ_CACHE', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD', 'WABISTAY_STAY_MENU', 'WABISTAY_TIMING_LOG', 'WABISTAY_WA_PREWARM'];
 
 function wabistayFlagState() {
   const names = new Set([...WABISTAY_KNOWN_FLAGS, ...Object.keys(process.env).filter(k => k.startsWith('WABISTAY_'))]);
@@ -1351,6 +1352,20 @@ const SAST_OFFSET_MS = 2 * 60 * 60 * 1000;
 // later step's problem — do not derive these from the property record yet.
 const OVERNIGHT_CHECKIN_HOUR = 14;
 const OVERNIGHT_CHECKOUT_HOUR = 10;
+// WABISTAY_OVERNIGHT_AMOUNT_NIGHTS (1 or true; off by default): an overnight booking made by typed dates (guest "multiple
+// days" flow, or a staff WALKIN ... OVERNIGHT) stores Amount Due as nights x the Per Night rate. Off, it stores ONE night's
+// rate whatever the number of nights, so PAID (which must equal Amount Due) is refused for the real total.
+function overnightAmountNightsEnabled() {
+  return /^(1|true)$/i.test(String(process.env.WABISTAY_OVERNIGHT_AMOUNT_NIGHTS || '').trim());
+}
+function overnightNightsBetween(checkInIso, checkOutIso) {
+  const days = (Date.parse(checkOutIso) - Date.parse(checkInIso)) / (24 * 60 * 60 * 1000);
+  return Number.isFinite(days) ? Math.max(1, Math.round(days)) : 1;
+}
+function overnightAmountFor(rateAmount, checkInIso, checkOutIso) {
+  const n = Number(rateAmount);
+  return overnightAmountNightsEnabled() && Number.isFinite(n) ? n * overnightNightsBetween(checkInIso, checkOutIso) : rateAmount;
+}
 
 // B12 (auto-checkout): once a booking is past its Check Out, the cron sends one
 // warning offering an extension; if still unresolved AUTO_CHECKOUT_GRACE_MS
@@ -3734,7 +3749,7 @@ const actions = {
     if (isOvernight) {
       if (nightlyRate) {
         walkinBookingFields['Rate Applied'] = [nightlyRate.id];
-        walkinBookingFields['Amount Due'] = nightlyRate.fields['Amount'];
+        walkinBookingFields['Amount Due'] = overnightAmountFor(nightlyRate.fields['Amount'], checkInIso, checkOutIso);
       } // else left unpriced — reception settles the amount manually via PAID, same as an unpriced guest booking.
     } else {
       walkinBookingFields['Amount Due'] = rates[parsed.hours];
@@ -4732,7 +4747,7 @@ const actions = {
       // would confirm a booking at a rate that was never actually saved.
       const rateWrite = await airtableUpdate('WS_Bookings', booking.id, {
         'Rate Applied': [rate.id],
-        'Amount Due': rate.fields['Amount']
+        'Amount Due': overnightAmountFor(rate.fields['Amount'], checkInIso, checkOutIso)
       });
       if (rateWrite && rateWrite.error) {
         logToAxiom('error', 'overnight_rate_write_failed', {
@@ -4740,7 +4755,7 @@ const actions = {
         });
       } else {
         priced = true;
-        quotedAmount = rate.fields['Amount'];
+        quotedAmount = overnightAmountFor(rate.fields['Amount'], checkInIso, checkOutIso);
       }
     }
 
@@ -4792,7 +4807,7 @@ const actions = {
 
     await sendWhatsApp(ctx.phone, msg('bookingReceived', {
       guestName, bookingRef, checkIn, checkOut,
-      rateLine: `*Rate:* R${rate.fields['Amount']} per night`
+      rateLine: `*Rate:* R${rate.fields['Amount']} per night` + (overnightAmountNightsEnabled() ? ` (R${overnightAmountFor(rate.fields['Amount'], checkInIso, checkOutIso)} for ${overnightNightsBetween(checkInIso, checkOutIso)} ${overnightNightsBetween(checkInIso, checkOutIso) === 1 ? 'night' : 'nights'})` : '')
     }));
     await sendPaymentMethodMenu(ctx);
     });
