@@ -6779,7 +6779,8 @@ async function runAutoCheckout(now = new Date(), opts = {}) {
           bookingId: booking.id, error: JSON.stringify(warnStampWrite.error)
         });
       }
-      if (guestPhone) await sendWhatsApp(guestPhone, msg('checkoutWarning', { guestName, propertyName }));
+      // WABISTAY_RATE_CARD_V2: extensions are reception's, so the warning says so (the bot's EXTEND now refers the guest there).
+      if (guestPhone) await sendWhatsApp(guestPhone, msg(rateCardV2Enabled() ? 'checkoutWarningV2' : 'checkoutWarning', { guestName, propertyName }));
       logToAxiom('info', 'auto_checkout_warning', { bookingId: booking.id, phone: guestPhone || null, checkOut });
       summary.warnings++;
       continue;
@@ -8745,7 +8746,7 @@ async function stayMenuForNowV2(property, now = new Date()) {
   const cardText = {
     '1': (p) => '2 hours: R' + p + '. Arrive between 8am and 5pm.',
     '2': (p) => '3 hours: R' + p + '. Arrive between 8am and 5pm.',
-    '3': (p) => 'Day stay (4 hours): R' + p + '. Arrive between 8am and 1pm, leave by 5pm.',
+    '3': (p) => 'Day stay (4 hours): R' + p + '. Arrive between 8am and 1pm; your stay ends 4 hours after you arrive.',
     '4': (p) => 'Overnight: R' + p + '. Check in between 5pm and 11pm, check out at 9am.',
     '5': (p) => 'Day + night: R' + p + ' per day. Arrive between 8am and 1pm, check out at 9am on your departure day.'
   };
