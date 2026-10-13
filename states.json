@@ -42,6 +42,7 @@
       { "inputs": "*", "action": "showConfirmedMenu" }
     ],
     "CHECKED_IN": [
+      { "inputs": ["__keys_ok", "keys", "i have my keys", "have my keys", "got my keys"], "action": "keysConfirmed" },
       { "inputs": ["__checkout_ask"], "action": "checkoutAsk" },
       { "inputs": ["__checkout_not_yet"], "action": "checkoutNotYet" },
       { "inputs": ["extend", "extend stay", "more time", "stay longer", "longer"], "action": "extendStay" },
@@ -108,6 +109,12 @@
     "payAssignsRoomNotReady": "{guestName} was waiting at the gate, but {roomName} is {roomStatus}, so no room was assigned. They were told to wait at the office.",
     "payAssignsFailed": "Payment is recorded, but I could not check the waiting guest in ({roomName}). Please look after them at the desk.",
     "paymentNotYetConfirmedGate": "Thanks {guestName}, reception knows you're here and will open the gate. Please come to the office to pay (card or EFT). We'll message you your room as soon as payment is confirmed.{callLine}",
+    "gateConfirmUnpaid": "Thanks {guestName}, reception knows you're here and someone will be with you shortly to open the gate. Please come to the office to pay (card or EFT).{callLine}",
+    "gateConfirmReceived": "Thanks {guestName}, reception knows you're here and someone will be with you shortly to open the gate.{callLine}",
+    "gateConfirmRoom": "Payment received, {guestName}. Your room is {roomName}. Check-out is {checkOutText}.{extensionLine} Tap the button once you have your keys so we can log your check-in.",
+    "gateConfirmRoomText": "Payment received, {guestName}. Your room is {roomName}. Check-out is {checkOutText}.{extensionLine} Reply KEYS once you have your keys so we can log your check-in.",
+    "gateConfirmNudge": "Please tap the button below once you have your keys, {guestName}.",
+    "gateConfirmNudgeText": "Please reply KEYS once you have your keys, {guestName}.",
     "gateWaitingReply": "Thanks {guestName}, reception knows you're here and will be with you shortly. We'll message you your room as soon as payment is confirmed.{callLine}",
     "paymentCardChosenGate": "When you arrive, reply 1 so we can open the gate. Please tap your card on the SpeedPoint machine in the office, and reception will hand you your keys.",
     "paymentNotYetConfirmed": "Almost there! Pop into the office to sort payment — card or EFT — and reception will get you your keys.",
