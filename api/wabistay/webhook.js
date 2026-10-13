@@ -539,6 +539,7 @@ async function advanceGuestState(ctx, fields, extra = {}) {
 // deployment this log line belongs to.
 const WABISTAY_KNOWN_FLAGS = [
   'WABISTAY_ACTIVITY_THROTTLE',
+  'WABISTAY_BOOKING_EVENT',
   'WABISTAY_AFTER_HOURS',
   'WABISTAY_AIRTABLE_RETRY',
   'WABISTAY_CLEANER_DISPATCH_TEMPLATE',
@@ -566,6 +567,7 @@ const WABISTAY_KNOWN_FLAGS = [
   'WABISTAY_NONTEXT_REPLY',
   'WABISTAY_NOTIFY_ROUTING',
   'WABISTAY_ONE_OPEN_BOOKING',
+  'WABISTAY_OVERNIGHT_AMOUNT_NIGHTS',
   'WABISTAY_OPS_ALERT_TEMPLATE',
   'WABISTAY_OVERDUE_ALERT_TEMPLATE',
   'WABISTAY_PAID_BY_BOOKING_REF',
@@ -573,6 +575,8 @@ const WABISTAY_KNOWN_FLAGS = [
   'WABISTAY_PARALLEL_PREAMBLE',
   'WABISTAY_PARALLEL_SENDS',
   'WABISTAY_PAY_ASSIGNS_ROOM',
+  'WABISTAY_RATE_CARD_V2',
+  'WABISTAY_COMBINED_STAY',
   'WABISTAY_READ_CACHE',
   'WABISTAY_OWNER_SUMMARY_TEMPLATE',
   'WABISTAY_RECEPTION_PAYMENT_TEMPLATE',
@@ -586,7 +590,7 @@ const WABISTAY_KNOWN_FLAGS = [
 
 // Switches the code only treats as on for 1/true; for these, 'on' means that,
 // not merely 'set'.
-const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_ACTIVITY_THROTTLE', 'WABISTAY_AFTER_HOURS', 'WABISTAY_AIRTABLE_RETRY', 'WABISTAY_CHECKOUT_BUTTON', 'WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_GATE_CONFIRM_FLOW', 'WABISTAY_GATE_PAY_FLOW', 'WABISTAY_GATE_REQUIRES_BOOKING', 'WABISTAY_GATE_ROOM_CHECK', 'WABISTAY_GUEST_ADDRESS', 'WABISTAY_HIDE_ONE_HOUR', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_HOURLY_EXPIRY', 'WABISTAY_IGNORE_REACTIONS', 'WABISTAY_INTERACTIVE', 'WABISTAY_LEAN_COPY', 'WABISTAY_MESSAGE_DEDUPE', 'WABISTAY_NONTEXT_REPLY', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_ONE_OPEN_BOOKING', 'WABISTAY_PAID_BY_BOOKING_REF', 'WABISTAY_PAID_ROOM_CONFIRMED', 'WABISTAY_PARALLEL_PREAMBLE', 'WABISTAY_PARALLEL_SENDS', 'WABISTAY_PAY_ASSIGNS_ROOM', 'WABISTAY_READ_CACHE', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD', 'WABISTAY_STAY_MENU', 'WABISTAY_TIMING_LOG', 'WABISTAY_WA_PREWARM'];
+const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_ACTIVITY_THROTTLE', 'WABISTAY_BOOKING_EVENT', 'WABISTAY_AFTER_HOURS', 'WABISTAY_AIRTABLE_RETRY', 'WABISTAY_CHECKOUT_BUTTON', 'WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_GATE_CONFIRM_FLOW', 'WABISTAY_GATE_PAY_FLOW', 'WABISTAY_GATE_REQUIRES_BOOKING', 'WABISTAY_GATE_ROOM_CHECK', 'WABISTAY_GUEST_ADDRESS', 'WABISTAY_HIDE_ONE_HOUR', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_HOURLY_EXPIRY', 'WABISTAY_IGNORE_REACTIONS', 'WABISTAY_INTERACTIVE', 'WABISTAY_LEAN_COPY', 'WABISTAY_MESSAGE_DEDUPE', 'WABISTAY_NONTEXT_REPLY', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_ONE_OPEN_BOOKING', 'WABISTAY_OVERNIGHT_AMOUNT_NIGHTS', 'WABISTAY_PAID_BY_BOOKING_REF', 'WABISTAY_PAID_ROOM_CONFIRMED', 'WABISTAY_PARALLEL_PREAMBLE', 'WABISTAY_PARALLEL_SENDS', 'WABISTAY_PAY_ASSIGNS_ROOM', 'WABISTAY_RATE_CARD_V2', 'WABISTAY_COMBINED_STAY', 'WABISTAY_READ_CACHE', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD', 'WABISTAY_STAY_MENU', 'WABISTAY_TIMING_LOG', 'WABISTAY_WA_PREWARM'];
 
 function wabistayFlagState() {
   const names = new Set([...WABISTAY_KNOWN_FLAGS, ...Object.keys(process.env).filter(k => k.startsWith('WABISTAY_'))]);
@@ -1111,6 +1115,8 @@ function newBookingAmountText(amount) {
 function newBookingTemplateParams({ propertyName, guestName, guestPhone, bookingRef, bookingType, checkInIso, checkOutIso, hours, amount }) {
   const stay = bookingType === 'Hourly'
     ? durationText(hours)
+    : bookingType === 'Combined'
+      ? `day and night until ${formatSastDayMonth(checkOutIso)}`
     : bookingType === 'Day'
       ? `day stay until ${formatSastDateTime(checkOutIso).split(' at ')[1]}`
       : `overnight until ${formatSastDayMonth(checkOutIso)}`;
@@ -1394,6 +1400,45 @@ const SAST_OFFSET_MS = 2 * 60 * 60 * 1000;
 // later step's problem — do not derive these from the property record yet.
 const OVERNIGHT_CHECKIN_HOUR = 14;
 const OVERNIGHT_CHECKOUT_HOUR = 10;
+// WABISTAY_BOOKING_EVENT (1 or true; off by default): one Axiom event, booking_created_detail, at booking creation, so the
+// stay types can be told apart in a review: stay is h2, h3, day, overnight (stay menu), overnight_typed (typed dates), h1/h2/h3
+// (the legacy short-stay duration menu) or combined; with nights, amount (R) and the arrival instant and SAST date. Logging only.
+function bookingEventEnabled() {
+  return /^(1|true)$/i.test(String(process.env.WABISTAY_BOOKING_EVENT || '').trim());
+}
+function logBookingCreatedDetail({ bookingId, bookingRef, stay, bookingType, checkInIso, checkOutIso, amount }) {
+  if (!bookingEventEnabled()) return;
+  const nights = checkInIso && checkOutIso ? Math.round((Date.parse(checkOutIso) - Date.parse(checkInIso)) / (24 * 60 * 60 * 1000)) : null;
+  const d = checkInIso ? new Date(Date.parse(checkInIso) + SAST_OFFSET_MS).toISOString().slice(0, 10) : null;
+  logToAxiom('info', 'booking_created_detail', {
+    bookingId: bookingId || null, bookingRef: bookingRef || null, stay, bookingType,
+    nights: stay === 'combined' || stay === 'overnight' || stay === 'overnight_typed' ? Math.max(1, nights || 0) : 0,
+    amount: Number.isFinite(Number(amount)) ? Number(amount) : null, arrival: checkInIso || null, arrivalDate: d
+  });
+}
+// WABISTAY_RATE_CARD_V2 (1 or true; off by default): the new rate card. Overnight and combined
+// check-out moves from 10:00 to 09:00 for bookings made from now on; existing bookings keep the
+// Check Out already stored on them.
+function rateCardV2Enabled() {
+  return /^(1|true)$/i.test(String(process.env.WABISTAY_RATE_CARD_V2 || '').trim());
+}
+function overnightCheckoutHour() {
+  return rateCardV2Enabled() ? 9 : OVERNIGHT_CHECKOUT_HOUR;
+}
+// WABISTAY_OVERNIGHT_AMOUNT_NIGHTS (1 or true; off by default): an overnight booking made by typed dates (guest "multiple
+// days" flow, or a staff WALKIN ... OVERNIGHT) stores Amount Due as nights x the Per Night rate. Off, it stores ONE night's
+// rate whatever the number of nights, so PAID (which must equal Amount Due) is refused for the real total.
+function overnightAmountNightsEnabled() {
+  return /^(1|true)$/i.test(String(process.env.WABISTAY_OVERNIGHT_AMOUNT_NIGHTS || '').trim());
+}
+function overnightNightsBetween(checkInIso, checkOutIso) {
+  const days = (Date.parse(checkOutIso) - Date.parse(checkInIso)) / (24 * 60 * 60 * 1000);
+  return Number.isFinite(days) ? Math.max(1, Math.round(days)) : 1;
+}
+function overnightAmountFor(rateAmount, checkInIso, checkOutIso) {
+  const n = Number(rateAmount);
+  return overnightAmountNightsEnabled() && Number.isFinite(n) ? n * overnightNightsBetween(checkInIso, checkOutIso) : rateAmount;
+}
 
 // B12 (auto-checkout): once a booking is past its Check Out, the cron sends one
 // warning offering an extension; if still unresolved AUTO_CHECKOUT_GRACE_MS
@@ -2269,7 +2314,8 @@ function parseOneLineNameAndTime(line) {
 // walk-ins (WALKIN ... 1HRS) and the +1 hour extension charge still use the 1hr
 // rate, so keep it populated.
 function hideOneHourEnabled() {
-  return /^(1|true)$/i.test(String(process.env.WABISTAY_HIDE_ONE_HOUR || '').trim());
+  // WABISTAY_RATE_CARD_V2 removes the 1-hour stay for good, so it implies this flag.
+  return rateCardV2Enabled() || /^(1|true)$/i.test(String(process.env.WABISTAY_HIDE_ONE_HOUR || '').trim());
 }
 function offeredHourlyDurations() {
   return hideOneHourEnabled() ? HOURLY_DURATIONS.filter(h => h !== 1) : HOURLY_DURATIONS;
@@ -3691,7 +3737,7 @@ const actions = {
       ? sastToUtcIso(parsed.checkInDate, OVERNIGHT_CHECKIN_HOUR)
       : new Date().toISOString();
     const checkOutIso = isOvernight
-      ? sastToUtcIso(parsed.checkOutDate, OVERNIGHT_CHECKOUT_HOUR)
+      ? sastToUtcIso(parsed.checkOutDate, overnightCheckoutHour())
       : addHoursToIso(checkInIso, parsed.hours);
     const checkedInAtIso = new Date().toISOString();
 
@@ -3816,7 +3862,7 @@ const actions = {
     if (isOvernight) {
       if (nightlyRate) {
         walkinBookingFields['Rate Applied'] = [nightlyRate.id];
-        walkinBookingFields['Amount Due'] = nightlyRate.fields['Amount'];
+        walkinBookingFields['Amount Due'] = overnightAmountFor(nightlyRate.fields['Amount'], checkInIso, checkOutIso);
       } // else left unpriced — reception settles the amount manually via PAID, same as an unpriced guest booking.
     } else {
       walkinBookingFields['Amount Due'] = rates[parsed.hours];
@@ -4577,7 +4623,8 @@ const actions = {
       // Same fetch as the old greetAndAskDetails rateText build — F4/F5-style,
       // unfiltered fetch + JS filter by Property inclusion, unchanged.
       const allActiveRates = await airtableGet('WS_Rates', `{Active} = TRUE()`);
-      const activeRates = allActiveRates.filter(r => (r.fields['Property'] || []).includes(ctx.property.id));
+      // A Combined (Day + night) row is sold only through the stay menu: never listed here, and it has no per-hour unit.
+      const activeRates = allActiveRates.filter(r => (r.fields['Property'] || []).includes(ctx.property.id) && r.fields['Rate Type'] !== 'Combined');
       const rateText = activeRates.length > 0
         ? activeRates.map(r =>
             `• ${r.fields['Rate Name']}: R${r.fields['Amount']} ${rateUnitLabel(r.fields['Rate Type'])}`
@@ -4665,7 +4712,7 @@ const actions = {
     }
 
     const checkInIso = sastToUtcIso(checkInDate, OVERNIGHT_CHECKIN_HOUR);
-    const checkOutIso = sastToUtcIso(checkOutDate, OVERNIGHT_CHECKOUT_HOUR);
+    const checkOutIso = sastToUtcIso(checkOutDate, overnightCheckoutHour());
 
     // B8: the real double-booking fix — decided here, at enquiry, not at the gate.
     // Before this, the first collision anyone noticed was two guests at the door.
@@ -4837,7 +4884,7 @@ const actions = {
       // would confirm a booking at a rate that was never actually saved.
       const rateWrite = await airtableUpdate('WS_Bookings', booking.id, {
         'Rate Applied': [rate.id],
-        'Amount Due': rate.fields['Amount']
+        'Amount Due': overnightAmountFor(rate.fields['Amount'], checkInIso, checkOutIso)
       });
       if (rateWrite && rateWrite.error) {
         logToAxiom('error', 'overnight_rate_write_failed', {
@@ -4845,7 +4892,7 @@ const actions = {
         });
       } else {
         priced = true;
-        quotedAmount = rate.fields['Amount'];
+        quotedAmount = overnightAmountFor(rate.fields['Amount'], checkInIso, checkOutIso);
       }
     }
 
@@ -4855,6 +4902,7 @@ const actions = {
     // price existed, so an abandoning guest was already marked Booked with no
     // quote ever sent. recordEta re-affirms on confirmation but the booking-id
     // dedup keeps it to one row.
+    logBookingCreatedDetail({ bookingId: booking.id, bookingRef, stay: 'overnight_typed', bookingType: 'Overnight', checkInIso, checkOutIso, amount: quotedAmount });
     await logEnquiry(ctx.property, ctx.phone, 'Booked', { ...enquiryTrackingOpts(ctx),
       checkInIso, checkOutIso, bookingType: 'Overnight', bookingId: booking.id
     });
@@ -4897,7 +4945,7 @@ const actions = {
 
     await sendWhatsApp(ctx.phone, msg('bookingReceived', {
       guestName, bookingRef, checkIn, checkOut,
-      rateLine: `*Rate:* R${rate.fields['Amount']} per night`
+      rateLine: `*Rate:* R${rate.fields['Amount']} per night` + (overnightAmountNightsEnabled() ? ` (R${overnightAmountFor(rate.fields['Amount'], checkInIso, checkOutIso)} for ${overnightNightsBetween(checkInIso, checkOutIso)} ${overnightNightsBetween(checkInIso, checkOutIso) === 1 ? 'night' : 'nights'})` : '')
     }));
     await sendPaymentMethodMenu(ctx);
     });
@@ -5245,6 +5293,7 @@ const actions = {
     // alert carries the booking id so reception can finish or cancel it.
     if (!(await advanceGuestState(ctx, { 'Session State': ctx.next, 'Last Inbound At': new Date().toISOString() }, { bookingId: pending.id, bookingRef }))) return;
     await supersedeOlderBookings(ctx, { id: pending.id, checkIn: checkInIso, ref: bookingRef, stay: `${choice} hour short stay` });
+    logBookingCreatedDetail({ bookingId: pending.id, bookingRef, stay: 'h' + choice, bookingType: 'Hourly', checkInIso, checkOutIso, amount });
     // B19: Booked, Hourly. Completed in one handler, so this is the single log site.
     await logEnquiry(ctx.property, ctx.phone, 'Booked', { ...enquiryTrackingOpts(ctx),
       checkInIso, checkOutIso, bookingType: 'Hourly', bookingId: pending.id
@@ -6089,6 +6138,15 @@ const actions = {
     if (!booking || !booking.fields['Check Out']) {
       // Nothing to extend (no active booking, or a date-less legacy row).
       await sendWhatsApp(ctx.phone, msg('checkedInMenu', { guestName }));
+      return;
+    }
+
+    // WABISTAY_RATE_CARD_V2: extensions are done by reception (2 more hours at the 2 hour rate); the bot
+    // sells no extra hour or night, writes nothing and prices nothing. Applies to every stay type.
+    if (rateCardV2Enabled()) {
+      const extra = hourlyRatesFor(ctx.property, [2]);
+      logToAxiom('info', 'extend_refused_rate_card_v2', { phone: ctx.phone, bookingId: booking.id, bookingType: booking.fields['Booking Type'] || null });
+      await sendWhatsApp(ctx.phone, msg('extendSpeakToReceptionV2', { extraLine: extra ? ' An extra 2 hours is R' + extra[2] + '.' : '' }));
       return;
     }
 
@@ -8577,10 +8635,11 @@ function stayMenuEnabled() {
   return /^(1|true)$/i.test(String(process.env.WABISTAY_STAY_MENU || '').trim());
 }
 const STAY_PRODUCTS = {
-  '1': { key: 'h2', label: '2 hours', type: 'Hourly', hours: 2 },
-  '2': { key: 'h3', label: '3 hours', type: 'Hourly', hours: 3 },
-  '3': { key: 'day', label: 'Day', type: 'Day', hours: null },
-  '4': { key: 'overnight', label: 'Overnight', type: 'Overnight', hours: null }
+  '1': { key: 'h2', label: '2 hours', type: 'Hourly', hours: 2, menuLabel: '2 hours' },
+  '2': { key: 'h3', label: '3 hours', type: 'Hourly', hours: 3, menuLabel: '3 hours' },
+  '3': { key: 'day', label: 'Day', type: 'Day', hours: null, menuLabel: 'Day stay (4 hours)' },
+  '4': { key: 'overnight', label: 'Overnight', type: 'Overnight', hours: null, menuLabel: 'Overnight' },
+  '5': { key: 'combined', label: 'Combined', type: 'Overnight', hours: null, menuLabel: 'Day + night' }
 };
 const STAY_NOTE_PREFIX = 'Stay: ';
 function sastHourOfDate(date) {
@@ -8609,6 +8668,7 @@ function rateUnitLabel(rateType) {
 // What is on sale now: { keys, prices, lines } or null (use today's flow). Anything that
 // cannot be priced is left off; if nothing is left there is no menu.
 async function stayMenuForNow(property, now = new Date()) {
+  if (rateCardV2Enabled()) return stayMenuForNowV2(property, now);
   const baseKeys = stayMenuKeysForHour(sastHourOfDate(now));
   if (!baseKeys) return null;
   const prices = {};
@@ -8645,16 +8705,75 @@ async function stayMenuForNow(property, now = new Date()) {
   const menuIntro = sastHourOfDate(now) >= 17 ? 'Short stays have finished for today. They start again tomorrow from 8am.\n\n' : '';
   return { keys, prices, lines, anotherDayLine, menuIntro, dayRate, nightRate };
 }
+// ─── RATE CARD V2 (WABISTAY_RATE_CARD_V2) ─────────────────────────────────────
+// The greeting always shows the whole rate card as text, with the booking window beside each line;
+// a line that cannot be booked right now says so. Only options bookable now are numbered, and they
+// are numbered 1, 2, 3 ... in card order with no gaps. Internal product keys stay '1'..'5'
+// (booking note marker, mutation targets); the number the guest types is turned into a key with
+// menu.keys[n - 1]. Prices come from Airtable only: the 2 and 3 hour rates from the property's
+// Hourly Rate fields, Day from the active Per Day row, Overnight from the active Per Night row,
+// Combined (WABISTAY_COMBINED_STAY) from the active "Combined" row. Anything that cannot be priced
+// is left off the card entirely (fail closed). Open hours are 08:00 to 22:59 SAST as before; outside
+// them the menu is null and today's flow (or the closed-hours flow) runs.
+// The combined Day + night booking (WABISTAY_COMBINED_STAY): the line is offered only with that flag AND a priced Combined rate row.
+const COMBINED_STAY_BUILT = true;
+const RATE_CARD_CLOSED_TEXT = 'closed for today, back from 08:00';
+function combinedStayEnabled() {
+  return rateCardV2Enabled() && /^(1|true)$/i.test(String(process.env.WABISTAY_COMBINED_STAY || '').trim());
+}
+function stayProductOpenNow(key, hour) {
+  if (key === '1' || key === '2') return hour >= 8 && hour <= 16;
+  if (key === '3') return hour >= 8 && hour <= 12;
+  return hour >= 8 && hour <= 22; // overnight (arrive 17:00 to 23:00 tonight) and combined (any future date)
+}
+async function stayMenuForNowV2(property, now = new Date()) {
+  const hour = sastHourOfDate(now);
+  if (hour < 8 || hour > 22) return null;
+  const prices = {};
+  const hourly = hourlyRatesFor(property, [2, 3]);
+  if (hourly) { prices['1'] = hourly[2]; prices['2'] = hourly[3]; }
+  const dayRate = await singleActiveRate(property, 'Per Day');
+  if (dayRate && Number(dayRate.fields['Amount']) > 0) prices['3'] = Number(dayRate.fields['Amount']);
+  const nightRate = await singleActiveRate(property, 'Per Night');
+  if (nightRate && Number(nightRate.fields['Amount']) > 0) prices['4'] = Number(nightRate.fields['Amount']);
+  let combinedRate = null;
+  if (COMBINED_STAY_BUILT && combinedStayEnabled()) {
+    combinedRate = await singleActiveRate(property, 'Combined');
+    if (combinedRate && Number(combinedRate.fields['Amount']) > 0) prices['5'] = Number(combinedRate.fields['Amount']);
+    else combinedRate = null;
+  }
+  const cardText = {
+    '1': (p) => '2 hours: R' + p + '. Arrive between 8am and 5pm.',
+    '2': (p) => '3 hours: R' + p + '. Arrive between 8am and 5pm.',
+    '3': (p) => 'Day stay (4 hours): R' + p + '. Arrive between 8am and 1pm, leave by 5pm.',
+    '4': (p) => 'Overnight: R' + p + '. Check in between 5pm and 11pm, check out at 9am.',
+    '5': (p) => 'Day + night: R' + p + ' per day. Arrive between 8am and 1pm, check out at 9am on your departure day.'
+  };
+  const order = ['1', '2', '3', '4', '5'].filter(k => prices[k] !== undefined);
+  const keys = order.filter(k => stayProductOpenNow(k, hour));
+  if (keys.length === 0) return null;
+  const card = order.map(k => '• ' + cardText[k](prices[k]) + (keys.includes(k) ? '' : ' (' + RATE_CARD_CLOSED_TEXT + ')')).join('\n');
+  const lines = keys.map((k, i) => (i + 1) + ' - ' + STAY_PRODUCTS[k].menuLabel).join('\n');
+  const extensionLine = prices['1'] !== undefined ? 'Need more time? Ask reception: an extra 2 hours is R' + prices['1'] + '.\n\n' : '';
+  const phone = property.fields['Guest Redirect Phone'];
+  const anotherDayLine = 'Operating hours are 8am to 11pm. Another day? Please phone reception' + (phone ? ' on ' + phone : '') + '.';
+  return { keys, prices, lines, card, extensionLine, anotherDayLine, menuIntro: '', dayRate, nightRate, combinedRate };
+}
+
 // Reply -> product key ('1'..'4'), 'multi' (the typed multiple-days words, which keep
 // reaching today's typed-dates flow), or null. "2" means the SECOND menu line (3 hours);
 // "2 hours" means two hours.
-function parseStayMenuChoice(text) {
+function parseStayMenuChoice(text, menu) {
   const t = String(text || '').trim().toLowerCase().replace(/\s+/g, ' ');
   if (/^(2|two) ?(hours?|hrs?|h)$/.test(t)) return '1';
   if (/^(3|three) ?(hours?|hrs?|h)$/.test(t)) return '2';
   if (/^day( stay)?$/.test(t)) return '3';
+  if (rateCardV2Enabled() && /^(combined|day ?\+ ?night|day and night)$/.test(t)) return '5';
   if (/^(overnight|night)$/.test(t)) return '4';
-  if (/^[1-4]$/.test(t)) return t;
+  if (rateCardV2Enabled()) {
+    // V2: a bare number is the position in the list the guest was shown (1, 2, 3 ... no gaps).
+    if (/^[1-9]$/.test(t)) return (menu && menu.keys && menu.keys[Number(t) - 1]) || null;
+  } else if (/^[1-4]$/.test(t)) return t;
   if (['multiple days', 'multi-day', 'multiday'].includes(t)) return 'multi';
   return null;
 }
@@ -8665,15 +8784,15 @@ function stayWindowForArrival(product, arrival, now = new Date()) {
   const minutes = arrival.hour * 60 + arrival.minute;
   let inside;
   if (product.type === 'Hourly') inside = minutes < 17 * 60;
-  else if (product.type === 'Day') inside = minutes >= 8 * 60 && minutes <= 15 * 60;
+  else if (product.type === 'Day') inside = minutes >= 8 * 60 && minutes <= (rateCardV2Enabled() ? 13 : 15) * 60;
   else inside = minutes >= 17 * 60 && minutes <= 23 * 60;
   if (!inside) return { ok: false, reason: 'outside_window' };
   const ciIso = sastToUtcIso(today, arrival.hour, arrival.minute);
   if (Date.parse(ciIso) <= now.getTime()) return { ok: false, reason: 'in_the_past' };
   let coIso;
   if (product.type === 'Hourly') coIso = addHoursToIso(ciIso, product.hours);
-  else if (product.type === 'Day') coIso = sastToUtcIso(today, 17, 0);
-  else coIso = sastToUtcIso(addSastDays(today, 1), 10, 0);
+  else if (product.type === 'Day') coIso = rateCardV2Enabled() ? addHoursToIso(ciIso, 4) : sastToUtcIso(today, 17, 0);
+  else coIso = sastToUtcIso(addSastDays(today, 1), overnightCheckoutHour(), 0);
   return { ok: true, ciIso, coIso };
 }
 // The example time shown under "Sam Dlamini": an evening time for Overnight, an afternoon one otherwise.
@@ -8682,7 +8801,7 @@ function stayExampleTime(product) {
 }
 function stayArrivalWindowText(product) {
   if (product.type === 'Hourly') return 'a short stay must start later today and before 17:00';
-  if (product.type === 'Day') return 'Day arrival must be between 08:00 and 15:00 today';
+  if (product.type === 'Day') return rateCardV2Enabled() ? 'Day stay arrival must be between 08:00 and 13:00 today' : 'Day arrival must be between 08:00 and 15:00 today';
   return 'Overnight check-in must be between 17:00 and 23:00 tonight';
 }
 // A bare hour ("9") is read as the one reading that falls inside the product's window and
@@ -8710,6 +8829,14 @@ function stayProductFromBooking(booking) {
 async function stayMenuGreeting(ctx, roomCount) {
   const menu = await stayMenuForNow(ctx.property, stayClock(ctx).menuNow);
   if (!menu) return null;
+  if (rateCardV2Enabled()) {
+    return msg('greetingRateCard', {
+      propertyName: ctx.property.fields['Property Name'],
+      propertyCityLine: propertyCityLine(ctx.property),
+      roomCountLine: roomCountLine(ctx.property, roomCount),
+      rateCard: menu.card, menuLines: menu.lines, extensionLine: menu.extensionLine, anotherDayLine: menu.anotherDayLine
+    });
+  }
   return msg('greetingStayMenu', {
     propertyName: ctx.property.fields['Property Name'],
     propertyCityLine: propertyCityLine(ctx.property),
@@ -8725,7 +8852,7 @@ async function stayMenuGreeting(ctx, roomCount) {
 async function handleStayMenuChoice(ctx) {
   const menu = await stayMenuForNow(ctx.property, stayClock(ctx).menuNow);
   if (!menu) return false;
-  const choice = parseStayMenuChoice(ctx.text);
+  const choice = parseStayMenuChoice(ctx.text, menu);
   if (choice === 'multi') return false;
   if (!choice || !menu.keys.includes(choice)) {
     logToAxiom('info', 'stay_menu_reprompt', {
@@ -8755,7 +8882,7 @@ async function handleStayMenuChoice(ctx) {
   }
   logToAxiom('info', 'stay_menu_choice', { phone: ctx.phone, product: product.key, offered: menu.keys });
   if (!(await advanceGuestState(ctx, { 'Session State': 'AWAITING_HOURLY_DETAILS', 'Last Inbound At': new Date().toISOString() }))) return true;
-  await sendWhatsApp(ctx.phone, msg('stayMenuAskDetails', { example: stayExampleTime(product) }));
+  await sendWhatsApp(ctx.phone, product.key === 'combined' ? msg('combinedAskDetails') : msg('stayMenuAskDetails', { example: stayExampleTime(product) }));
   return true;
 }
 
@@ -8763,6 +8890,7 @@ async function handleStayMenuChoice(ctx) {
 // they typed, checked against the product's window, then the booking is made in one go.
 async function collectStayMenuDetails(ctx, pending) {
   const product = stayProductFromBooking(pending);
+  if (product && product.key === 'combined') return collectCombinedDetails(ctx, pending, product);
   if (!product) {
     // Marker we cannot read: leave it to today's handler rather than guess a product.
     return false;
@@ -8887,16 +9015,20 @@ async function collectStayMenuDetails(ctx, pending) {
   }
 
   logToAxiom('info', 'booking_create', { phone: ctx.phone, guestName, bookingRef, bookingType: product.type, stay: product.key, airtableId: pending.id });
+  logBookingCreatedDetail({ bookingId: pending.id, bookingRef, stay: product.key, bookingType: product.type, checkInIso: ciIso, checkOutIso: coIso, amount });
   if (!(await advanceGuestState(ctx, { 'Guest Name': guestName, 'Session State': 'AWAITING_PAYMENT_METHOD', 'Last Inbound At': new Date().toISOString() }, { bookingId: pending.id, bookingRef }))) return true;
   await supersedeOlderBookings(ctx, { id: pending.id, checkIn: ciIso, ref: bookingRef, stay: product.label });
   await logEnquiry(ctx.property, ctx.phone, 'Booked', { ...enquiryTrackingOpts(ctx), checkInIso: ciIso, checkOutIso: coIso, bookingType: product.type, bookingId: pending.id });
 
-  const stayLabel = product.type === 'Hourly' ? product.label : product.label + ' stay';
+  const stayLabel = product.type === 'Hourly' ? product.label : (rateCardV2Enabled() ? product.menuLabel : product.label + ' stay');
   const view = {
     guestName, bookingRef, amount, stayLabel,
     checkInText: formatSastDateTime(ciIso),
     checkOutText: formatSastDateTime(coIso)
   };
+  // V2: the guest is told reception adds 2 hours at the 2-hour rate (no bot logic behind it).
+  const extraRates = rateCardV2Enabled() ? hourlyRatesFor(ctx.property, [2]) : null;
+  const extensionNote = extraRates ? '\nNeed more time? Ask reception: an extra 2 hours is R' + extraRates[2] + '.' : '';
   const alertTo = operationalAlertPhone(ctx.property);
   await alongsideOwnerAlert(async () => {
   if (alertTo) {
@@ -8913,10 +9045,205 @@ async function collectStayMenuDetails(ctx, pending) {
     }
   }
   }, async () => {
-  await sendWhatsApp(ctx.phone, msg('stayMenuBookingReceived', view));
+  await sendWhatsApp(ctx.phone, rateCardV2Enabled()
+    ? msg('stayMenuBookingReceivedV2', { ...view, extensionNote })
+    : msg('stayMenuBookingReceived', view));
   await sendPaymentMethodMenu(ctx);
   });
   return true;
+}
+
+// ─── COMBINED DAY + NIGHT (WABISTAY_COMBINED_STAY, needs WABISTAY_RATE_CARD_V2) ───────────────────────
+// One booking that covers the day and the night: the guest gives an arrival date, a departure date and an arrival time
+// between 08:00 and 13:00. Price = the active "Combined" rate (WS_Rates, Rate Type Combined) x nights, 1 to 14 nights, arrival
+// no more than 7 days ahead; anything longer or further out goes to reception. Check-in is the arrival date and time,
+// check-out 09:00 on the departure day. The booking is stored as Booking Type Overnight (an existing option) with the note
+// "Stay: Combined"; no new Airtable field is needed. A missing Combined rate row hides the line and refuses the booking.
+const COMBINED_MAX_NIGHTS = 14;
+const COMBINED_MAX_DAYS_AHEAD = 7;
+const COMBINED_ARRIVAL_FROM = 8 * 60;
+const COMBINED_ARRIVAL_TO = 13 * 60;
+function combinedArrivalMinutesOk(minutes) {
+  return minutes >= COMBINED_ARRIVAL_FROM && minutes <= COMBINED_ARRIVAL_TO;
+}
+// A bare hour is the one reading inside 08:00-13:00; otherwise the guest is re-asked.
+function resolveCombinedBareHour(n) {
+  const readings = [{ hour: n % 12, minute: 0 }, { hour: (n % 12) + 12, minute: 0 }];
+  const valid = readings.filter(r => combinedArrivalMinutesOk(r.hour * 60 + r.minute));
+  return valid.length === 1 ? valid[0] : null;
+}
+// Name, two dates and a time from free text, in any layout (one line or four): the dates are located by findDateTokens,
+// the name is what comes before the first date, the time is whichever remaining piece parses as one.
+function parseCombinedDetails(raw) {
+  const tokens = findDateTokens(raw);
+  if (tokens.length < 2) return { name: null, arrivalText: null, departureText: null, time: null };
+  const before = raw.slice(0, tokens[0].start).replace(/\s+/g, ' ').trim();
+  let rest = raw;
+  for (const t of [tokens[1], tokens[0]]) rest = rest.slice(0, t.start) + '\n' + rest.slice(t.end);
+  rest = rest.split('\n').map(l => l.trim()).filter(Boolean);
+  const pieces = [];
+  for (const line of rest) {
+    pieces.push(line);
+    const words = line.split(/\s+/);
+    if (words.length > 1) pieces.push(words[words.length - 1]);
+  }
+  pieces.push(...(before.split(/\s+/).length > 1 ? [before.split(/\s+/).slice(-1)[0]] : []));
+  let time = null;
+  let timeWord = null;
+  for (const p of pieces) {
+    const parsed = parseArrivalTime(p);
+    if (parsed) { time = parsed; timeWord = p; break; }
+  }
+  let name = before;
+  if (timeWord && name) {
+    const idx = name.toLowerCase().lastIndexOf(timeWord.toLowerCase());
+    if (idx >= 0 && idx + timeWord.length === name.length) name = name.slice(0, idx).trim();
+  }
+  return { name: name || null, arrivalText: tokens[0].text, departureText: tokens[1].text, time };
+}
+function combinedNights(arrival, departure) {
+  return Math.round((Date.parse(sastToUtcIso(departure, 0)) - Date.parse(sastToUtcIso(arrival, 0))) / DAY_MS);
+}
+async function collectCombinedDetails(ctx, pending, product) {
+  const now = stayClock(ctx).now;
+  const raw = String(ctx.messageText || '').trim();
+  const phone = ctx.property.fields['Guest Redirect Phone'];
+  const phoneLine = phone ? ' on ' + phone : '';
+  // "overnight": the offer made when the arrival time is outside 08:00-13:00. Switches the parked booking to Overnight.
+  if (/^overnight$/i.test(raw)) {
+    const switchWrite = await airtableUpdate('WS_Bookings', pending.id, { 'Notes': STAY_NOTE_PREFIX + STAY_PRODUCTS['4'].label });
+    if (switchWrite && switchWrite.error) {
+      logToAxiom('error', 'combined_switch_to_overnight_failed', { phone: ctx.phone, bookingId: pending.id, error: JSON.stringify(switchWrite.error) });
+      await sendWhatsApp(ctx.phone, msg('combinedDetailsReprompt'));
+      return true;
+    }
+    logToAxiom('info', 'combined_switched_to_overnight', { phone: ctx.phone, bookingId: pending.id });
+    await sendWhatsApp(ctx.phone, msg('stayMenuAskDetails', { example: stayExampleTime(STAY_PRODUCTS['4']) }));
+    return true;
+  }
+  const parsed = parseCombinedDetails(raw);
+  const knownName = ctx.guest.fields['Guest Name'] !== 'Unknown' ? ctx.guest.fields['Guest Name'] : null;
+  const guestName = parsed.name || knownName;
+  const arrivalDate = parsed.arrivalText ? parseBookingDate(parsed.arrivalText, now) : null;
+  const departureDate = parsed.departureText ? parseBookingDate(parsed.departureText, now) : null;
+  let arrival = parsed.time && parsed.time.ambiguous === undefined ? parsed.time : null;
+  if (parsed.time && parsed.time.ambiguous !== undefined) arrival = resolveCombinedBareHour(parsed.time.ambiguous);
+  if (!guestName || !arrivalDate || !departureDate || !parsed.time) {
+    if (parsed.name && parsed.name !== knownName) await updateGuestState(ctx.guest.id, { 'Guest Name': parsed.name });
+    await sendWhatsApp(ctx.phone, msg('combinedDetailsReprompt'));
+    return true;
+  }
+  // A time outside 08:00-13:00 (or a bare hour that cannot be read inside it): offer overnight.
+  if (!arrival || !combinedArrivalMinutesOk(arrival.hour * 60 + arrival.minute)) {
+    if (parsed.name && parsed.name !== knownName) await updateGuestState(ctx.guest.id, { 'Guest Name': parsed.name });
+    const nightRate = await singleActiveRate(ctx.property, 'Per Night');
+    const nightAmount = nightRate && Number(nightRate.fields['Amount']) > 0 ? Number(nightRate.fields['Amount']) : null;
+    logToAxiom('info', 'combined_arrival_time_refused', { phone: ctx.phone, bookingId: pending.id });
+    await sendWhatsApp(ctx.phone, nightAmount
+      ? msg('combinedTimeWindowOvernight', { amount: nightAmount })
+      : msg('combinedTimeWindow'));
+    return true;
+  }
+  const today = sastCalendarDate(now);
+  const nights = combinedNights(arrivalDate, departureDate);
+  const daysAhead = combinedNights(today, arrivalDate);
+  if (daysAhead < 0 || nights < 1) {
+    await sendWhatsApp(ctx.phone, msg('combinedDatesInvalid'));
+    return true;
+  }
+  if (nights > COMBINED_MAX_NIGHTS || daysAhead > COMBINED_MAX_DAYS_AHEAD) {
+    logToAxiom('info', 'combined_refused_to_reception', { phone: ctx.phone, nights, daysAhead });
+    await sendWhatsApp(ctx.phone, msg('combinedToReception', { phoneLine }));
+    return true;
+  }
+  const ciIso = sastToUtcIso(arrivalDate, arrival.hour, arrival.minute);
+  const coIso = sastToUtcIso(departureDate, overnightCheckoutHour(), 0);
+  if (Date.parse(ciIso) <= now.getTime()) {
+    await sendWhatsApp(ctx.phone, msg('combinedDatesInvalid'));
+    return true;
+  }
+  const rateRow = await singleActiveRate(ctx.property, 'Combined', { fresh: true });
+  const perDay = rateRow ? Number(rateRow.fields['Amount']) : null;
+  if (!(perDay > 0)) {
+    logToAxiom('warn', 'combined_unpriced', { phone: ctx.phone, propertyId: ctx.property.id });
+    await updateGuestState(ctx.guest.id, { 'Session State': 'AWAITING_STAY_TYPE', 'Last Inbound At': new Date().toISOString() });
+    await sendWhatsApp(ctx.phone, msg('hourlyUnavailable', { propertyName: ctx.property.fields['Property Name'] }));
+    return true;
+  }
+  const amount = perDay * nights;
+  const room = await findAvailableRoom(ctx.property.id, ciIso, coIso);
+  if (!room) {
+    logToAxiom('info', 'combined_no_availability', { phone: ctx.phone, checkIn: ciIso, checkOut: coIso });
+    if (parsed.name && parsed.name !== knownName) await updateGuestState(ctx.guest.id, { 'Guest Name': parsed.name });
+    await logEnquiry(ctx.property, ctx.phone, 'No Availability', { ...enquiryTrackingOpts(ctx), checkInIso: ciIso, checkOutIso: coIso, bookingType: 'Overnight' });
+    await sendNoRoomMessage(ctx, 'combined');
+    return true;
+  }
+  const bookingRef = 'WS-' + pending.id.slice(-6).toUpperCase();
+  const confirmWrite = await airtableUpdate('WS_Bookings', pending.id, {
+    'Check In': ciIso, 'Check Out': coIso, 'Room': [room.id], 'Booking Ref': bookingRef,
+    'Status': 'Confirmed', 'Amount Due': amount, 'Rate Applied': [rateRow.id],
+    ...(holdReleaseEnabled() ? { 'Hold Expires At': holdExpiryIso(ciIso) } : {})
+  });
+  if (confirmWrite && confirmWrite.error) {
+    logToAxiom('error', 'combined_confirm_write_failed', { phone: ctx.phone, bookingId: pending.id, roomId: room.id, amount, error: JSON.stringify(confirmWrite.error) });
+    await sendWhatsApp(ctx.phone, msg('hourlyBookingCreateFailed', { guestName }));
+    return true;
+  }
+  const stillFree = await findAvailableRoom(ctx.property.id, ciIso, coIso, { excludeBookingId: pending.id, preferRoomId: room.id });
+  if (!stillFree || stillFree.id !== room.id) {
+    const rollback = await airtableUpdate('WS_Bookings', pending.id, { 'Status': 'Cancelled' });
+    if (rollback && rollback.error) {
+      logToAxiom('error', 'booking_rollback_failed', {
+        phone: ctx.phone, bookingId: pending.id, roomId: room.id, error: JSON.stringify(rollback.error),
+        reason: 'lost the availability race AND the Cancelled write failed — booking may still be holding a contested room'
+      });
+    }
+    await updateGuestState(ctx.guest.id, { 'Session State': 'AWAITING_STAY_TYPE', 'Last Inbound At': new Date().toISOString() });
+    logToAxiom('warn', 'booking_race_lost', { phone: ctx.phone, bookingId: pending.id, roomId: room.id, checkIn: ciIso, checkOut: coIso });
+    await logEnquiry(ctx.property, ctx.phone, 'No Availability', { ...enquiryTrackingOpts(ctx), checkInIso: ciIso, checkOutIso: coIso, bookingType: 'Overnight' });
+    await sendNoRoomMessage(ctx, 'combined_recheck');
+    return true;
+  }
+  logToAxiom('info', 'booking_create', { phone: ctx.phone, guestName, bookingRef, bookingType: 'Overnight', stay: 'combined', nights, airtableId: pending.id });
+  logBookingCreatedDetail({ bookingId: pending.id, bookingRef, stay: 'combined', bookingType: 'Overnight', checkInIso: ciIso, checkOutIso: coIso, amount });
+  if (!(await advanceGuestState(ctx, { 'Guest Name': guestName, 'Session State': 'AWAITING_PAYMENT_METHOD', 'Last Inbound At': new Date().toISOString() }, { bookingId: pending.id, bookingRef }))) return true;
+  await supersedeOlderBookings(ctx, { id: pending.id, checkIn: ciIso, ref: bookingRef, stay: 'Day + night' });
+  await logEnquiry(ctx.property, ctx.phone, 'Booked', { ...enquiryTrackingOpts(ctx), checkInIso: ciIso, checkOutIso: coIso, bookingType: 'Overnight', bookingId: pending.id });
+
+  const arrivalClock = formatSastDateTime(ciIso).split(' at ')[1];
+  const view = {
+    guestName, bookingRef, amount, nights,
+    nightsText: nights === 1 ? '1 night' : nights + ' nights',
+    arrivalDateText: formatSastDayMonth(ciIso), arrivalTime: arrivalClock,
+    departureDateText: formatSastDayMonth(coIso), checkOutTime: formatSastTimeClock(coIso)
+  };
+  const extraRates = hourlyRatesFor(ctx.property, [2]);
+  const extensionNote = extraRates ? '\n\nNeed more time? Ask reception: an extra 2 hours is R' + extraRates[2] + '.' : '';
+  const alertTo = operationalAlertPhone(ctx.property);
+  await alongsideOwnerAlert(async () => {
+  if (alertTo) {
+    logOwnerSendWindow('combined_new_booking', alertTo, ctx.phone);
+    const ownerSend = await sendNewBookingAlert(alertTo, newBookingTemplateParams({
+      propertyName: ctx.property.fields['Property Name'], guestName, guestPhone: ctx.phone, bookingRef,
+      bookingType: 'Combined', checkInIso: ciIso, checkOutIso: coIso, amount
+    }), {
+      key: 'combinedOwnerNewBooking',
+      vars: { ...view, phone: ctx.phone }
+    }, { bookingId: pending.id });
+    if (ownerSend && ownerSend.error) {
+      logToAxiom('error', 'owner_combined_booking_notify_failed', { bookingId: pending.id, error: JSON.stringify(ownerSend.error) });
+    }
+  }
+  }, async () => {
+  await sendWhatsApp(ctx.phone, msg('combinedBookingReceived', { ...view, extensionNote }));
+  await sendPaymentMethodMenu(ctx);
+  });
+  return true;
+}
+// "9:00am" style clock only (the date is printed separately).
+function formatSastTimeClock(iso) {
+  return formatSastDateTime(iso).split(' at ')[1];
 }
 
 // ─── PARALLEL SENDS (WABISTAY_PARALLEL_SENDS) ──────────────────────────────────
