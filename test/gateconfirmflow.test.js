@@ -282,3 +282,15 @@ test('the confirm flag alone includes the pay flow (no need to also set WABISTAY
   const ctx = await run({}, [PAY]);
   assert.strictEqual(booking(ctx)['Status'], 'Checked In');
 });
+
+// ── a guest who never taps "I have my keys" is not stuck ─────────────────────
+
+test('never tapping the keys button: typed 1 (after the ten-minute guard) still checks them out; no cron or checkout step reads the tap', async () => {
+  const ctx = await run({}, [PAY]);
+  assert.ok(booking(ctx)['Keys Prompt Sent At'] && !booking(ctx)['Keys Tap At'], 'prompt sent, never tapped');
+  booking(ctx)['Checked In At'] = ago(20);
+  await play(ctx, [[GUEST, '1']]);
+  assert.strictEqual(booking(ctx)['Status'], 'Checked Out');
+  assert.strictEqual(guest(ctx)['Session State'], 'AWAITING_RATING');
+  assert.strictEqual(require('fs').readFileSync(require('path').join(__dirname, '..', 'api/wabistay/cron/auto-checkout.js'), 'utf8').includes('Keys'), false);
+});
