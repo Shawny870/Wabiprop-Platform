@@ -158,6 +158,7 @@
     "gateCooldownMenu": "Just checked you in — give it a minute before checking out. Reply 1 again in a bit if you still need to leave.",
     "checkedInMenu": "Hi {guestName}! You're checked in. 🛏️\n\nReply with a number:\n1 - Check out",
     "cleanerDispatch": "Hi {cleanerName} 🧹 {roomName} has just been vacated. Please prepare it with fresh linen immediately.\n\nReply *DONE* when complete.",
+    "checkoutWarningV2": "Hi {guestName}, checkout time at {propertyName} has arrived. ⏰\n\nNeed more time? Please ask reception.\nReady to go? Reply *1* to check out.\n\nIf we don't hear from you within 15 minutes, we'll check you out automatically.",
     "checkoutWarning": "Hi {guestName}, checkout time at {propertyName} has arrived. ⏰\n\nNeed more time? Reply *EXTEND* to stay longer.\nReady to go? Reply *1* to check out.\n\nIf we don't hear from you within 15 minutes, we'll check you out automatically.",
     "extensionConfirmed": "No problem {guestName}! 🛏️ We've extended your stay.\n\nEnjoy — reply *1* to check out whenever you're ready.",
     "extendWriteFailed": "Sorry {guestName}, something went wrong on our end and we couldn't extend your stay. Nothing was charged. Please try again.",

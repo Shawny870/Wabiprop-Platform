@@ -73,7 +73,7 @@ test('09:00: the whole rate card with prices and windows, no 1 hour, four number
   assert.match(g, /^Hi! 👋 Welcome to Canary Street Guest Rooms/);
   assert.match(g, /• 2 hours: R200\. Arrive between 8am and 5pm\./);
   assert.match(g, /• 3 hours: R250\. Arrive between 8am and 5pm\./);
-  assert.match(g, /• Day stay \(4 hours\): R350\. Arrive between 8am and 1pm, leave by 5pm\./);
+  assert.match(g, /• Day stay \(4 hours\): R350\. Arrive between 8am and 1pm; your stay ends 4 hours after you arrive\./);
   assert.match(g, /• Overnight: R450\. Check in between 5pm and 11pm, check out at 9am\./);
   assert.ok(!/closed for today/.test(g), 'nothing closed at 09:00');
   assert.ok(!/1 hour|R120/.test(g), 'the 1 hour stay is gone');
@@ -88,7 +88,7 @@ test('14:00: Day is marked closed on the card, and the list is 1, 2, 3 with no s
   const ctx = start();
   await say('hi');
   const g = greeting(ctx);
-  assert.ok(g.includes('• Day stay (4 hours): R350. Arrive between 8am and 1pm, leave by 5pm. ' + CLOSED), 'Day line marked closed');
+  assert.ok(g.includes('• Day stay (4 hours): R350. Arrive between 8am and 1pm; your stay ends 4 hours after you arrive. ' + CLOSED), 'Day line marked closed');
   assert.match(g, /Reply with a number:\n1 - 2 hours\n2 - 3 hours\n3 - Overnight\n/);
   assert.ok(!/\n4 - /.test(g), 'no fourth option');
   assert.ok(!/3 - Day/.test(g), 'Day is not selectable');
