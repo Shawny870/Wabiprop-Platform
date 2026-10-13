@@ -109,7 +109,7 @@ test('2 nights: R1300, check-in 09:00 on arrival, check-out 09:00 on departure, 
   assert.deepStrictEqual(b['Room'], ['recR1']);
   assert.strictEqual(guestRow(c)['Session State'], 'AWAITING_PAYMENT_METHOD');
   const t = texts(c).find(x => /is booked/.test(x));
-  assert.match(t, /Your \*Day \+ night\* stay is booked[\s\S]*\*Arriving:\* 8 Oct(ober)? at 9:00am[\s\S]*\*Leaving:\* 10 Oct(ober)?, check-out 9:00am[\s\S]*\*Nights:\* 2 nights[\s\S]*\*Price:\* R1300\nNeed more time\? Ask reception: an extra 2 hours is R200\./);
+  assert.match(t, /Your \*Day \+ night\* stay is booked[\s\S]*\*Arriving:\* 8 Oct(ober)? at 9:00am[\s\S]*\*Leaving:\* 10 Oct(ober)?, check-out 9:00am[\s\S]*\*Nights:\* 2 nights[\s\S]*\*Price:\* R1300\n\nNeed more time\? Ask reception: an extra 2 hours is R200\./);
   assert.ok(texts(c).some(x => /cashless property/.test(x)), 'payment menu follows');
 });
 

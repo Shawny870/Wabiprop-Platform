@@ -9012,7 +9012,7 @@ async function collectCombinedDetails(ctx, pending, product) {
     departureDateText: formatSastDayMonth(coIso), checkOutTime: formatSastTimeClock(coIso)
   };
   const extraRates = hourlyRatesFor(ctx.property, [2]);
-  const extensionNote = extraRates ? '\nNeed more time? Ask reception: an extra 2 hours is R' + extraRates[2] + '.' : '';
+  const extensionNote = extraRates ? '\n\nNeed more time? Ask reception: an extra 2 hours is R' + extraRates[2] + '.' : '';
   const alertTo = operationalAlertPhone(ctx.property);
   await alongsideOwnerAlert(async () => {
   if (alertTo) {
