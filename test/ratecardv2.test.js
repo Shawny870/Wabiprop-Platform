@@ -9,7 +9,7 @@ const assert = require('node:assert');
 const { installEnv, installFetch, makeRes, metaTextPayload, MockAirtable } = require('./harness');
 
 installEnv();
-const ENV = ['WABISTAY_STAY_MENU', 'WABISTAY_RATE_CARD_V2', 'WABISTAY_COMBINED_STAY', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_INTERACTIVE', 'WABISTAY_LEAN_COPY', 'WABISTAY_HIDE_ONE_HOUR'];
+const ENV = ['WABISTAY_STAY_MENU', 'WABISTAY_RATE_CARD_V2', 'WABISTAY_COMBINED_STAY', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_INTERACTIVE', 'WABISTAY_LEAN_COPY', 'WABISTAY_HIDE_ONE_HOUR', 'WABISTAY_BOOKING_EVENT'];
 const saved = Object.fromEntries(ENV.map(k => [k, process.env[k]]));
 afterEach(() => {
   mock.timers.reset();
@@ -309,4 +309,38 @@ test('EXTEND from a checked-in guest (any stay type) goes to reception with the 
   off.airtable.tables['WS_Bookings'].push({ id: 'recB1', fields: { 'Guest': ['recG1'], 'Status': 'Checked In', 'Booking Type': 'Hourly', 'Check In': iso(9, 0), 'Check Out': iso(12, 0), 'Amount Due': 200, 'Payment Status': 'Paid', 'Room': ['recR1'] } });
   await say('extend');
   assert.ok(!/ask reception/.test(texts(off).join('\n')), 'flag off: today\'s extend flow runs');
+});
+
+// ── review support: one Axiom event per booking (WABISTAY_BOOKING_EVENT) and the Combined row stays out of the typed-dates menu ──
+
+test('WABISTAY_BOOKING_EVENT: one booking_created_detail per booking, with stay, nights, amount and arrival; none with the flag off', async () => {
+  process.env.WABISTAY_BOOKING_EVENT = '1';
+  const events = ctx => ctx.axiom.filter(e => e.event === 'booking_created_detail');
+  const h2 = await book('1', 'Sam Dlamini\n10am');
+  assert.deepStrictEqual(events(h2).map(e => [e.stay, e.bookingType, e.nights, e.amount, e.arrivalDate]), [['h2', 'Hourly', 0, 200, '2026-10-06']]);
+  mock.timers.reset();
+  const day = await book('3', 'Sam Dlamini\n10am');
+  assert.deepStrictEqual(events(day).map(e => [e.stay, e.nights, e.amount]), [['day', 0, 350]]);
+  mock.timers.reset();
+  const night = await book('4', 'Sam Dlamini 7pm', { now: [12, 0] });
+  assert.deepStrictEqual(events(night).map(e => [e.stay, e.nights, e.amount]), [['overnight', 1, 450]]);
+  mock.timers.reset();
+  atSast(9, 0);
+  const typed = start({ state: 'AWAITING_STAY_TYPE' }, { menu: null });
+  await say('multiple days');
+  await say('Sam Dlamini\n25 October\n27 October');
+  assert.deepStrictEqual(events(typed).map(e => [e.stay, e.nights, e.arrivalDate]), [['overnight_typed', 2, '2026-10-25']]);
+  mock.timers.reset();
+  delete process.env.WABISTAY_BOOKING_EVENT;
+  const off = await book('1', 'Sam Dlamini\n10am');
+  assert.strictEqual(events(off).length, 0);
+});
+
+test('an active Combined rate row is never listed in the typed-dates "multiple days" rate menu (it has no per-hour unit)', async () => {
+  atSast(9, 0);
+  const ctx = start({ state: 'AWAITING_STAY_TYPE', combined: 650 }, { menu: null, v2: null });
+  await say('multiple days');
+  const menu = texts(ctx).join('\n');
+  assert.match(menu, /Standard Night: R450 per night/);
+  assert.ok(!/Day \+ night|R650/.test(menu));
 });

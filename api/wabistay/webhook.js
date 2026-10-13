@@ -539,6 +539,7 @@ async function advanceGuestState(ctx, fields, extra = {}) {
 // deployment this log line belongs to.
 const WABISTAY_KNOWN_FLAGS = [
   'WABISTAY_ACTIVITY_THROTTLE',
+  'WABISTAY_BOOKING_EVENT',
   'WABISTAY_AFTER_HOURS',
   'WABISTAY_AIRTABLE_RETRY',
   'WABISTAY_CLEANER_DISPATCH_TEMPLATE',
@@ -586,7 +587,7 @@ const WABISTAY_KNOWN_FLAGS = [
 
 // Switches the code only treats as on for 1/true; for these, 'on' means that,
 // not merely 'set'.
-const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_ACTIVITY_THROTTLE', 'WABISTAY_AFTER_HOURS', 'WABISTAY_AIRTABLE_RETRY', 'WABISTAY_CHECKOUT_BUTTON', 'WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_GATE_REQUIRES_BOOKING', 'WABISTAY_GATE_ROOM_CHECK', 'WABISTAY_GUEST_ADDRESS', 'WABISTAY_HIDE_ONE_HOUR', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_HOURLY_EXPIRY', 'WABISTAY_IGNORE_REACTIONS', 'WABISTAY_INTERACTIVE', 'WABISTAY_LEAN_COPY', 'WABISTAY_MESSAGE_DEDUPE', 'WABISTAY_NONTEXT_REPLY', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_ONE_OPEN_BOOKING', 'WABISTAY_PAID_BY_BOOKING_REF', 'WABISTAY_PAID_ROOM_CONFIRMED', 'WABISTAY_PARALLEL_PREAMBLE', 'WABISTAY_PARALLEL_SENDS', 'WABISTAY_PAY_ASSIGNS_ROOM', 'WABISTAY_RATE_CARD_V2', 'WABISTAY_COMBINED_STAY', 'WABISTAY_READ_CACHE', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD', 'WABISTAY_STAY_MENU', 'WABISTAY_TIMING_LOG', 'WABISTAY_WA_PREWARM'];
+const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_ACTIVITY_THROTTLE', 'WABISTAY_BOOKING_EVENT', 'WABISTAY_AFTER_HOURS', 'WABISTAY_AIRTABLE_RETRY', 'WABISTAY_CHECKOUT_BUTTON', 'WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_GATE_REQUIRES_BOOKING', 'WABISTAY_GATE_ROOM_CHECK', 'WABISTAY_GUEST_ADDRESS', 'WABISTAY_HIDE_ONE_HOUR', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_HOURLY_EXPIRY', 'WABISTAY_IGNORE_REACTIONS', 'WABISTAY_INTERACTIVE', 'WABISTAY_LEAN_COPY', 'WABISTAY_MESSAGE_DEDUPE', 'WABISTAY_NONTEXT_REPLY', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_ONE_OPEN_BOOKING', 'WABISTAY_PAID_BY_BOOKING_REF', 'WABISTAY_PAID_ROOM_CONFIRMED', 'WABISTAY_PARALLEL_PREAMBLE', 'WABISTAY_PARALLEL_SENDS', 'WABISTAY_PAY_ASSIGNS_ROOM', 'WABISTAY_RATE_CARD_V2', 'WABISTAY_COMBINED_STAY', 'WABISTAY_READ_CACHE', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD', 'WABISTAY_STAY_MENU', 'WABISTAY_TIMING_LOG', 'WABISTAY_WA_PREWARM'];
 
 function wabistayFlagState() {
   const names = new Set([...WABISTAY_KNOWN_FLAGS, ...Object.keys(process.env).filter(k => k.startsWith('WABISTAY_'))]);
@@ -1355,6 +1356,22 @@ const SAST_OFFSET_MS = 2 * 60 * 60 * 1000;
 // later step's problem — do not derive these from the property record yet.
 const OVERNIGHT_CHECKIN_HOUR = 14;
 const OVERNIGHT_CHECKOUT_HOUR = 10;
+// WABISTAY_BOOKING_EVENT (1 or true; off by default): one Axiom event, booking_created_detail, at booking creation, so the
+// stay types can be told apart in a review: stay is h2, h3, day, overnight (stay menu), overnight_typed (typed dates), h1/h2/h3
+// (the legacy short-stay duration menu) or combined; with nights, amount (R) and the arrival instant and SAST date. Logging only.
+function bookingEventEnabled() {
+  return /^(1|true)$/i.test(String(process.env.WABISTAY_BOOKING_EVENT || '').trim());
+}
+function logBookingCreatedDetail({ bookingId, bookingRef, stay, bookingType, checkInIso, checkOutIso, amount }) {
+  if (!bookingEventEnabled()) return;
+  const nights = checkInIso && checkOutIso ? Math.round((Date.parse(checkOutIso) - Date.parse(checkInIso)) / (24 * 60 * 60 * 1000)) : null;
+  const d = checkInIso ? new Date(Date.parse(checkInIso) + SAST_OFFSET_MS).toISOString().slice(0, 10) : null;
+  logToAxiom('info', 'booking_created_detail', {
+    bookingId: bookingId || null, bookingRef: bookingRef || null, stay, bookingType,
+    nights: stay === 'combined' || stay === 'overnight' || stay === 'overnight_typed' ? Math.max(1, nights || 0) : 0,
+    amount: Number.isFinite(Number(amount)) ? Number(amount) : null, arrival: checkInIso || null, arrivalDate: d
+  });
+}
 // WABISTAY_RATE_CARD_V2 (1 or true; off by default): the new rate card. Overnight and combined
 // check-out moves from 10:00 to 09:00 for bookings made from now on; existing bookings keep the
 // Check Out already stored on them.
@@ -4486,7 +4503,8 @@ const actions = {
       // Same fetch as the old greetAndAskDetails rateText build — F4/F5-style,
       // unfiltered fetch + JS filter by Property inclusion, unchanged.
       const allActiveRates = await airtableGet('WS_Rates', `{Active} = TRUE()`);
-      const activeRates = allActiveRates.filter(r => (r.fields['Property'] || []).includes(ctx.property.id));
+      // A Combined (Day + night) row is sold only through the stay menu: never listed here, and it has no per-hour unit.
+      const activeRates = allActiveRates.filter(r => (r.fields['Property'] || []).includes(ctx.property.id) && r.fields['Rate Type'] !== 'Combined');
       const rateText = activeRates.length > 0
         ? activeRates.map(r =>
             `• ${r.fields['Rate Name']}: R${r.fields['Amount']} ${rateUnitLabel(r.fields['Rate Type'])}`
@@ -4764,6 +4782,7 @@ const actions = {
     // price existed, so an abandoning guest was already marked Booked with no
     // quote ever sent. recordEta re-affirms on confirmation but the booking-id
     // dedup keeps it to one row.
+    logBookingCreatedDetail({ bookingId: booking.id, bookingRef, stay: 'overnight_typed', bookingType: 'Overnight', checkInIso, checkOutIso, amount: quotedAmount });
     await logEnquiry(ctx.property, ctx.phone, 'Booked', { ...enquiryTrackingOpts(ctx),
       checkInIso, checkOutIso, bookingType: 'Overnight', bookingId: booking.id
     });
@@ -5154,6 +5173,7 @@ const actions = {
     // alert carries the booking id so reception can finish or cancel it.
     if (!(await advanceGuestState(ctx, { 'Session State': ctx.next, 'Last Inbound At': new Date().toISOString() }, { bookingId: pending.id, bookingRef }))) return;
     await supersedeOlderBookings(ctx, { id: pending.id, checkIn: checkInIso, ref: bookingRef, stay: `${choice} hour short stay` });
+    logBookingCreatedDetail({ bookingId: pending.id, bookingRef, stay: 'h' + choice, bookingType: 'Hourly', checkInIso, checkOutIso, amount });
     // B19: Booked, Hourly. Completed in one handler, so this is the single log site.
     await logEnquiry(ctx.property, ctx.phone, 'Booked', { ...enquiryTrackingOpts(ctx),
       checkInIso, checkOutIso, bookingType: 'Hourly', bookingId: pending.id
@@ -8788,6 +8808,7 @@ async function collectStayMenuDetails(ctx, pending) {
   }
 
   logToAxiom('info', 'booking_create', { phone: ctx.phone, guestName, bookingRef, bookingType: product.type, stay: product.key, airtableId: pending.id });
+  logBookingCreatedDetail({ bookingId: pending.id, bookingRef, stay: product.key, bookingType: product.type, checkInIso: ciIso, checkOutIso: coIso, amount });
   if (!(await advanceGuestState(ctx, { 'Guest Name': guestName, 'Session State': 'AWAITING_PAYMENT_METHOD', 'Last Inbound At': new Date().toISOString() }, { bookingId: pending.id, bookingRef }))) return true;
   await supersedeOlderBookings(ctx, { id: pending.id, checkIn: ciIso, ref: bookingRef, stay: product.label });
   await logEnquiry(ctx.property, ctx.phone, 'Booked', { ...enquiryTrackingOpts(ctx), checkInIso: ciIso, checkOutIso: coIso, bookingType: product.type, bookingId: pending.id });
@@ -8978,6 +8999,7 @@ async function collectCombinedDetails(ctx, pending, product) {
     return true;
   }
   logToAxiom('info', 'booking_create', { phone: ctx.phone, guestName, bookingRef, bookingType: 'Overnight', stay: 'combined', nights, airtableId: pending.id });
+  logBookingCreatedDetail({ bookingId: pending.id, bookingRef, stay: 'combined', bookingType: 'Overnight', checkInIso: ciIso, checkOutIso: coIso, amount });
   if (!(await advanceGuestState(ctx, { 'Guest Name': guestName, 'Session State': 'AWAITING_PAYMENT_METHOD', 'Last Inbound At': new Date().toISOString() }, { bookingId: pending.id, bookingRef }))) return true;
   await supersedeOlderBookings(ctx, { id: pending.id, checkIn: ciIso, ref: bookingRef, stay: 'Day + night' });
   await logEnquiry(ctx.property, ctx.phone, 'Booked', { ...enquiryTrackingOpts(ctx), checkInIso: ciIso, checkOutIso: coIso, bookingType: 'Overnight', bookingId: pending.id });
