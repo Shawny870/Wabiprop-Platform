@@ -571,6 +571,8 @@ const WABISTAY_KNOWN_FLAGS = [
   'WABISTAY_PARALLEL_PREAMBLE',
   'WABISTAY_PARALLEL_SENDS',
   'WABISTAY_PAY_ASSIGNS_ROOM',
+  'WABISTAY_RATE_CARD_V2',
+  'WABISTAY_COMBINED_STAY',
   'WABISTAY_READ_CACHE',
   'WABISTAY_OWNER_SUMMARY_TEMPLATE',
   'WABISTAY_RECEPTION_PAYMENT_TEMPLATE',
@@ -584,7 +586,7 @@ const WABISTAY_KNOWN_FLAGS = [
 
 // Switches the code only treats as on for 1/true; for these, 'on' means that,
 // not merely 'set'.
-const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_ACTIVITY_THROTTLE', 'WABISTAY_AFTER_HOURS', 'WABISTAY_AIRTABLE_RETRY', 'WABISTAY_CHECKOUT_BUTTON', 'WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_GATE_REQUIRES_BOOKING', 'WABISTAY_GATE_ROOM_CHECK', 'WABISTAY_GUEST_ADDRESS', 'WABISTAY_HIDE_ONE_HOUR', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_HOURLY_EXPIRY', 'WABISTAY_IGNORE_REACTIONS', 'WABISTAY_INTERACTIVE', 'WABISTAY_LEAN_COPY', 'WABISTAY_MESSAGE_DEDUPE', 'WABISTAY_NONTEXT_REPLY', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_ONE_OPEN_BOOKING', 'WABISTAY_PAID_BY_BOOKING_REF', 'WABISTAY_PAID_ROOM_CONFIRMED', 'WABISTAY_PARALLEL_PREAMBLE', 'WABISTAY_PARALLEL_SENDS', 'WABISTAY_PAY_ASSIGNS_ROOM', 'WABISTAY_READ_CACHE', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD', 'WABISTAY_STAY_MENU', 'WABISTAY_TIMING_LOG', 'WABISTAY_WA_PREWARM'];
+const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_ACTIVITY_THROTTLE', 'WABISTAY_AFTER_HOURS', 'WABISTAY_AIRTABLE_RETRY', 'WABISTAY_CHECKOUT_BUTTON', 'WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_GATE_REQUIRES_BOOKING', 'WABISTAY_GATE_ROOM_CHECK', 'WABISTAY_GUEST_ADDRESS', 'WABISTAY_HIDE_ONE_HOUR', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_HOURLY_EXPIRY', 'WABISTAY_IGNORE_REACTIONS', 'WABISTAY_INTERACTIVE', 'WABISTAY_LEAN_COPY', 'WABISTAY_MESSAGE_DEDUPE', 'WABISTAY_NONTEXT_REPLY', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_ONE_OPEN_BOOKING', 'WABISTAY_PAID_BY_BOOKING_REF', 'WABISTAY_PAID_ROOM_CONFIRMED', 'WABISTAY_PARALLEL_PREAMBLE', 'WABISTAY_PARALLEL_SENDS', 'WABISTAY_PAY_ASSIGNS_ROOM', 'WABISTAY_RATE_CARD_V2', 'WABISTAY_COMBINED_STAY', 'WABISTAY_READ_CACHE', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD', 'WABISTAY_STAY_MENU', 'WABISTAY_TIMING_LOG', 'WABISTAY_WA_PREWARM'];
 
 function wabistayFlagState() {
   const names = new Set([...WABISTAY_KNOWN_FLAGS, ...Object.keys(process.env).filter(k => k.startsWith('WABISTAY_'))]);
@@ -1351,6 +1353,15 @@ const SAST_OFFSET_MS = 2 * 60 * 60 * 1000;
 // later step's problem — do not derive these from the property record yet.
 const OVERNIGHT_CHECKIN_HOUR = 14;
 const OVERNIGHT_CHECKOUT_HOUR = 10;
+// WABISTAY_RATE_CARD_V2 (1 or true; off by default): the new rate card. Overnight and combined
+// check-out moves from 10:00 to 09:00 for bookings made from now on; existing bookings keep the
+// Check Out already stored on them.
+function rateCardV2Enabled() {
+  return /^(1|true)$/i.test(String(process.env.WABISTAY_RATE_CARD_V2 || '').trim());
+}
+function overnightCheckoutHour() {
+  return rateCardV2Enabled() ? 9 : OVERNIGHT_CHECKOUT_HOUR;
+}
 
 // B12 (auto-checkout): once a booking is past its Check Out, the cron sends one
 // warning offering an extension; if still unresolved AUTO_CHECKOUT_GRACE_MS
@@ -2187,7 +2198,8 @@ function parseOneLineNameAndTime(line) {
 // walk-ins (WALKIN ... 1HRS) and the +1 hour extension charge still use the 1hr
 // rate, so keep it populated.
 function hideOneHourEnabled() {
-  return /^(1|true)$/i.test(String(process.env.WABISTAY_HIDE_ONE_HOUR || '').trim());
+  // WABISTAY_RATE_CARD_V2 removes the 1-hour stay for good, so it implies this flag.
+  return rateCardV2Enabled() || /^(1|true)$/i.test(String(process.env.WABISTAY_HIDE_ONE_HOUR || '').trim());
 }
 function offeredHourlyDurations() {
   return hideOneHourEnabled() ? HOURLY_DURATIONS.filter(h => h !== 1) : HOURLY_DURATIONS;
@@ -3609,7 +3621,7 @@ const actions = {
       ? sastToUtcIso(parsed.checkInDate, OVERNIGHT_CHECKIN_HOUR)
       : new Date().toISOString();
     const checkOutIso = isOvernight
-      ? sastToUtcIso(parsed.checkOutDate, OVERNIGHT_CHECKOUT_HOUR)
+      ? sastToUtcIso(parsed.checkOutDate, overnightCheckoutHour())
       : addHoursToIso(checkInIso, parsed.hours);
     const checkedInAtIso = new Date().toISOString();
 
@@ -4560,7 +4572,7 @@ const actions = {
     }
 
     const checkInIso = sastToUtcIso(checkInDate, OVERNIGHT_CHECKIN_HOUR);
-    const checkOutIso = sastToUtcIso(checkOutDate, OVERNIGHT_CHECKOUT_HOUR);
+    const checkOutIso = sastToUtcIso(checkOutDate, overnightCheckoutHour());
 
     // B8: the real double-booking fix — decided here, at enquiry, not at the gate.
     // Before this, the first collision anyone noticed was two guests at the door.
@@ -5944,6 +5956,15 @@ const actions = {
     if (!booking || !booking.fields['Check Out']) {
       // Nothing to extend (no active booking, or a date-less legacy row).
       await sendWhatsApp(ctx.phone, msg('checkedInMenu', { guestName }));
+      return;
+    }
+
+    // WABISTAY_RATE_CARD_V2: extensions are done by reception (2 more hours at the 2 hour rate); the bot
+    // sells no extra hour or night, writes nothing and prices nothing. Applies to every stay type.
+    if (rateCardV2Enabled()) {
+      const extra = hourlyRatesFor(ctx.property, [2]);
+      logToAxiom('info', 'extend_refused_rate_card_v2', { phone: ctx.phone, bookingId: booking.id, bookingType: booking.fields['Booking Type'] || null });
+      await sendWhatsApp(ctx.phone, msg('extendSpeakToReceptionV2', { extraLine: extra ? ' An extra 2 hours is R' + extra[2] + '.' : '' }));
       return;
     }
 
@@ -8385,10 +8406,11 @@ function stayMenuEnabled() {
   return /^(1|true)$/i.test(String(process.env.WABISTAY_STAY_MENU || '').trim());
 }
 const STAY_PRODUCTS = {
-  '1': { key: 'h2', label: '2 hours', type: 'Hourly', hours: 2 },
-  '2': { key: 'h3', label: '3 hours', type: 'Hourly', hours: 3 },
-  '3': { key: 'day', label: 'Day', type: 'Day', hours: null },
-  '4': { key: 'overnight', label: 'Overnight', type: 'Overnight', hours: null }
+  '1': { key: 'h2', label: '2 hours', type: 'Hourly', hours: 2, menuLabel: '2 hours' },
+  '2': { key: 'h3', label: '3 hours', type: 'Hourly', hours: 3, menuLabel: '3 hours' },
+  '3': { key: 'day', label: 'Day', type: 'Day', hours: null, menuLabel: 'Day stay (4 hours)' },
+  '4': { key: 'overnight', label: 'Overnight', type: 'Overnight', hours: null, menuLabel: 'Overnight' },
+  '5': { key: 'combined', label: 'Combined', type: 'Combined', hours: null, menuLabel: 'Day + night' }
 };
 const STAY_NOTE_PREFIX = 'Stay: ';
 function sastHourOfDate(date) {
@@ -8417,6 +8439,7 @@ function rateUnitLabel(rateType) {
 // What is on sale now: { keys, prices, lines } or null (use today's flow). Anything that
 // cannot be priced is left off; if nothing is left there is no menu.
 async function stayMenuForNow(property, now = new Date()) {
+  if (rateCardV2Enabled()) return stayMenuForNowV2(property, now);
   const baseKeys = stayMenuKeysForHour(sastHourOfDate(now));
   if (!baseKeys) return null;
   const prices = {};
@@ -8453,16 +8476,75 @@ async function stayMenuForNow(property, now = new Date()) {
   const menuIntro = sastHourOfDate(now) >= 17 ? 'Short stays have finished for today. They start again tomorrow from 8am.\n\n' : '';
   return { keys, prices, lines, anotherDayLine, menuIntro, dayRate, nightRate };
 }
+// ─── RATE CARD V2 (WABISTAY_RATE_CARD_V2) ─────────────────────────────────────
+// The greeting always shows the whole rate card as text, with the booking window beside each line;
+// a line that cannot be booked right now says so. Only options bookable now are numbered, and they
+// are numbered 1, 2, 3 ... in card order with no gaps. Internal product keys stay '1'..'5'
+// (booking note marker, mutation targets); the number the guest types is turned into a key with
+// menu.keys[n - 1]. Prices come from Airtable only: the 2 and 3 hour rates from the property's
+// Hourly Rate fields, Day from the active Per Day row, Overnight from the active Per Night row,
+// Combined (WABISTAY_COMBINED_STAY) from the active "Combined" row. Anything that cannot be priced
+// is left off the card entirely (fail closed). Open hours are 08:00 to 22:59 SAST as before; outside
+// them the menu is null and today's flow (or the closed-hours flow) runs.
+// The combined Day + night booking is not built yet: until it is, the line is never offered, flag or not.
+const COMBINED_STAY_BUILT = false;
+const RATE_CARD_CLOSED_TEXT = 'closed for today, back from 08:00';
+function combinedStayEnabled() {
+  return rateCardV2Enabled() && /^(1|true)$/i.test(String(process.env.WABISTAY_COMBINED_STAY || '').trim());
+}
+function stayProductOpenNow(key, hour) {
+  if (key === '1' || key === '2') return hour >= 8 && hour <= 16;
+  if (key === '3') return hour >= 8 && hour <= 12;
+  return hour >= 8 && hour <= 22; // overnight (arrive 17:00 to 23:00 tonight) and combined (any future date)
+}
+async function stayMenuForNowV2(property, now = new Date()) {
+  const hour = sastHourOfDate(now);
+  if (hour < 8 || hour > 22) return null;
+  const prices = {};
+  const hourly = hourlyRatesFor(property, [2, 3]);
+  if (hourly) { prices['1'] = hourly[2]; prices['2'] = hourly[3]; }
+  const dayRate = await singleActiveRate(property, 'Per Day');
+  if (dayRate && Number(dayRate.fields['Amount']) > 0) prices['3'] = Number(dayRate.fields['Amount']);
+  const nightRate = await singleActiveRate(property, 'Per Night');
+  if (nightRate && Number(nightRate.fields['Amount']) > 0) prices['4'] = Number(nightRate.fields['Amount']);
+  let combinedRate = null;
+  if (COMBINED_STAY_BUILT && combinedStayEnabled()) {
+    combinedRate = await singleActiveRate(property, 'Combined');
+    if (combinedRate && Number(combinedRate.fields['Amount']) > 0) prices['5'] = Number(combinedRate.fields['Amount']);
+    else combinedRate = null;
+  }
+  const cardText = {
+    '1': (p) => '2 hours: R' + p + '. Arrive between 8am and 5pm.',
+    '2': (p) => '3 hours: R' + p + '. Arrive between 8am and 5pm.',
+    '3': (p) => 'Day stay (4 hours): R' + p + '. Arrive between 8am and 1pm, leave by 5pm.',
+    '4': (p) => 'Overnight: R' + p + '. Check in between 5pm and 11pm, check out at 9am.',
+    '5': (p) => 'Day + night: R' + p + ' per day. Arrive between 8am and 1pm, check out at 9am on your departure day.'
+  };
+  const order = ['1', '2', '3', '4', '5'].filter(k => prices[k] !== undefined);
+  const keys = order.filter(k => stayProductOpenNow(k, hour));
+  if (keys.length === 0) return null;
+  const card = order.map(k => '• ' + cardText[k](prices[k]) + (keys.includes(k) ? '' : ' (' + RATE_CARD_CLOSED_TEXT + ')')).join('\n');
+  const lines = keys.map((k, i) => (i + 1) + ' - ' + STAY_PRODUCTS[k].menuLabel).join('\n');
+  const extensionLine = prices['1'] !== undefined ? 'Need more time? Ask reception: an extra 2 hours is R' + prices['1'] + '.\n\n' : '';
+  const phone = property.fields['Guest Redirect Phone'];
+  const anotherDayLine = 'Operating hours are 8am to 11pm. Another day? Please phone reception' + (phone ? ' on ' + phone : '') + '.';
+  return { keys, prices, lines, card, extensionLine, anotherDayLine, menuIntro: '', dayRate, nightRate, combinedRate };
+}
+
 // Reply -> product key ('1'..'4'), 'multi' (the typed multiple-days words, which keep
 // reaching today's typed-dates flow), or null. "2" means the SECOND menu line (3 hours);
 // "2 hours" means two hours.
-function parseStayMenuChoice(text) {
+function parseStayMenuChoice(text, menu) {
   const t = String(text || '').trim().toLowerCase().replace(/\s+/g, ' ');
   if (/^(2|two) ?(hours?|hrs?|h)$/.test(t)) return '1';
   if (/^(3|three) ?(hours?|hrs?|h)$/.test(t)) return '2';
   if (/^day( stay)?$/.test(t)) return '3';
+  if (rateCardV2Enabled() && /^(combined|day ?\+ ?night|day and night)$/.test(t)) return '5';
   if (/^(overnight|night)$/.test(t)) return '4';
-  if (/^[1-4]$/.test(t)) return t;
+  if (rateCardV2Enabled()) {
+    // V2: a bare number is the position in the list the guest was shown (1, 2, 3 ... no gaps).
+    if (/^[1-9]$/.test(t)) return (menu && menu.keys && menu.keys[Number(t) - 1]) || null;
+  } else if (/^[1-4]$/.test(t)) return t;
   if (['multiple days', 'multi-day', 'multiday'].includes(t)) return 'multi';
   return null;
 }
@@ -8473,15 +8555,15 @@ function stayWindowForArrival(product, arrival, now = new Date()) {
   const minutes = arrival.hour * 60 + arrival.minute;
   let inside;
   if (product.type === 'Hourly') inside = minutes < 17 * 60;
-  else if (product.type === 'Day') inside = minutes >= 8 * 60 && minutes <= 15 * 60;
+  else if (product.type === 'Day') inside = minutes >= 8 * 60 && minutes <= (rateCardV2Enabled() ? 13 : 15) * 60;
   else inside = minutes >= 17 * 60 && minutes <= 23 * 60;
   if (!inside) return { ok: false, reason: 'outside_window' };
   const ciIso = sastToUtcIso(today, arrival.hour, arrival.minute);
   if (Date.parse(ciIso) <= now.getTime()) return { ok: false, reason: 'in_the_past' };
   let coIso;
   if (product.type === 'Hourly') coIso = addHoursToIso(ciIso, product.hours);
-  else if (product.type === 'Day') coIso = sastToUtcIso(today, 17, 0);
-  else coIso = sastToUtcIso(addSastDays(today, 1), 10, 0);
+  else if (product.type === 'Day') coIso = rateCardV2Enabled() ? addHoursToIso(ciIso, 4) : sastToUtcIso(today, 17, 0);
+  else coIso = sastToUtcIso(addSastDays(today, 1), overnightCheckoutHour(), 0);
   return { ok: true, ciIso, coIso };
 }
 // The example time shown under "Sam Dlamini": an evening time for Overnight, an afternoon one otherwise.
@@ -8490,7 +8572,7 @@ function stayExampleTime(product) {
 }
 function stayArrivalWindowText(product) {
   if (product.type === 'Hourly') return 'a short stay must start later today and before 17:00';
-  if (product.type === 'Day') return 'Day arrival must be between 08:00 and 15:00 today';
+  if (product.type === 'Day') return rateCardV2Enabled() ? 'Day stay arrival must be between 08:00 and 13:00 today' : 'Day arrival must be between 08:00 and 15:00 today';
   return 'Overnight check-in must be between 17:00 and 23:00 tonight';
 }
 // A bare hour ("9") is read as the one reading that falls inside the product's window and
@@ -8518,6 +8600,14 @@ function stayProductFromBooking(booking) {
 async function stayMenuGreeting(ctx, roomCount) {
   const menu = await stayMenuForNow(ctx.property, stayClock(ctx).menuNow);
   if (!menu) return null;
+  if (rateCardV2Enabled()) {
+    return msg('greetingRateCard', {
+      propertyName: ctx.property.fields['Property Name'],
+      propertyCityLine: propertyCityLine(ctx.property),
+      roomCountLine: roomCountLine(ctx.property, roomCount),
+      rateCard: menu.card, menuLines: menu.lines, extensionLine: menu.extensionLine, anotherDayLine: menu.anotherDayLine
+    });
+  }
   return msg('greetingStayMenu', {
     propertyName: ctx.property.fields['Property Name'],
     propertyCityLine: propertyCityLine(ctx.property),
@@ -8533,7 +8623,7 @@ async function stayMenuGreeting(ctx, roomCount) {
 async function handleStayMenuChoice(ctx) {
   const menu = await stayMenuForNow(ctx.property, stayClock(ctx).menuNow);
   if (!menu) return false;
-  const choice = parseStayMenuChoice(ctx.text);
+  const choice = parseStayMenuChoice(ctx.text, menu);
   if (choice === 'multi') return false;
   if (!choice || !menu.keys.includes(choice)) {
     logToAxiom('info', 'stay_menu_reprompt', {
@@ -8699,12 +8789,15 @@ async function collectStayMenuDetails(ctx, pending) {
   await supersedeOlderBookings(ctx, { id: pending.id, checkIn: ciIso, ref: bookingRef, stay: product.label });
   await logEnquiry(ctx.property, ctx.phone, 'Booked', { ...enquiryTrackingOpts(ctx), checkInIso: ciIso, checkOutIso: coIso, bookingType: product.type, bookingId: pending.id });
 
-  const stayLabel = product.type === 'Hourly' ? product.label : product.label + ' stay';
+  const stayLabel = product.type === 'Hourly' ? product.label : (rateCardV2Enabled() ? product.menuLabel : product.label + ' stay');
   const view = {
     guestName, bookingRef, amount, stayLabel,
     checkInText: formatSastDateTime(ciIso),
     checkOutText: formatSastDateTime(coIso)
   };
+  // V2: the guest is told reception adds 2 hours at the 2-hour rate (no bot logic behind it).
+  const extraRates = rateCardV2Enabled() ? hourlyRatesFor(ctx.property, [2]) : null;
+  const extensionNote = extraRates ? '\nNeed more time? Ask reception: an extra 2 hours is R' + extraRates[2] + '.' : '';
   const alertTo = operationalAlertPhone(ctx.property);
   await alongsideOwnerAlert(async () => {
   if (alertTo) {
@@ -8721,7 +8814,9 @@ async function collectStayMenuDetails(ctx, pending) {
     }
   }
   }, async () => {
-  await sendWhatsApp(ctx.phone, msg('stayMenuBookingReceived', view));
+  await sendWhatsApp(ctx.phone, rateCardV2Enabled()
+    ? msg('stayMenuBookingReceivedV2', { ...view, extensionNote })
+    : msg('stayMenuBookingReceived', view));
   await sendPaymentMethodMenu(ctx);
   });
   return true;
