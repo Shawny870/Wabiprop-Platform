@@ -56,6 +56,20 @@ for (const [name, handler] of [['router', router], ['wabistay handler', wabistay
     assert.strictEqual(e.pricing_category, 'service');
   });
 
+  test(`${name}: the pricing type (free_customer_service or regular) is logged as pricing_type, alongside the existing fields`, async () => {
+    const [free] = await logged(handler, { ...base, pricing: { billable: false, pricing_model: 'PMP', category: 'utility', type: 'free_customer_service' } });
+    assert.strictEqual(free.pricing_type, 'free_customer_service');
+    assert.strictEqual(free.pricing_category, 'utility');
+    assert.strictEqual(free.billable, false);
+    const [paid] = await logged(handler, { ...base, pricing: { billable: true, pricing_model: 'PMP', category: 'utility', type: 'regular' } });
+    assert.strictEqual(paid.pricing_type, 'regular');
+  });
+
+  test(`${name}: a pricing object without a type logs no pricing_type`, async () => {
+    const [e] = await logged(handler, { ...base, pricing: { billable: true, pricing_model: 'PMP', category: 'utility' } });
+    assert.ok(!('pricing_type' in e));
+  });
+
   test(`${name}: a marketing category is logged as sent`, async () => {
     const [e] = await logged(handler, { ...base, pricing: { billable: true, pricing_model: 'PMP', category: 'marketing' } });
     assert.strictEqual(e.pricing_category, 'marketing');
@@ -65,7 +79,7 @@ for (const [name, handler] of [['router', router], ['wabistay handler', wabistay
     const [e] = await logged(handler, { ...base, status: 'sent' });
     assert.strictEqual(e.wamid, 'wamid.pricing.test');
     assert.strictEqual(e.status, 'sent');
-    for (const k of ['billable', 'pricing_model', 'pricing_category']) assert.ok(!(k in e), `${k} absent`);
+    for (const k of ['billable', 'pricing_model', 'pricing_category', 'pricing_type']) assert.ok(!(k in e), `${k} absent`);
   });
 
   test(`${name}: a failed status keeps its errors array and adds nothing when there is no pricing`, async () => {

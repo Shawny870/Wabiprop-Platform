@@ -239,6 +239,8 @@ module.exports = async function handler(req, res) {
           detail.billable = s.pricing.billable;
           detail.pricing_model = s.pricing.pricing_model;
           detail.pricing_category = s.pricing.category;
+          // Meta's pricing type (e.g. regular or free_customer_service): the field that says WHY a message is or is not charged.
+          if (s.pricing.type !== undefined) detail.pricing_type = s.pricing.type;
         }
         logToAxiom('info', 'whatsapp_status_callback', detail);
       }
