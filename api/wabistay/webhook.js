@@ -548,6 +548,8 @@ const WABISTAY_KNOWN_FLAGS = [
   'WABISTAY_ENQUIRY_TRACKING',
   'WABISTAY_GATE_ALERT_UNPAID',
   'WABISTAY_GATE_ARRIVAL_TEMPLATE',
+  'WABISTAY_GATE_CONFIRM_FLOW',
+  'WABISTAY_GATE_PAY_FLOW',
   'WABISTAY_GATE_REQUIRES_BOOKING',
   'WABISTAY_GATE_ROOM_CHECK',
   'WABISTAY_GUEST_ADDRESS',
@@ -588,7 +590,7 @@ const WABISTAY_KNOWN_FLAGS = [
 
 // Switches the code only treats as on for 1/true; for these, 'on' means that,
 // not merely 'set'.
-const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_ACTIVITY_THROTTLE', 'WABISTAY_BOOKING_EVENT', 'WABISTAY_AFTER_HOURS', 'WABISTAY_AIRTABLE_RETRY', 'WABISTAY_CHECKOUT_BUTTON', 'WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_GATE_REQUIRES_BOOKING', 'WABISTAY_GATE_ROOM_CHECK', 'WABISTAY_GUEST_ADDRESS', 'WABISTAY_HIDE_ONE_HOUR', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_HOURLY_EXPIRY', 'WABISTAY_IGNORE_REACTIONS', 'WABISTAY_INTERACTIVE', 'WABISTAY_LEAN_COPY', 'WABISTAY_MESSAGE_DEDUPE', 'WABISTAY_NONTEXT_REPLY', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_ONE_OPEN_BOOKING', 'WABISTAY_OVERNIGHT_AMOUNT_NIGHTS', 'WABISTAY_PAID_BY_BOOKING_REF', 'WABISTAY_PAID_ROOM_CONFIRMED', 'WABISTAY_PARALLEL_PREAMBLE', 'WABISTAY_PARALLEL_SENDS', 'WABISTAY_PAY_ASSIGNS_ROOM', 'WABISTAY_RATE_CARD_V2', 'WABISTAY_COMBINED_STAY', 'WABISTAY_READ_CACHE', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD', 'WABISTAY_STAY_MENU', 'WABISTAY_TIMING_LOG', 'WABISTAY_WA_PREWARM'];
+const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_ACTIVITY_THROTTLE', 'WABISTAY_BOOKING_EVENT', 'WABISTAY_AFTER_HOURS', 'WABISTAY_AIRTABLE_RETRY', 'WABISTAY_CHECKOUT_BUTTON', 'WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_GATE_CONFIRM_FLOW', 'WABISTAY_GATE_PAY_FLOW', 'WABISTAY_GATE_REQUIRES_BOOKING', 'WABISTAY_GATE_ROOM_CHECK', 'WABISTAY_GUEST_ADDRESS', 'WABISTAY_HIDE_ONE_HOUR', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_HOURLY_EXPIRY', 'WABISTAY_IGNORE_REACTIONS', 'WABISTAY_INTERACTIVE', 'WABISTAY_LEAN_COPY', 'WABISTAY_MESSAGE_DEDUPE', 'WABISTAY_NONTEXT_REPLY', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_ONE_OPEN_BOOKING', 'WABISTAY_OVERNIGHT_AMOUNT_NIGHTS', 'WABISTAY_PAID_BY_BOOKING_REF', 'WABISTAY_PAID_ROOM_CONFIRMED', 'WABISTAY_PARALLEL_PREAMBLE', 'WABISTAY_PARALLEL_SENDS', 'WABISTAY_PAY_ASSIGNS_ROOM', 'WABISTAY_RATE_CARD_V2', 'WABISTAY_COMBINED_STAY', 'WABISTAY_READ_CACHE', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD', 'WABISTAY_STAY_MENU', 'WABISTAY_TIMING_LOG', 'WABISTAY_WA_PREWARM'];
 
 function wabistayFlagState() {
   const names = new Set([...WABISTAY_KNOWN_FLAGS, ...Object.keys(process.env).filter(k => k.startsWith('WABISTAY_'))]);
@@ -894,6 +896,7 @@ async function notifyReceptionOfArrival({ propertyId, propertyName, guestName, r
   const templateName = receptionGateArrivalTemplate();
   const params = [propertyName, guestName, roomName, roomStatus, guestPhone];
   let sent = 0;
+  const tos = [];
 
   for (const seat of seats) {
     const to = formatPhone(String(seat.fields['Current Phone']));
@@ -914,9 +917,18 @@ async function notifyReceptionOfArrival({ propertyId, propertyName, guestName, r
       });
     } else {
       sent++;
+      tos.push(to);
     }
   }
-  return { sent };
+  return { sent, tos };
+}
+// WABISTAY_GATE_CONFIRM_FLOW: one alert per press. The free-form Notify Phone copy is skipped when that same number was just
+// reached by the reception template for this press, so one phone is not alerted twice.
+function notifyCopyIsDuplicate(notifyPhone, receptionResult, propertyId) {
+  if (!gateConfirmFlowEnabled() || !notifyPhone || !receptionResult || !Array.isArray(receptionResult.tos)) return false;
+  const dup = receptionResult.tos.includes(formatPhone(String(notifyPhone)));
+  if (dup) logToAxiom('info', 'gate_alert_owner_copy_deduped', { propertyId: propertyId || null });
+  return dup;
 }
 
 // Unpaid gate arrival (Doc 1b follow-up, 02 Oct 2026). Until now a guest who
@@ -949,7 +961,7 @@ function gateRoomCheckEnabled() {
 async function alertRoomNotReadyAtGate(ctx, booking, room, notifyPhone) {
   const roomName = room.fields['Room Name'];
   const roomStatus = room.fields['Status'] || 'Unknown';
-  await notifyReceptionOfArrival({
+  const notReadyReception = await notifyReceptionOfArrival({
     propertyId: ctx.property.id,
     propertyName: ctx.property.fields['Property Name'],
     guestName: ctx.guest.fields['Guest Name'],
@@ -957,7 +969,7 @@ async function alertRoomNotReadyAtGate(ctx, booking, room, notifyPhone) {
     roomStatus,
     guestPhone: ctx.phone
   });
-  if (notifyPhone) {
+  if (notifyPhone && !notifyCopyIsDuplicate(notifyPhone, notReadyReception, ctx.property.id)) {
     logOwnerSendWindow('gate_room_not_ready', notifyPhone, ctx.phone);
     const ownerSend = await sendWhatsApp(notifyPhone, msg('gateNotifyRoomNotReady', {
       guestName: ctx.guest.fields['Guest Name'],
@@ -972,6 +984,37 @@ async function alertRoomNotReadyAtGate(ctx, booking, room, notifyPhone) {
       });
     }
   }
+}
+
+// B2: "Payment received, <name>. Your room is Room NN. Check-out is 09:00 on <date>. ... Tap the button once you have your keys".
+// With WABISTAY_INTERACTIVE the button is "I have my keys"; without it, or if the send is refused, the same words go as text and the
+// guest replies KEYS. Returns the send result (truthy when something went out). The prompt stamp is non-fatal and is what lets B4 know a
+// nudge is due; a missing field simply means no nudges.
+async function sendKeysPrompt(ctx, booking, roomName, checkOutIso) {
+  const extra = hourlyRatesFor(ctx.property, [2]);
+  const vars = {
+    guestName: ctx.guest.fields['Guest Name'],
+    roomName,
+    checkOutText: checkOutIso ? formatSastTimeOnDate(checkOutIso) : 'the time on your booking',
+    extensionLine: extra ? ' Need more time? Ask reception: an extra 2 hours is R' + extra[2] + '.' : ''
+  };
+  let result = null;
+  if (interactiveEnabled()) {
+    const sent = await sendInteractiveButtons(ctx.phone, { body: msg('gateConfirmRoom', vars), buttons: [{ id: 'keys_ok', title: 'I have my keys' }] });
+    if (sent.ok) result = {};
+    else logToAxiom('warn', 'gate_confirm_button_fell_back', { phone: ctx.phone, error: JSON.stringify(sent.error || sent.invalid || null) });
+  }
+  if (!result) result = await sendWhatsApp(ctx.phone, msg('gateConfirmRoomText', vars));
+  const delivered = !(result && result.error);
+  if (delivered && booking) {
+    try {
+      const stamp = await airtableUpdate('WS_Bookings', booking.id, { 'Keys Prompt Sent At': new Date().toISOString() });
+      if (stamp && stamp.error) logToAxiom('error', 'keys_prompt_stamp_failed', { bookingId: booking.id, error: JSON.stringify(stamp.error) });
+    } catch (err) {
+      logToAxiom('error', 'keys_prompt_stamp_failed', { bookingId: booking.id, message: err.message });
+    }
+  }
+  return result;
 }
 
 async function alertUnpaidGateArrival(ctx, booking, heldRoomId, notifyPhone) {
@@ -1005,7 +1048,7 @@ async function alertUnpaidGateArrival(ctx, booking, heldRoomId, notifyPhone) {
   });
   if (reception && reception.sent > 0) anySent = true;
 
-  if (notifyPhone) {
+  if (notifyPhone && !notifyCopyIsDuplicate(notifyPhone, reception, ctx.property.id)) {
     logOwnerSendWindow('gate_arrival_unpaid', notifyPhone, ctx.phone);
     // A booking that holds a room says so: "No room has been assigned" was false
     // for it. No held room keeps the original copy.
@@ -2189,8 +2232,47 @@ async function supersedeOlderBookings(ctx, fresh) {
 // checking the guest out. An automatic check-in is recognised from the booking's own timestamps: the
 // gate tap came first, payment after it, and the check-in within two minutes of the payment.
 function payAssignsRoomEnabled() {
-  return /^(1|true)$/i.test(String(process.env.WABISTAY_PAY_ASSIGNS_ROOM || '').trim());
+  return /^(1|true)$/i.test(String(process.env.WABISTAY_PAY_ASSIGNS_ROOM || '').trim()) || gatePayFlowEnabled();
 }
+// WABISTAY_GATE_PAY_FLOW (1 or true; off by default): the at-the-gate-before-paying journey, end to end.
+//   (a) the unpaid "I'm at the gate" reply says reception knows, to come to the office, and that the room follows;
+//   (b) reception recording payment for a guest who has pressed 1 checks them in and sends the Welcome (it turns
+//       on the WABISTAY_PAY_ASSIGNS_ROOM behaviour above; nothing is sent when the guest's 24 h window is closed
+//       or they have not pressed 1 yet), and a redelivery or a concurrent duplicate cannot send it twice;
+//   (c) free text from a guest who has pressed 1 gets a short "reception knows you're here" reply, not the menu;
+//   (d) choosing Card says "When you arrive, reply 1 so we can open the gate."
+// Off: all of the above is exactly as before.
+function gatePayFlowEnabled() {
+  return gateConfirmFlowEnabled() || /^(1|true)$/i.test(String(process.env.WABISTAY_GATE_PAY_FLOW || '').trim());
+}
+// WABISTAY_GATE_CONFIRM_FLOW (1 or true; off by default; includes everything WABISTAY_GATE_PAY_FLOW does; the buttons need
+// WABISTAY_INTERACTIVE, without it the same messages go as text and the guest replies KEYS). The gate journey end to end:
+//  B1 the gate press is answered "reception knows you're here and someone will be with you shortly to open the gate";
+//  B2 once the guest is paid and has a room, ONE message with an "I have my keys" button (room, check-out time, the
+//     extra-2-hours note) replaces the Welcome; B3 the tap is logged (WS_Bookings 'Keys Tap At') and the existing check-out
+//     message with its Check out button follows; B4 free text in between gets a nudge, never the menu; B5 reception gets one
+//     alert per press: the Notify Phone copy is dropped when that number already gets the reception template, and the
+//     check-in that reception's own PAID triggers raises no new reception alert. New fields (both optional, fail safe):
+//     WS_Bookings 'Keys Prompt Sent At' and 'Keys Tap At' (date-time). Missing fields: nothing blocks, no nudges are sent.
+function gateConfirmFlowEnabled() {
+  return /^(1|true)$/i.test(String(process.env.WABISTAY_GATE_CONFIRM_FLOW || '').trim());
+}
+// "09:00 on 7 Oct" (SAST), the booking's real check-out.
+function formatSastTimeOnDate(iso) {
+  const d = new Date(Date.parse(iso) + SAST_OFFSET_MS);
+  const hh = String(d.getUTCHours()).padStart(2, '0');
+  const mm = String(d.getUTCMinutes()).padStart(2, '0');
+  return hh + ':' + mm + ' on ' + d.getUTCDate() + ' ' + MONTH_ABBR[d.getUTCMonth()];
+}
+// " No reply in 5 minutes? Call 073 026 0871." from the property's own Guest Redirect Phone; nothing when it has none.
+function gatePayCallLine(property) {
+  const raw = String((property && property.fields && property.fields['Guest Redirect Phone']) || '').replace(/[^\d+]/g, '');
+  if (!raw) return '';
+  const shown = /^0\d{9}$/.test(raw) ? `${raw.slice(0, 3)} ${raw.slice(3, 6)} ${raw.slice(6)}` : raw;
+  return ` No reply in 5 minutes? Call ${shown}.`;
+}
+// A booking whose guest has pressed "I'm at the gate" and is still waiting for the office.
+const _autoCheckInInFlight = new Set();
 const PAY_ASSIGNS_GUARD_MS = 10 * 60 * 1000;
 const PAY_ASSIGNS_CHECKIN_AFTER_PAID_MS = 2 * 60 * 1000;
 const PAY_ASSIGNS_TAP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
@@ -3890,6 +3972,19 @@ const actions = {
   // opts.reportTo: who gets the one-line outcome (default: whoever recorded the payment); opts.requirePaid: DONE-triggered.
   // Returns true when the guest was checked in.
   async autoCheckInAfterPayment(ctx, booking, opts = {}) {
+    if (!gatePayFlowEnabled()) return actions.autoCheckInAfterPaymentRun(ctx, booking, opts);
+    if (_autoCheckInInFlight.has(booking.id)) {
+      logToAxiom('info', 'pay_assigns_room_skipped', { bookingId: booking.id, reason: 'already_in_progress' });
+      return false;
+    }
+    _autoCheckInInFlight.add(booking.id);
+    try {
+      return await actions.autoCheckInAfterPaymentRun(ctx, booking, opts);
+    } finally {
+      _autoCheckInInFlight.delete(booking.id);
+    }
+  },
+  async autoCheckInAfterPaymentRun(ctx, booking, opts = {}) {
     const reportTo = opts.reportTo === undefined ? ctx.phone : opts.reportTo;
     const tapAge = Date.now() - Date.parse(booking.fields['Gate Tap At']);
     const guestId = (booking.fields['Guest'] || [])[0];
@@ -3897,9 +3992,19 @@ const actions = {
     const skip = async (reason) => {
       logToAxiom('info', 'pay_assigns_room_skipped', { bookingId: booking.id, reason });
     };
-    if (!(tapAge >= 0 && tapAge <= PAY_ASSIGNS_TAP_MAX_AGE_MS)) return skip('gate_tap_too_old');
+    if (!gatePayFlowEnabled() && !(tapAge >= 0 && tapAge <= PAY_ASSIGNS_TAP_MAX_AGE_MS)) return skip('gate_tap_too_old');
     if (opts.requirePaid && booking.fields['Payment Status'] !== 'Paid') return skip('not_paid');
     if (!guest || guest.fields['Session State'] !== 'CONFIRMED') return skip('guest_not_waiting');
+    if (gatePayFlowEnabled()) {
+      // The Welcome is a free-form message: only inside the 24 h window opened by the guest's last message (their gate
+      // tap is one). Closed window: send nothing and say so; the guest's next message runs the normal flow.
+      const lastInbound = Math.max(Date.parse(guest.fields['Last Inbound At'] || '') || 0, Date.parse(booking.fields['Gate Tap At'] || '') || 0);
+      if (!(tapAge >= 0) || !(Date.now() - lastInbound < PAY_ASSIGNS_TAP_MAX_AGE_MS)) return skip('window_closed');
+      // One automatic check-in per booking at a time, and only while the booking is still waiting (fresh read):
+      // a Meta redelivery of the payment, or two copies arriving together, cannot send the Welcome twice.
+      const fresh = (await airtableGet('WS_Bookings', `RECORD_ID() = '${booking.id}'`))[0];
+      if (!fresh || fresh.fields['Status'] !== 'Confirmed' || fresh.fields['Checked In At']) return skip('already_checked_in');
+    }
     const open = await airtableGetBookingsByGuestId(guest.id, 'Confirmed');
     if (open.length !== 1 || open[0].id !== booking.id) return skip('not_the_guests_only_confirmed_booking');
     const guestPhone = formatPhone(String(guest.fields['Phone Number'] || ''));
@@ -5289,7 +5394,7 @@ const actions = {
         });
       }
       if (!(await advanceGuestState(ctx, { 'Session State': nextState, 'Last Inbound At': new Date().toISOString() }, { bookingId: booking.id }))) return;
-      await sendWhatsApp(ctx.phone, msg('paymentCardChosen'));
+      await sendWhatsApp(ctx.phone, msg(gatePayFlowEnabled() ? 'paymentCardChosenGate' : 'paymentCardChosen'));
       await sendWhatsApp(ctx.phone, isHourly ? confirmedMenuMessage(ctx.property, guestName) : msg('askEta'));
       return;
     }
@@ -5474,9 +5579,13 @@ const actions = {
       // No writes, no state change (CEO requirement): the guest can send
       // "I'm at the gate" again after paying, and this same check re-runs
       // fresh — nothing about this turn is remembered or needs undoing.
-      await sendWhatsApp(ctx.phone, msg(payAssignsRoomEnabled() ? 'paymentNotYetConfirmedAuto' : 'paymentNotYetConfirmed', {
-        guestName: ctx.guest.fields['Guest Name']
-      }));
+      await sendWhatsApp(ctx.phone, gateConfirmFlowEnabled()
+        ? msg('gateConfirmUnpaid', { guestName: ctx.guest.fields['Guest Name'], callLine: gatePayCallLine(ctx.property) })
+        : gatePayFlowEnabled()
+        ? msg('paymentNotYetConfirmedGate', { guestName: ctx.guest.fields['Guest Name'], callLine: gatePayCallLine(ctx.property) })
+        : msg(payAssignsRoomEnabled() ? 'paymentNotYetConfirmedAuto' : 'paymentNotYetConfirmed', {
+          guestName: ctx.guest.fields['Guest Name']
+        }));
       // Tell the office the guest is on their way to it. After the guest's reply
       // and fenced off, so an alert problem can never cost the guest their answer.
       if (gateAlertUnpaidEnabled()) {
@@ -5504,6 +5613,10 @@ const actions = {
       }
       if (ctx.gateResult) ctx.gateResult.outcome = 'unpaid';
       return;
+    }
+
+    if (gateConfirmFlowEnabled() && booking && !ctx.autoCheckIn) {
+      await sendWhatsApp(ctx.phone, msg('gateConfirmReceived', { guestName: ctx.guest.fields['Guest Name'], callLine: gatePayCallLine(ctx.property) }));
     }
 
     let room = null;
@@ -5639,7 +5752,22 @@ const actions = {
     logToAxiom('info', 'state_transition', { phone: ctx.phone, guestId: ctx.guest.id, from: 'CONFIRMED', to: ctx.next, assignedRoom: assignedRoomName || null });
 
     // Step 6: notify party
-    if (notifyPhone) {
+    // WABISTAY_GATE_CONFIRM_FLOW: one alert per press. A check-in started by reception's own PAID raises no new alert to
+    // reception (they just did it; the press was alerted already). Otherwise reception is told first and the Notify Phone
+    // copy is skipped when that number was just reached by the reception template.
+    const confirmQuiet = gateConfirmFlowEnabled() && !!ctx.autoCheckIn;
+    let confirmReception = null;
+    if (gateConfirmFlowEnabled() && !confirmQuiet) {
+      confirmReception = await notifyReceptionOfArrival({
+        propertyId: ctx.property.id,
+        propertyName: ctx.property.fields['Property Name'],
+        guestName: ctx.guest.fields['Guest Name'],
+        roomName: assignedRoomName || 'an unassigned room',
+        roomStatus: assignedRoomStatus,
+        guestPhone: ctx.phone
+      });
+    }
+    if (notifyPhone && !confirmQuiet && !notifyCopyIsDuplicate(notifyPhone, confirmReception, ctx.property.id)) {
       logOwnerSendWindow('gate_arrival', notifyPhone, ctx.phone); // B17 instrumentation
       // Rule 30 step 2, slice 2: checked but non-fatal — courtesy notification.
       // notifyCleanerOfArrival (Step 6b, right after) is the operationally
@@ -5661,14 +5789,16 @@ const actions = {
 
     // Step 6a: Reception seats, by template. Outside the notifyPhone branch on
     // purpose — a property with no Notify Phone still has Reception to tell.
-    await notifyReceptionOfArrival({
-      propertyId: ctx.property.id,
-      propertyName: ctx.property.fields['Property Name'],
-      guestName: ctx.guest.fields['Guest Name'],
-      roomName: assignedRoomName || 'an unassigned room',
-      roomStatus: assignedRoomStatus,
-      guestPhone: ctx.phone
-    });
+    if (!gateConfirmFlowEnabled()) {
+      await notifyReceptionOfArrival({
+        propertyId: ctx.property.id,
+        propertyName: ctx.property.fields['Property Name'],
+        guestName: ctx.guest.fields['Guest Name'],
+        roomName: assignedRoomName || 'an unassigned room',
+        roomStatus: assignedRoomStatus,
+        guestPhone: ctx.phone
+      });
+    }
 
     // Step 6b: notify the property's cleaner. IN ADDITION to the owner send
     // above, never instead of it — the owner still gets `gateNotify` unchanged.
@@ -5692,9 +5822,14 @@ const actions = {
 
     // Step 7: tell guest
     const propertyName = ctx.property.fields['Property Name'];
-    // WABISTAY_CHECKOUT_BUTTON: the welcome carries one Check out button; if it cannot be sent, today's text goes instead.
+    // WABISTAY_GATE_CONFIRM_FLOW (B2): paid and in a room: one message with an "I have my keys" button, not the Welcome.
+    // The Welcome (with its Check out button) follows the tap (keysConfirmed).
     let welcomeSend = null;
-    if (assignedRoomName && checkoutButtonEnabled()) {
+    if (assignedRoomName && gateConfirmFlowEnabled()) {
+      welcomeSend = await sendKeysPrompt(ctx, booking, assignedRoomName, bookedOut);
+    }
+    // WABISTAY_CHECKOUT_BUTTON: the welcome carries one Check out button; if it cannot be sent, today's text goes instead.
+    if (!welcomeSend && !(assignedRoomName && gateConfirmFlowEnabled()) && assignedRoomName && checkoutButtonEnabled()) {
       const sent = await sendInteractiveButtons(ctx.phone, {
         body: msg('welcomeAssignedButton', { roomName: assignedRoomName, propertyName }),
         buttons: [{ id: 'co_start', title: 'Check out' }]
@@ -5702,7 +5837,7 @@ const actions = {
       if (sent.ok) welcomeSend = {};
       else logToAxiom('warn', 'checkout_button_welcome_fell_back', { phone: ctx.phone, error: JSON.stringify(sent.error || sent.invalid || null) });
     }
-    if (!welcomeSend) {
+    if (!welcomeSend && !(assignedRoomName && gateConfirmFlowEnabled())) {
       welcomeSend = await sendWhatsApp(ctx.phone, assignedRoomName
         ? msg(payAssignsRoomEnabled() ? 'welcomeAssignedNew' : 'welcomeAssigned', { roomName: assignedRoomName, propertyName })
         : msg('welcomeUnassigned', { propertyName }));
@@ -5747,6 +5882,16 @@ const actions = {
     if (hourlyExpiryEnabled() && (await airtableGetBookingsByGuestId(ctx.guest.id, 'Confirmed')).length === 0 && await findHourlyExpiredBooking(ctx.guest.id)) {
       await sendHourlyExpiredReply(ctx);
       return;
+    }
+    // WABISTAY_GATE_PAY_FLOW: a guest who has already pressed "I'm at the gate" is waiting for the office: tell them
+    // so, briefly, instead of offering the menu (whose option 1 is the button they already pressed).
+    if (gatePayFlowEnabled()) {
+      const waiting = (await airtableGetBookingsByGuestId(ctx.guest.id, 'Confirmed')).some(b => b.fields['Gate Tap At']);
+      if (waiting) {
+        logToAxiom('info', 'gate_waiting_reply', { phone: ctx.phone, guestId: ctx.guest.id });
+        await sendWhatsApp(ctx.phone, msg('gateWaitingReply', { guestName: ctx.guest.fields['Guest Name'], callLine: gatePayCallLine(ctx.property) }));
+        return;
+      }
     }
     await sendWhatsApp(ctx.phone, confirmedMenuMessage(ctx.property, ctx.guest.fields['Guest Name']));
   },
@@ -6146,7 +6291,54 @@ const actions = {
 
   // CHECKED_IN fallback menu (F9)
   async showCheckedInMenu(ctx) {
+    // WABISTAY_GATE_CONFIRM_FLOW (B4): between the "I have my keys" message and the tap, free text gets a nudge with the
+    // button, never the checked-in menu. Nothing else is sent and no alert is raised.
+    if (gateConfirmFlowEnabled()) {
+      const b = byNewest(await airtableGetBookingsByGuestId(ctx.guest.id, 'Checked In'))[0] || null;
+      if (b && b.fields['Keys Prompt Sent At'] && !b.fields['Keys Tap At']) {
+        logToAxiom('info', 'keys_nudge', { phone: ctx.phone, bookingId: b.id });
+        let sent = null;
+        if (interactiveEnabled()) {
+          sent = await sendInteractiveButtons(ctx.phone, { body: msg('gateConfirmNudge', { guestName: ctx.guest.fields['Guest Name'] }), buttons: [{ id: 'keys_ok', title: 'I have my keys' }] });
+        }
+        if (!sent || !sent.ok) await sendWhatsApp(ctx.phone, msg('gateConfirmNudgeText', { guestName: ctx.guest.fields['Guest Name'] }));
+        return;
+      }
+    }
     await sendWhatsApp(ctx.phone, msg('checkedInMenu', { guestName: ctx.guest.fields['Guest Name'] }));
+  },
+
+  // WABISTAY_GATE_CONFIRM_FLOW (B3): the guest has their keys. Log the tap, then send the existing check-out message (the
+  // Welcome with its Check out button). A second tap, or a redelivery, sends nothing. A failed stamp never blocks the message.
+  async keysConfirmed(ctx) {
+    const guestName = ctx.guest.fields['Guest Name'];
+    const b = byNewest(await airtableGetBookingsByGuestId(ctx.guest.id, 'Checked In'))[0] || null;
+    if (!gateConfirmFlowEnabled() || !b) { await actions.showCheckedInMenu(ctx); return; }
+    if (b.fields['Keys Tap At']) {
+      logToAxiom('info', 'keys_tap_repeat', { phone: ctx.phone, bookingId: b.id });
+      return;
+    }
+    try {
+      const stamp = await airtableUpdate('WS_Bookings', b.id, { 'Keys Tap At': new Date().toISOString() });
+      if (stamp && stamp.error) logToAxiom('error', 'keys_tap_stamp_failed', { bookingId: b.id, error: JSON.stringify(stamp.error) });
+    } catch (err) {
+      logToAxiom('error', 'keys_tap_stamp_failed', { bookingId: b.id, message: err.message });
+    }
+    const roomId = (b.fields['Room'] || [])[0];
+    const room = roomId ? (await airtableGet('WS_Rooms', `RECORD_ID() = '${roomId}'`))[0] || null : null;
+    const roomName = room ? room.fields['Room Name'] : null;
+    const propertyName = ctx.property.fields['Property Name'];
+    logToAxiom('info', 'keys_confirmed', { phone: ctx.phone, bookingId: b.id });
+    if (!roomName) { await sendWhatsApp(ctx.phone, msg('welcomeUnassigned', { propertyName })); return; }
+    if (checkoutButtonEnabled()) {
+      const sent = await sendInteractiveButtons(ctx.phone, {
+        body: msg('welcomeAssignedButton', { roomName, propertyName }),
+        buttons: [{ id: 'co_start', title: 'Check out' }]
+      });
+      if (sent.ok) return;
+      logToAxiom('warn', 'checkout_button_welcome_fell_back', { phone: ctx.phone, error: JSON.stringify(sent.error || sent.invalid || null) });
+    }
+    await sendWhatsApp(ctx.phone, msg('welcomeAssignedNew', { roomName, propertyName }));
   },
 
   // Unknown session state: reset to NEW
@@ -9197,7 +9389,8 @@ const CHECKOUT_BUTTON_IDS = {
 };
 const INTERACTIVE_REPLY_IDS = {
   pay_card: { state: 'AWAITING_PAYMENT_METHOD', text: '1' },
-  pay_eft: { state: 'AWAITING_PAYMENT_METHOD', text: '2' }
+  pay_eft: { state: 'AWAITING_PAYMENT_METHOD', text: '2' },
+  keys_ok: { state: 'CHECKED_IN', text: '__keys_ok' }
 };
 // States whose "*" row would swallow ANY text as data (an arrival time, rating
 // feedback): a stale tap there is answered with that state's own prompt and goes no
@@ -9804,6 +9997,7 @@ module.exports.aggregateWeeklyRecap = aggregateWeeklyRecap;
 module.exports.weeklyRecapTemplateParams = weeklyRecapTemplateParams;
 module.exports.WEEKLY_RECAP_TEMPLATE = WEEKLY_RECAP_TEMPLATE;
 module.exports.jsonField = jsonField;
+module.exports.actions = actions;
 module.exports.setAirtableRetryDelays = arr => { AIRTABLE_RETRY_DELAYS_MS = arr; };
 module.exports.AirtableUnavailableError = AirtableUnavailableError;
 module.exports.resetReadCache = resetReadCache;
