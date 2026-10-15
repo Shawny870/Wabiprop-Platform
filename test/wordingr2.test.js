@@ -1,10 +1,10 @@
 // test/wordingr2.test.js
 // WABISTAY_WORDING_R2: the approved round-2 guest wording, one flag, off by default.
-//  A greeting (4 items, available / not available now, fixed numbers; 2h and 3h close 30 minutes before arrivals close)
+//  A greeting (4 items, available / not available now, fixed numbers; 2h and 3h close 30 minutes before arrivals close, 17:00 is a valid arrival)
 //  B unavailable / miss replies (reception number always)        C booking + payment choice in ONE message
-//  D one message after the payment choice                        E the gate line on the confirmed menu and the arrival-time message
+//  D one message after the payment choice                        E the gate line on the confirmed menu, the arrival-time message and the unpaid-press reply
 //  F "Check-out" wording                                          G the post-PAID message (one version)
-//  H "You only just checked in" instead of a check-out           the arrival-time messages (time passed, after cutoff, bare number, unreadable)
+//  H "You're already checked in to Room NN" instead of a check-out   the arrival-time messages (time passed, after cutoff, bare number, unreadable)
 // Time is mocked (node:test mock timers). In-memory only: MockAirtable + mocked fetch.
 
 const { test, mock, afterEach } = require('node:test');
@@ -23,7 +23,7 @@ const RECEPTION = '27780384989';
 const sast = (h, m = 0, d = 14) => Date.UTC(2026, 9, d, h - 2, m); // Wed 14 Oct 2026
 function atSast(h, m = 0, d = 14) { mock.timers.reset(); mock.timers.enable({ apis: ['Date'], now: sast(h, m, d) }); }
 const iso = (h, m = 0, d = 14) => new Date(sast(h, m, d)).toISOString();
-const GATE = "When you reach the gate, reply 1. Reception will let you in and take your payment. Once you've paid, reply 1 again and your room details will arrive here. No reply in 5 minutes? Call 073 026 0871.";
+const GATE = "When you reach the gate, reply 1. Reception will let you in and take your payment. Your room details will arrive here once you've paid. If they don't within 5 minutes, reply 1 again or call 073 026 0871.";
 const ADDR = '57 Canary St, Villa Liza, Boksburg, 1459\nDirections: https://maps.example/canary';
 const HELP = ' Need help? Please phone reception on 073 026 0871.';
 
@@ -66,31 +66,32 @@ const last = (ctx, who = GUEST) => to(ctx, who).slice(-1)[0];
 
 // ── A. greeting ───────────────────────────────────────────────────────────────
 
-const TAIL = '\n\nReply with a number for something that is available now.\n\nNeed more time? Ask reception: an extra 2 hours is R200.\n\nOperating hours are 8am to 11pm. Another day? Please phone reception on 073 026 0871.';
-const HEAD = 'Hi! 👋 Welcome to Canary Street Guest Rooms, Boksburg.\n\n*What we offer*\n';
+const TAIL = '\n\nReply with a number for something that is available now.\n\nOperating hours are 8am to 11pm. Another day? Please phone reception on 073 026 0871.';
+const HEAD = 'Hi! 👋 Welcome to Canary Street Guest Rooms, Boksburg.\n\n';
 const L1 = '1 - 2 hours, R200 ✅ Available now. Arrive between 8am and 5pm.';
 const L2 = '2 - 3 hours, R250 ✅ Available now. Arrive between 8am and 5pm.';
 const L3 = '3 - Day stay (4 hours), R350 ✅ Available now. Arrive between 8am and 1pm; your stay ends 4 hours after your booked arrival time.';
 const L4 = '4 - Overnight, R450 ✅ Available now. Arrive between 5pm and 11pm. Check-out: 9am.';
-const X1 = '1 - 2 hours, R200 ❌ Not available now. Arrivals close at 5pm.';
-const X2 = '2 - 3 hours, R250 ❌ Not available now. Arrivals close at 5pm.';
-const X3 = '3 - Day stay (4 hours), R350 ❌ Not available now. Arrive between 8am and 1pm; your stay ends 4 hours after your booked arrival time.';
+const X1 = '1 - 2 hours, R200 ❌ Not available now. Available again tomorrow. Arrive between 8am and 5pm.';
+const X2 = '2 - 3 hours, R250 ❌ Not available now. Available again tomorrow. Arrive between 8am and 5pm.';
+const X3 = '3 - Day stay (4 hours), R350 ❌ Not available now. Available again tomorrow. Arrive between 8am and 1pm; your stay ends 4 hours after your booked arrival time.';
 
-test('A: 09:00 greeting lists all four items, all available now, fixed numbers 1 to 4', async () => {
+test('A: 09:00 greeting lists all four items, all available now, fixed numbers 1 to 4, with no "What we offer" header and no "Need more time?" line', async () => {
   atSast(9, 0);
   const ctx = start();
   await guestSays('hi');
   assert.strictEqual(texts(ctx)[0], HEAD + [L1, L2, L3, L4].join('\n') + TAIL);
+  assert.ok(!/What we offer|Need more time/.test(texts(ctx)[0]));
 });
 
-test('A: 14:00 the Day stay is marked not available now but is not hidden or renumbered', async () => {
+test('A: 14:00 the Day stay is marked not available now ("Available again tomorrow") but is not hidden or renumbered', async () => {
   atSast(14, 0);
   const ctx = start();
   await guestSays('hi');
   assert.strictEqual(texts(ctx)[0], HEAD + [L1, L2, X3, L4].join('\n') + TAIL);
 });
 
-test('A: 18:00 the short stays and Day are not available now ("Arrivals close at 5pm"); Overnight is', async () => {
+test('A: 18:00 the short stays and Day read "Available again tomorrow. Arrive between 8am and 5pm."; Overnight is available', async () => {
   atSast(18, 0);
   const ctx = start();
   await guestSays('hi');
@@ -132,7 +133,7 @@ test('A: with V2 off the greeting is not the new one (the wording flag alone lea
   atSast(9, 0);
   const ctx = start({}, { v2: null });
   await guestSays('hi');
-  assert.ok(!/What we offer/.test(texts(ctx)[0]));
+  assert.ok(!/R200 ✅/.test(texts(ctx)[0]));
   assert.match(texts(ctx)[0], /What would you like to book/);
 });
 
@@ -140,21 +141,23 @@ test('A: with V2 off the greeting is not the new one (the wording flag alone lea
 
 const AVAIL_14 = 'Available now:\n1 - 2 hours, R200\n2 - 3 hours, R250\n4 - Overnight, R450\n\nReply with one of these numbers.';
 
-test('B: picking the Day stay at 14:00 names its window, lists what is available now and shows the reception number', async () => {
+test('B: picking the Day stay at 14:00 says it is available again tomorrow, names the window, lists what is available now and shows the reception number', async () => {
   atSast(14, 0);
   const ctx = start({ state: 'AWAITING_STAY_TYPE' });
   await guestSays('3');
-  assert.strictEqual(texts(ctx)[0], 'Sorry, the Day stay (4 hours) is not available right now. Arrive between 8am and 1pm.\n\n' + AVAIL_14 + HELP);
+  assert.strictEqual(texts(ctx)[0], 'Sorry, the Day stay (4 hours) is not available right now. Available again tomorrow. Arrive between 8am and 1pm.\n\n' + AVAIL_14 + HELP);
   assert.strictEqual(bookings(ctx).length, 0, 'nothing parked');
   await guestSays('day');
   assert.strictEqual(texts(ctx)[1], texts(ctx)[0], 'the typed word behaves the same');
 });
 
-test('B: picking the 2 hours at 16:35 says arrivals close at 5pm', async () => {
+test('B: picking the 2 hours at 16:35 reads "2 hours is" (not "the 2 hours is") and says it is available again tomorrow', async () => {
   atSast(16, 35);
   const ctx = start({ state: 'AWAITING_STAY_TYPE' });
   await guestSays('1');
-  assert.strictEqual(texts(ctx)[0], 'Sorry, the 2 hours is not available right now. Arrivals close at 5pm.\n\nAvailable now:\n4 - Overnight, R450\n\nReply with one of these numbers.' + HELP);
+  assert.strictEqual(texts(ctx)[0], 'Sorry, 2 hours is not available right now. Available again tomorrow. Arrive between 8am and 5pm.\n\nAvailable now:\n4 - Overnight, R450\n\nReply with one of these numbers.' + HELP);
+  await guestSays('2');
+  assert.match(texts(ctx)[1], /^Sorry, 3 hours is not available right now\./);
 });
 
 test('B: a reply that is not a choice gets the miss reply, also with the reception number, every time', async () => {
@@ -253,6 +256,15 @@ test('C: the legacy short-stay path (stay menu off) also sends ONE merged messag
   assert.match(sent[0].body, /Your \*2 hours\* is booked\.[\s\S]*\*Your stay:\* 11:45pm to 1:45am\n\*Price:\* R200\n\nIf you arrive late, your stay still ends at 1:45am\./);
 });
 
+test('C/F: amounts of a thousand or more get a comma (R1,300); smaller ones do not', () => {
+  assert.strictEqual(wh.formatRandText(1300), '1,300');
+  assert.strictEqual(wh.formatRandText(1300.5), '1,300.50');
+  assert.strictEqual(wh.formatRandText(12450), '12,450');
+  assert.strictEqual(wh.formatRandText(450), '450');
+  assert.strictEqual(wh.formatRandText('450.00'), '450');
+  assert.strictEqual(wh.formatRandText(450.5), '450.50');
+});
+
 // ── D. one message after the payment choice ───────────────────────────────────
 
 test('D: Card chosen is ONE message: card line, address with Directions, the new gate line and the menu', async () => {
@@ -276,12 +288,6 @@ test('D: Instant EFT chosen is ONE message; the amount prints as R450 (not R450.
   assert.ok(sent[0].body.endsWith(GATE + "\n\n1 - I'm at the gate\n2 - Cancel my booking"));
 });
 
-test('D: amounts with cents keep them (R450.50)', () => {
-  assert.strictEqual(wh.formatRandText(450), '450');
-  assert.strictEqual(wh.formatRandText('450.00'), '450');
-  assert.strictEqual(wh.formatRandText(450.5), '450.50');
-});
-
 test('D: typed-dates overnight (asks the arrival time next) keeps its two messages, not merged', async () => {
   atSast(9, 0);
   const ctx = start({ state: 'AWAITING_STAY_TYPE' }, { menu: null, v2: null });
@@ -301,7 +307,12 @@ test('D: flag off: today\'s two messages after the card choice', async () => {
   assert.strictEqual(ctx.sends.slice(before).filter(s => s.to === GUEST).length, 2);
 });
 
-// ── E. the gate line on the confirmed menu and the arrival-time message ──────
+// ── E. the gate line on the confirmed menu, the arrival-time message and the unpaid-press reply ──
+
+function gateBooking(extra = {}) {
+  return { id: 'recBook1', fields: { 'Guest': ['recG1'], 'Room': ['recR1'], 'Booking Type': 'Overnight', 'Status': 'Confirmed', 'Amount Due': 450, 'Payment Status': 'Unpaid', 'Payment Method': 'Card',
+    'Booking Ref': 'WS-GATEP1', 'Payment Reference': 'AB12', 'Check In': iso(14, 0), 'Check Out': iso(9, 0, 15), ...extra } };
+}
 
 test('E: "hi" while booked shows the confirmed menu with the new gate line and "Directions:"', async () => {
   atSast(15, 0);
@@ -317,20 +328,21 @@ test('E: the arrival-time confirmation carries the gate line too', async () => {
   assert.strictEqual(texts(ctx)[0], "Perfect! We'll have your room ready for you. 🛏️\n\nSee you at *7pm*.\n\n" + ADDR + '\n\n' + GATE + "\n\n1 - I'm at the gate\n2 - Cancel my booking\n\nWe look forward to hosting you at Canary Street Guest Rooms! 🌟");
 });
 
-test('E: the reply to an unpaid press carries the gate line (without its first sentence, the guest has already pressed 1)', async () => {
+const UNPAID = "Thanks Sam Dlamini, reception knows you're here. Reception will let you in and take your payment. Your room details will arrive here once you've paid. If they don't within 5 minutes, reply 1 again or call 073 026 0871.";
+test('E: the reply to an unpaid press carries the gate line minus its first sentence (the guest has already pressed 1)', async () => {
   atSast(15, 0);
   const ctx = start({ state: 'CONFIRMED', guestName: 'Sam Dlamini', booking: gateBooking() });
   await guestSays('1');
-  assert.strictEqual(texts(ctx)[0], "Thanks Sam Dlamini, reception knows you're here. Reception will let you in and take your payment. Once you've paid, reply 1 again and your room details will arrive here. No reply in 5 minutes? Call 073 026 0871.");
+  assert.strictEqual(texts(ctx)[0], UNPAID);
   assert.strictEqual(guestRow(ctx)['Session State'], 'CONFIRMED');
 });
 
-test('E: a property with no reception number drops only the call sentence; Directions needs a maps link', async () => {
+test('E: a property with no reception number drops only "or call …"; Directions needs a maps link', async () => {
   atSast(15, 0);
   const ctx = start({ state: 'CONFIRMED', guestName: 'Sam Dlamini', phone: '' });
   await guestSays('hi');
-  assert.ok(texts(ctx)[0].includes("your room details will arrive here.\n\n1 - I'm at the gate"));
-  assert.ok(!/Call /.test(texts(ctx)[0]));
+  assert.ok(texts(ctx)[0].includes("If they don't within 5 minutes, reply 1 again.\n\n1 - I'm at the gate"));
+  assert.ok(!/call /.test(texts(ctx)[0]));
   const c2 = start({ state: 'CONFIRMED', guestName: 'Sam Dlamini' });
   c2.airtable.tables['WS_Properties'][0].fields['Guest Maps Link'] = '';
   await guestSays('hi');
@@ -349,10 +361,6 @@ test('E: flag off: today\'s confirmed menu and unpaid-press reply, with no "Dire
 
 // ── G. after reception records PAID: one version ─────────────────────────────
 
-function gateBooking(extra = {}) {
-  return { id: 'recBook1', fields: { 'Guest': ['recG1'], 'Room': ['recR1'], 'Booking Type': 'Overnight', 'Status': 'Confirmed', 'Amount Due': 450, 'Payment Status': 'Unpaid', 'Payment Method': 'Card',
-    'Booking Ref': 'WS-GATEP1', 'Payment Reference': 'AB12', 'Check In': iso(14, 0), 'Check Out': iso(9, 0, 15), ...extra } };
-}
 function startGate(bookingExtra, cfg = {}, guestExtra = {}) {
   atSast(15, 0);
   return start({ state: 'CONFIRMED', guestName: 'Sam Dlamini', booking: gateBooking(bookingExtra), guest: guestExtra }, { payFlow: '1', ...cfg });
@@ -406,12 +414,11 @@ test('G: flag off: today\'s Welcome', async () => {
   assert.match(texts(ctx).slice(-1)[0], /^Welcome to Canary Street Guest Rooms! Your room is \*Room 01\*/);
 });
 
-// ── double press and "just checked in" (H) ───────────────────────────────────
+// ── double press and "already checked in" (H) ───────────────────────────────
 
-const H = "You only just checked in, so we haven't checked you out. When you're leaving, reply 1 again.";
-const UNPAID = "Thanks Sam Dlamini, reception knows you're here. Reception will let you in and take your payment. Once you've paid, reply 1 again and your room details will arrive here. No reply in 5 minutes? Call 073 026 0871.";
+const H = "You're already checked in to Room 01, so we haven't checked you out. Enjoy your stay! When you're leaving, reply 1 again.";
 
-test('double press with the pay flow on: press 1 unpaid, reception records PAID (the room details arrive), press 1 again gets H and is NOT a check-out', async () => {
+test('double press with the pay flow on: press 1 unpaid, reception records PAID (the room details arrive), press 1 again gets H with the real room and is NOT a check-out', async () => {
   const ctx = startGate({});
   await guestSays('1');
   await say(RECEPTION, PAY);
@@ -434,7 +441,7 @@ test('double press with the pay flow OFF: press 1 unpaid, reception records PAID
   assert.strictEqual(guestRow(ctx)['Session State'], 'CHECKED_IN');
 });
 
-test('a press of 1 within a minute of checking in by their own press gets H, not a check-out', async () => {
+test('a press of 1 within a minute of checking in by their own press (the early-checkout guard) gets H with the real room, not a check-out', async () => {
   atSast(15, 0);
   const ctx = start({ state: 'CONFIRMED', guestName: 'Sam Dlamini', booking: gateBooking({ 'Payment Status': 'Paid', 'Amount Paid': 450 }) });
   await guestSays('1');
@@ -452,7 +459,8 @@ test('H replaces "give it a minute" everywhere when the flag is on; flag off kee
   const on = start({ state: 'CONFIRMED', guestName: 'Sam Dlamini', booking: gateBooking({ 'Payment Status': 'Paid', 'Amount Paid': 450 }) });
   await guestSays('1');
   await guestSays('1');
-  assert.ok(![...texts(on)].some(t => /give it a minute|already checked in/.test(t)));
+  assert.ok(!texts(on).some(t => /give it a minute|You are already checked in/.test(t)));
+  assert.strictEqual(texts(on)[1], H);
 });
 
 // ── the arrival-time messages ────────────────────────────────────────────────
@@ -466,6 +474,18 @@ async function atDetails(h, m, choice = '1', cfg = {}) {
 const WINDOW_16_12 = "It's 4:12pm now. Arrive between 4:13pm and 5pm today. Or reply 4 for Overnight, R450." + HELP;
 const ASK = '\n\nPlease send your full name and the time you expect to arrive, each on a new line.';
 
+test('arrival: the first ask uses a time inside the window that is left (not a fixed 2pm)', async () => {
+  const ex = async (h, m, choice) => {
+    const ctx = await atDetails(h, m, choice);
+    mock.timers.reset();
+    return texts(ctx)[0];
+  };
+  assert.strictEqual(await ex(16, 12, '1'), 'Please send your full name and the time you expect to arrive, each on a new line.\n\nExample:\nSam Dlamini\n4:35pm');
+  assert.strictEqual(await ex(9, 0, '1'), 'Please send your full name and the time you expect to arrive, each on a new line.\n\nExample:\nSam Dlamini\n9:25am');
+  assert.strictEqual(await ex(12, 0, '4'), 'Please send your full name and the time you expect to arrive, each on a new line.\n\nExample:\nSam Dlamini\n5:20pm');
+  assert.strictEqual(await ex(9, 0, '3'), 'Please send your full name and the time you expect to arrive, each on a new line.\n\nExample:\nSam Dlamini\n9:25am');
+});
+
 test('arrival: a time that has passed states the time now, the window left, Overnight (reply 4) and the reception number, with a valid example', async () => {
   const ctx = await atDetails(16, 12);
   const before = texts(ctx).length;
@@ -473,18 +493,39 @@ test('arrival: a time that has passed states the time now, the window left, Over
   assert.strictEqual(texts(ctx)[before], 'That time has already passed. ' + WINDOW_16_12 + ASK + '\n\nExample:\nSam Dlamini\n4:35pm');
 });
 
-test('arrival: a time after the arrival cutoff says arrivals close at 5pm and what is left', async () => {
-  const ctx = await atDetails(16, 12);
-  const before = texts(ctx).length;
-  await guestSays('Sam Dlamini 6pm');
-  assert.strictEqual(texts(ctx)[before], 'Sorry, arrivals for the 2 hours close at 5pm. ' + WINDOW_16_12 + ASK + '\n\nExample:\nSam Dlamini\n4:35pm');
+test('arrival: 5pm is a valid arrival for a short stay; a minute later is not ("you need to arrive by 5pm")', async () => {
+  const ok = await atDetails(16, 12);
+  await guestSays('Sam Dlamini 5pm');
+  assert.strictEqual(bookings(ok)[0].fields['Status'], 'Confirmed');
+  assert.strictEqual(bookings(ok)[0].fields['Check In'], iso(17, 0));
+  assert.strictEqual(bookings(ok)[0].fields['Check Out'], iso(19, 0));
+  mock.timers.reset();
+  const late = await atDetails(16, 12);
+  const before = texts(late).length;
+  await guestSays('Sam Dlamini 5:01pm');
+  assert.strictEqual(bookings(late)[0].fields['Status'], 'Enquiry', 'not booked');
+  assert.strictEqual(texts(late)[before], 'Sorry, for 2 hours you need to arrive by 5pm. ' + WINDOW_16_12 + ASK + '\n\nExample:\nSam Dlamini\n4:35pm');
 });
 
-test('arrival: a bare number asks whether they meant pm, with the window', async () => {
-  const ctx = await atDetails(10, 0);
+test('arrival: at 16:59 the only arrival time left for a short stay is 5pm, and the message says so', async () => {
+  const ctx = await atDetails(16, 12);
+  atSast(16, 59);
   const before = texts(ctx).length;
+  await guestSays('hello');
+  assert.strictEqual(texts(ctx)[before], "Sorry, I didn't catch that. It's 4:59pm now. You can arrive at 5pm today. Or reply 4 for Overnight, R450." + HELP + ASK + '\n\nExample:\nSam Dlamini\n5pm');
+});
+
+test('arrival: a bare number that has one valid reading is read that way (5 at 10:00 is 5pm, which is allowed)', async () => {
+  const ctx = await atDetails(10, 0);
   await guestSays('Sam Dlamini 5');
-  assert.strictEqual(texts(ctx)[before], 'Did you mean 5pm? Please reply with the full time, for example "5pm". ' + "It's 10:00am now. Arrive between 10:01am and 5pm today. Or reply 4 for Overnight, R450." + HELP + ASK + '\n\nExample:\nSam Dlamini\n10:25am');
+  assert.strictEqual(bookings(ctx)[0].fields['Check In'], iso(17, 0));
+});
+
+test('arrival: a bare number with no valid reading asks whether they meant pm, with the window', async () => {
+  const ctx = await atDetails(12, 0, '4');
+  const before = texts(ctx).length;
+  await guestSays('Sam Dlamini 3');
+  assert.strictEqual(texts(ctx)[before], 'Did you mean 3pm? Please reply with the full time, for example "3pm". ' + "It's 12:00pm now. Arrive between 5pm and 11pm today." + HELP + ASK + '\n\nExample:\nSam Dlamini\n5:20pm');
   assert.strictEqual(guestRow(ctx)['Guest Name'], 'Sam Dlamini', 'the name given is kept');
 });
 
@@ -515,16 +556,16 @@ test('arrival: when no arrival time is left today it says so, offers Overnight a
   atSast(17, 5);
   const before = texts(ctx).length;
   await guestSays('Sam Dlamini 6pm');
-  assert.strictEqual(texts(ctx)[before], "Sorry, arrivals for the 2 hours close at 5pm. It's 5:05pm now. No arrival times are left today for the 2 hours. Or reply 4 for Overnight, R450." + HELP);
+  assert.strictEqual(texts(ctx)[before], "Sorry, for 2 hours you need to arrive by 5pm. It's 5:05pm now. No arrival times are left today for 2 hours. Or reply 4 for Overnight, R450." + HELP);
 });
 
-test('arrival: replying 4 (or "overnight") switches the booking to Overnight and asks for the evening arrival', async () => {
+test('arrival: replying 4 (or "overnight") switches the booking to Overnight and asks for the evening arrival with a valid example', async () => {
   const ctx = await atDetails(16, 12);
   const before = texts(ctx).length;
   await guestSays('4');
   assert.strictEqual(bookings(ctx)[0].fields['Notes'], 'Stay: Overnight');
   assert.strictEqual(bookings(ctx)[0].fields['Booking Type'], 'Overnight');
-  assert.strictEqual(texts(ctx)[before], 'Please send your full name and the time you expect to arrive, each on a new line.\n\nExample:\nSam Dlamini\n7pm');
+  assert.strictEqual(texts(ctx)[before], 'Please send your full name and the time you expect to arrive, each on a new line.\n\nExample:\nSam Dlamini\n5:20pm');
   await guestSays('Sam Dlamini 7pm');
   assert.strictEqual(bookings(ctx)[0].fields['Status'], 'Confirmed');
   assert.strictEqual(bookings(ctx)[0].fields['Check Out'], iso(9, 0, 15));
@@ -534,7 +575,7 @@ test('arrival: a time that is still ahead but before the window opens says arriv
   const ctx = await atDetails(12, 0, '4');
   const before = texts(ctx).length;
   await guestSays('Sam Dlamini 3pm');
-  assert.strictEqual(texts(ctx)[before], "Sorry, arrivals for the Overnight start at 5pm. It's 12:00pm now. Arrive between 5pm and 11pm today." + HELP + ASK + '\n\nExample:\nSam Dlamini\n5:20pm');
+  assert.strictEqual(texts(ctx)[before], "Sorry, arrivals for Overnight start at 5pm. It's 12:00pm now. Arrive between 5pm and 11pm today." + HELP + ASK + '\n\nExample:\nSam Dlamini\n5:20pm');
 });
 
 test('arrival: the Overnight request itself gets no Overnight offer, and its window reads Arrive between 5pm and 11pm', async () => {
@@ -544,11 +585,21 @@ test('arrival: the Overnight request itself gets no Overnight offer, and its win
   assert.strictEqual(texts(ctx)[before], "That time has already passed. It's 4:12pm now. Arrive between 5pm and 11pm today." + HELP + ASK + '\n\nExample:\nSam Dlamini\n5:20pm');
 });
 
-test('arrival: flag off keeps today\'s messages', async () => {
+test('arrival: the Day stay after 1pm says you need to arrive by 1pm', async () => {
+  const ctx = await atDetails(11, 0, '3');
+  const before = texts(ctx).length;
+  await guestSays('Sam Dlamini 2pm');
+  assert.match(texts(ctx)[before], /^Sorry, for the Day stay \(4 hours\) you need to arrive by 1pm\. It's 11:00am now\. Arrive between 11:01am and 1pm today\./);
+});
+
+test('arrival: flag off keeps today\'s messages (including the fixed 2pm example and the 17:00 cutoff)', async () => {
   const ctx = await atDetails(16, 12, '1', { wording: null, v2: null });
+  assert.match(texts(ctx)[0], /Example:\nSam Dlamini\n2pm$/);
   const before = texts(ctx).length;
   await guestSays('Sam Dlamini 3pm');
   assert.match(texts(ctx)[before], /^That time has already passed\. Please send your full name and the time you expect to arrive, later today\./);
+  await guestSays('Sam Dlamini 5pm');
+  assert.strictEqual(bookings(ctx)[0].fields['Status'], 'Enquiry', 'flag off: 17:00 is still not a valid short-stay arrival');
 });
 
 // ── F. Check-out wording elsewhere ───────────────────────────────────────────
@@ -583,7 +634,7 @@ test('F: the checkout warning reads Check-out, and under V2 tells guests to ask 
   assert.match(await run({ wording: null, v2: false }), /^Hi John Smith, checkout time at Test Lodge has arrived\./);
 });
 
-test('F: combined confirmation, staff alert and messages say Check-out and "arrive between"; the overnight offer reads "Check-out: 9am"', async () => {
+test('F: combined confirmation, staff alert and messages say Check-out and "arrive between"; amounts have a comma (R1,300); the overnight offer reads "Check-out: 9am"', async () => {
   const mk = () => {
     atSast(9, 0);
     const c = start({ state: 'AWAITING_STAY_TYPE' }, { extra: { WABISTAY_COMBINED_STAY: '1' } });
@@ -596,8 +647,11 @@ test('F: combined confirmation, staff alert and messages say Check-out and "arri
   await guestSays('Sam Dlamini\n16 October\n18 October\n9am');
   const t = texts(ctx).join('\n');
   assert.match(t, /\*Check-out:\* 9am on 18 October/);
+  assert.match(t, /\*Price:\* R1,300/);
   assert.ok(!/Leaving/.test(t));
-  assert.match(texts(ctx, '27830000001').join('\n') + texts(ctx, '27831112222').join('\n'), /Check-out: 9am on 18 October/);
+  const staff = texts(ctx, '27830000001').join('\n') + texts(ctx, '27831112222').join('\n');
+  assert.match(staff, /Check-out: 9am on 18 October/);
+  assert.match(staff, /Price: R1,300/);
   const c2 = mk();
   await guestSays('day + night');
   await guestSays('Sam Dlamini\n16 October\n17 October\n2pm');
