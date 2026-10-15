@@ -585,12 +585,13 @@ const WABISTAY_KNOWN_FLAGS = [
   'WABISTAY_STAY_MENU',
   'WABISTAY_TIMING_LOG',
   'WABISTAY_WA_PREWARM',
-  'WABISTAY_WEEKLY_RECAP_TEMPLATE'
+  'WABISTAY_WEEKLY_RECAP_TEMPLATE',
+  'WABISTAY_WORDING_R2'
 ];
 
 // Switches the code only treats as on for 1/true; for these, 'on' means that,
 // not merely 'set'.
-const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_ACTIVITY_THROTTLE', 'WABISTAY_BOOKING_EVENT', 'WABISTAY_AFTER_HOURS', 'WABISTAY_AIRTABLE_RETRY', 'WABISTAY_CHECKOUT_BUTTON', 'WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_GATE_CONFIRM_FLOW', 'WABISTAY_GATE_PAY_FLOW', 'WABISTAY_GATE_REQUIRES_BOOKING', 'WABISTAY_GATE_ROOM_CHECK', 'WABISTAY_GUEST_ADDRESS', 'WABISTAY_HIDE_ONE_HOUR', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_HOURLY_EXPIRY', 'WABISTAY_IGNORE_REACTIONS', 'WABISTAY_INTERACTIVE', 'WABISTAY_LEAN_COPY', 'WABISTAY_MESSAGE_DEDUPE', 'WABISTAY_NONTEXT_REPLY', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_ONE_OPEN_BOOKING', 'WABISTAY_OVERNIGHT_AMOUNT_NIGHTS', 'WABISTAY_PAID_BY_BOOKING_REF', 'WABISTAY_PAID_ROOM_CONFIRMED', 'WABISTAY_PARALLEL_PREAMBLE', 'WABISTAY_PARALLEL_SENDS', 'WABISTAY_PAY_ASSIGNS_ROOM', 'WABISTAY_RATE_CARD_V2', 'WABISTAY_COMBINED_STAY', 'WABISTAY_READ_CACHE', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD', 'WABISTAY_STAY_MENU', 'WABISTAY_TIMING_LOG', 'WABISTAY_WA_PREWARM'];
+const WABISTAY_BOOLEAN_FLAGS = ['WABISTAY_ACTIVITY_THROTTLE', 'WABISTAY_BOOKING_EVENT', 'WABISTAY_AFTER_HOURS', 'WABISTAY_AIRTABLE_RETRY', 'WABISTAY_CHECKOUT_BUTTON', 'WABISTAY_ENQUIRY_TRACKING', 'WABISTAY_GATE_ALERT_UNPAID', 'WABISTAY_GATE_CONFIRM_FLOW', 'WABISTAY_GATE_PAY_FLOW', 'WABISTAY_GATE_REQUIRES_BOOKING', 'WABISTAY_GATE_ROOM_CHECK', 'WABISTAY_GUEST_ADDRESS', 'WABISTAY_HIDE_ONE_HOUR', 'WABISTAY_HOLD_RELEASE', 'WABISTAY_HOURLY_EXPIRY', 'WABISTAY_IGNORE_REACTIONS', 'WABISTAY_INTERACTIVE', 'WABISTAY_LEAN_COPY', 'WABISTAY_MESSAGE_DEDUPE', 'WABISTAY_NONTEXT_REPLY', 'WABISTAY_NOTIFY_ROUTING', 'WABISTAY_ONE_OPEN_BOOKING', 'WABISTAY_OVERNIGHT_AMOUNT_NIGHTS', 'WABISTAY_PAID_BY_BOOKING_REF', 'WABISTAY_PAID_ROOM_CONFIRMED', 'WABISTAY_PARALLEL_PREAMBLE', 'WABISTAY_PARALLEL_SENDS', 'WABISTAY_PAY_ASSIGNS_ROOM', 'WABISTAY_RATE_CARD_V2', 'WABISTAY_COMBINED_STAY', 'WABISTAY_READ_CACHE', 'WABISTAY_ROOM_ORDER', 'WABISTAY_STATE_WRITE_GUARD', 'WABISTAY_STAY_MENU', 'WABISTAY_TIMING_LOG', 'WABISTAY_WA_PREWARM', 'WABISTAY_WORDING_R2'];
 
 function wabistayFlagState() {
   const names = new Set([...WABISTAY_KNOWN_FLAGS, ...Object.keys(process.env).filter(k => k.startsWith('WABISTAY_'))]);
@@ -1015,6 +1016,28 @@ async function sendKeysPrompt(ctx, booking, roomName, checkOutIso) {
     }
   }
   return result;
+}
+
+// WABISTAY_WORDING_R2: "Payment received. Enjoy your stay! Your room is Room 01. [Reception is opening the gate.] Check-out: 9am
+// tomorrow. When you're ready to leave, reply 1 to check out." A short stay shows "Your stay: <start> to <end>" instead of the
+// check-out line (the booked times; a late arrival does not extend it). "Reception is opening the gate." is added only for a
+// guest who pressed 1 BEFORE payment was recorded. With WABISTAY_CHECKOUT_BUTTON the same text carries a Check out button.
+async function sendPostPaidMessage(ctx, booking, roomName, pressedBeforePayment) {
+  let endText = '';
+  const ci = booking && booking.fields['Check In'];
+  const co = booking && booking.fields['Check Out'];
+  if (booking && co) {
+    endText = isShortStayBooking(booking) && ci
+      ? ' Your stay: ' + stayRangeText(ci, co) + '.'
+      : ' Check-out: ' + checkoutPhrase(co) + '.';
+  }
+  const body = msg('postPaidR2', { roomName, openingGate: pressedBeforePayment ? ' Reception is opening the gate.' : '', endText });
+  if (checkoutButtonEnabled()) {
+    const sent = await sendInteractiveButtons(ctx.phone, { body, buttons: [{ id: 'co_start', title: 'Check out' }] });
+    if (sent.ok) return {};
+    logToAxiom('warn', 'checkout_button_welcome_fell_back', { phone: ctx.phone, error: JSON.stringify(sent.error || sent.invalid || null) });
+  }
+  return sendWhatsApp(ctx.phone, body);
 }
 
 async function alertUnpaidGateArrival(ctx, booking, heldRoomId, notifyPhone) {
@@ -2284,6 +2307,7 @@ function isAutoCheckedIn(booking) {
   return paid >= tap && inAt >= paid && inAt - paid <= PAY_ASSIGNS_CHECKIN_AFTER_PAID_MS;
 }
 function confirmedMenuMessage(property, guestName) {
+  if (wordingR2Enabled()) return msg('confirmedMenuR2', { guestName, addressBlock: guestAddressBlock(property), gateLine: wordingGateLine(property) });
   return msg('confirmedMenu', { guestName, addressBlock: guestAddressBlock(property) });
 }
 // Words that may sit directly in front of a time ("Tim at 9pm") and are not part of the name.
@@ -3955,7 +3979,7 @@ const actions = {
         bookingRef
       }));
     } else {
-      await sendWhatsApp(ctx.phone, msg('walkinConfirmed', {
+      await sendWhatsApp(ctx.phone, msg(wordingR2Enabled() ? 'walkinConfirmedR2' : 'walkinConfirmed', {
         guestName: parsed.guestName,
         roomName: requested.fields['Room Name'],
         durationText: durationText(parsed.hours),
@@ -5303,7 +5327,8 @@ const actions = {
       guestName, bookingRef, amount,
       durationText: durationText(choice),
       checkInText: formatSastDateTime(checkInIso),
-      checkOutText: formatSastDateTime(checkOutIso)
+      checkOutText: formatSastDateTime(checkOutIso),
+      stayRange: stayRangeText(checkInIso, checkOutIso)
     };
     const hourlyBookingTo = operationalAlertPhone(ctx.property);
     await alongsideOwnerAlert(async () => {
@@ -5315,7 +5340,7 @@ const actions = {
         propertyName: ctx.property.fields['Property Name'], guestName, guestPhone: ctx.phone, bookingRef,
         bookingType: 'Hourly', checkInIso, checkOutIso, hours: choice, amount
       }), {
-        key: 'hourlyOwnerNewBooking',
+        key: wordingR2Enabled() ? 'hourlyOwnerNewBookingR2' : 'hourlyOwnerNewBooking',
         vars: { ...view, phone: ctx.phone }
       }, { bookingId: pending.id });
       if (ownerSend && ownerSend.error) {
@@ -5325,8 +5350,15 @@ const actions = {
       }
     }
     }, async () => {
+    if (wordingR2Enabled()) {
+      await sendBookingWithPaymentChoice(ctx, msg('bookingPayShortR2', {
+        guestName, stayLabel: durationText(choice), bookingRef, stayRange: stayRangeText(checkInIso, checkOutIso), amount,
+        endClock: sastClockText(checkOutIso), propertyName: ctx.property.fields['Property Name']
+      }));
+    } else {
     await sendWhatsApp(ctx.phone, msg('hourlyBookingReceived', view));
     await sendPaymentMethodMenu(ctx);
+    }
     });
   },
 
@@ -5394,6 +5426,10 @@ const actions = {
         });
       }
       if (!(await advanceGuestState(ctx, { 'Session State': nextState, 'Last Inbound At': new Date().toISOString() }, { bookingId: booking.id }))) return;
+      if (wordingR2Enabled() && isHourly) {
+        await sendWhatsApp(ctx.phone, msg('cardChosenR2', { addressBlock: guestAddressBlock(ctx.property), gateLine: wordingGateLine(ctx.property) }));
+        return;
+      }
       await sendWhatsApp(ctx.phone, msg(gatePayFlowEnabled() ? 'paymentCardChosenGate' : 'paymentCardChosen'));
       await sendWhatsApp(ctx.phone, isHourly ? confirmedMenuMessage(ctx.property, guestName) : msg('askEta'));
       return;
@@ -5432,6 +5468,13 @@ const actions = {
     const bankDetails = property.fields['EFT Bank Details'];
     const bankDetailsBlock = bankDetails ? bankDetails : msg('paymentEftBankDetailsFallback');
 
+    if (wordingR2Enabled() && isHourly) {
+      await sendWhatsApp(ctx.phone, msg('eftChosenR2', {
+        amount: formatAmount(booking.fields['Amount Due']), reference, bankDetailsBlock,
+        addressBlock: guestAddressBlock(ctx.property), gateLine: wordingGateLine(ctx.property)
+      }));
+      return;
+    }
     // WABISTAY_LEAN_COPY: the shorter instant-EFT message (same placeholders, same bank-details fallback line).
     await sendWhatsApp(ctx.phone, msg(leanCopyEnabled() ? 'paymentEftConfirmedLean' : 'paymentEftConfirmed', {
       amount: formatAmount(booking.fields['Amount Due']),
@@ -5489,7 +5532,9 @@ const actions = {
       });
     }
     logToAxiom('info', 'state_transition', { phone: ctx.phone, guestId: ctx.guest.id, from: 'AWAITING_ETA', to: ctx.next, eta });
-    await sendWhatsApp(ctx.phone, msg('etaConfirmed', { eta, propertyName: ctx.property.fields['Property Name'], addressBlock: guestAddressBlock(ctx.property) }));
+    await sendWhatsApp(ctx.phone, wordingR2Enabled()
+      ? msg('etaConfirmedR2', { eta, propertyName: ctx.property.fields['Property Name'], addressBlock: guestAddressBlock(ctx.property), gateLine: wordingGateLine(ctx.property) })
+      : msg('etaConfirmed', { eta, propertyName: ctx.property.fields['Property Name'], addressBlock: guestAddressBlock(ctx.property) }));
   },
 
   // CONFIRMED → "1": gate arrival (F11)
@@ -5827,6 +5872,10 @@ const actions = {
     let welcomeSend = null;
     if (assignedRoomName && gateConfirmFlowEnabled()) {
       welcomeSend = await sendKeysPrompt(ctx, booking, assignedRoomName, bookedOut);
+    }
+    // WABISTAY_WORDING_R2: "Payment received. Enjoy your stay! …" replaces the Welcome (unless the keys-button flow is on).
+    if (!welcomeSend && wordingR2Enabled() && assignedRoomName && !gateConfirmFlowEnabled()) {
+      welcomeSend = await sendPostPaidMessage(ctx, booking, assignedRoomName, !!ctx.autoCheckIn);
     }
     // WABISTAY_CHECKOUT_BUTTON: the welcome carries one Check out button; if it cannot be sent, today's text goes instead.
     if (!welcomeSend && !(assignedRoomName && gateConfirmFlowEnabled()) && assignedRoomName && checkoutButtonEnabled()) {
@@ -6780,7 +6829,7 @@ async function runAutoCheckout(now = new Date(), opts = {}) {
         });
       }
       // WABISTAY_RATE_CARD_V2: extensions are reception's, so the warning says so (the bot's EXTEND now refers the guest there).
-      if (guestPhone) await sendWhatsApp(guestPhone, msg(rateCardV2Enabled() ? 'checkoutWarningV2' : 'checkoutWarning', { guestName, propertyName }));
+      if (guestPhone) await sendWhatsApp(guestPhone, msg(wordingR2Enabled() ? (rateCardV2Enabled() ? 'checkoutWarningR2V2' : 'checkoutWarningR2') : (rateCardV2Enabled() ? 'checkoutWarningV2' : 'checkoutWarning'), { guestName, propertyName }));
       logToAxiom('info', 'auto_checkout_warning', { bookingId: booking.id, phone: guestPhone || null, checkOut });
       summary.warnings++;
       continue;
@@ -8706,6 +8755,94 @@ async function stayMenuForNow(property, now = new Date()) {
   const menuIntro = sastHourOfDate(now) >= 17 ? 'Short stays have finished for today. They start again tomorrow from 8am.\n\n' : '';
   return { keys, prices, lines, anotherDayLine, menuIntro, dayRate, nightRate };
 }
+// ─── WORDING ROUND 2 (WABISTAY_WORDING_R2) ───────────────────────────────────────────────────────────────
+// Off (unset): every message is exactly as before. On: the approved round-2 wording.
+//   · with WABISTAY_RATE_CARD_V2 also on: the greeting lists all four items (2h, 3h, Day, Overnight) marked available or
+//     not available now with their booking windows and FIXED numbers 1 to 4; a pick that is closed, or an unreadable reply,
+//     gets the "not available right now" / "didn't catch that" reply, which always ends with the reception number.
+//   · on its own (V2 off): the greeting is unchanged; the rest below applies and every message takes the check-out time
+//     from the booking itself (10am while V2 is off, 9am for V2 bookings).
+//   · the booking details and the payment choice go out as ONE message (stay-menu and legacy short-stay bookings);
+//   · the two messages after the payment choice become one, and the confirmed menu and the arrival-time confirmation carry
+//     the gate line "When you reach the gate, reply 1. Reception will open up, take payment, and we'll message your room.";
+//   · after reception records PAID the guest gets "Payment received. Enjoy your stay! …" instead of the Welcome;
+//   · "Check-out" replaces "Until" / "Leaving" / "Checkout" in the messages this flag touches.
+// A short stay's end stays fixed at the booked arrival plus the stay length; a late arrival does not extend it.
+function wordingR2Enabled() {
+  return /^(1|true)$/i.test(String(process.env.WABISTAY_WORDING_R2 || '').trim());
+}
+// "073 026 0871" from the property's own Guest Redirect Phone; '' when it has none.
+function receptionPhoneDisplay(property) {
+  const raw = String((property && property.fields && property.fields['Guest Redirect Phone']) || '').replace(/[^\d+]/g, '');
+  if (!raw) return '';
+  return /^0\d{9}$/.test(raw) ? `${raw.slice(0, 3)} ${raw.slice(3, 6)} ${raw.slice(6)}` : raw;
+}
+// " Need help? Please phone reception on 073 026 0871." (nothing when the property has no number)
+function wordingHelpLine(property) {
+  const p = receptionPhoneDisplay(property);
+  return p ? ` Need help? Please phone reception on ${p}.` : '';
+}
+// "When you reach the gate, reply 1. Reception will open up, take payment, and we'll message your room. No reply in 5 minutes? Call 073 026 0871."
+function wordingGateLine(property) {
+  return "When you reach the gate, reply 1. Reception will open up, take payment, and we'll message your room." + gatePayCallLine(property);
+}
+function sastClockText(iso) { // "3:00pm"
+  return formatSastDateTime(iso).split(' at ')[1];
+}
+function sastDayMonthShort(iso) { // "14 Oct"
+  const d = new Date(Date.parse(iso) + SAST_OFFSET_MS);
+  return d.getUTCDate() + ' ' + MONTH_ABBR[d.getUTCMonth()];
+}
+function sastYmdOfIso(iso) {
+  return sastCalendarDate(new Date(Date.parse(iso)));
+}
+// "3:00pm to 5:00pm on 14 Oct", or across midnight "11:00pm on 14 Oct to 2:00am on 15 Oct"
+function stayRangeText(ciIso, coIso) {
+  const a = sastYmdOfIso(ciIso), b = sastYmdOfIso(coIso);
+  if (compareYmd(a, b) === 0) return sastClockText(ciIso) + ' to ' + sastClockText(coIso) + ' on ' + sastDayMonthShort(ciIso);
+  return sastClockText(ciIso) + ' on ' + sastDayMonthShort(ciIso) + ' to ' + sastClockText(coIso) + ' on ' + sastDayMonthShort(coIso);
+}
+// "9am" / "10am" / "9:30am" (SAST)
+function sastShortClock(iso) {
+  const t = sastClockText(iso); // 9:00am
+  return t.replace(':00', '');
+}
+// "9am today" / "9am tomorrow" / "9am on 17 Oct"
+function checkoutPhrase(coIso, now = new Date()) {
+  const today = sastCalendarDate(now);
+  const out = sastYmdOfIso(coIso);
+  const days = Math.round((Date.parse(sastToUtcIso(out, 0)) - Date.parse(sastToUtcIso(today, 0))) / (24 * 60 * 60 * 1000));
+  const t = sastShortClock(coIso);
+  if (days === 0) return t + ' today';
+  if (days === 1) return t + ' tomorrow';
+  return t + ' on ' + sastDayMonthShort(coIso);
+}
+const SHORT_STAY_TYPES = ['Hourly', 'Day'];
+function isShortStayBooking(booking) {
+  return !!booking && SHORT_STAY_TYPES.includes(booking.fields['Booking Type']);
+}
+// The offer: all four products, fixed numbers, each marked available now or not, with its booking window.
+const WORDING_OFFER = [
+  { key: '1', name: '2 hours', window: 'Book any time between 8am and 5pm.', refusal: 'It can be booked between 8am and 5pm.' },
+  { key: '2', name: '3 hours', window: 'Book any time between 8am and 5pm.', refusal: 'It can be booked between 8am and 5pm.' },
+  { key: '3', name: 'Day stay (4 hours)', window: 'Book between 8am and 1pm; your stay ends 4 hours after you arrive.', refusal: 'It can be booked between 8am and 1pm.' },
+  { key: '4', name: 'Overnight', window: 'Check in between 5pm and 11pm. Check-out: 9am.', refusal: 'You can check in between 5pm and 11pm.' }
+];
+function wordingOfferFor(menu) {
+  const rows = [];
+  for (const o of WORDING_OFFER) {
+    if (menu.prices[o.key] === undefined) continue; // cannot be priced: left off (fail closed)
+    rows.push({ ...o, price: menu.prices[o.key], open: menu.keys.includes(o.key) });
+  }
+  return rows;
+}
+function wordingOfferLines(rows) {
+  return rows.map(r => r.key + ' - ' + r.name + ', R' + r.price + ' ' + (r.open ? '✅ Available now. ' : '❌ Not available now. ') + r.window).join('\n');
+}
+function wordingAvailableLines(rows) {
+  return rows.filter(r => r.open).map(r => r.key + ' - ' + r.name + ', R' + r.price).join('\n');
+}
+
 // ─── RATE CARD V2 (WABISTAY_RATE_CARD_V2) ─────────────────────────────────────
 // The greeting always shows the whole rate card as text, with the booking window beside each line;
 // a line that cannot be booked right now says so. Only options bookable now are numbered, and they
@@ -8758,7 +8895,10 @@ async function stayMenuForNowV2(property, now = new Date()) {
   const extensionLine = prices['1'] !== undefined ? 'Need more time? Ask reception: an extra 2 hours is R' + prices['1'] + '.\n\n' : '';
   const phone = property.fields['Guest Redirect Phone'];
   const anotherDayLine = 'Operating hours are 8am to 11pm. Another day? Please phone reception' + (phone ? ' on ' + phone : '') + '.';
-  return { keys, prices, lines, card, extensionLine, anotherDayLine, menuIntro: '', dayRate, nightRate, combinedRate };
+  const offer = wordingOfferFor({ prices, keys });
+  const reception = receptionPhoneDisplay(property);
+  const wordedAnotherDay = 'Operating hours are 8am to 11pm. Another day? Please phone reception' + (reception ? ' on ' + reception : '') + '.';
+  return { keys, prices, lines, card, extensionLine, anotherDayLine: wordingR2Enabled() ? wordedAnotherDay : anotherDayLine, menuIntro: '', dayRate, nightRate, combinedRate, offer };
 }
 
 // Reply -> product key ('1'..'4'), 'multi' (the typed multiple-days words, which keep
@@ -8771,6 +8911,8 @@ function parseStayMenuChoice(text, menu) {
   if (/^day( stay)?$/.test(t)) return '3';
   if (rateCardV2Enabled() && /^(combined|day ?\+ ?night|day and night)$/.test(t)) return '5';
   if (/^(overnight|night)$/.test(t)) return '4';
+  // WABISTAY_WORDING_R2 (with V2): nothing is hidden, so the numbers are fixed, 1 to 4.
+  if (rateCardV2Enabled() && wordingR2Enabled() && /^[1-4]$/.test(t)) return t;
   if (rateCardV2Enabled()) {
     // V2: a bare number is the position in the list the guest was shown (1, 2, 3 ... no gaps).
     if (/^[1-9]$/.test(t)) return (menu && menu.keys && menu.keys[Number(t) - 1]) || null;
@@ -8830,6 +8972,14 @@ function stayProductFromBooking(booking) {
 async function stayMenuGreeting(ctx, roomCount) {
   const menu = await stayMenuForNow(ctx.property, stayClock(ctx).menuNow);
   if (!menu) return null;
+  if (rateCardV2Enabled() && wordingR2Enabled() && menu.offer && menu.offer.length > 0) {
+    return msg('greetingWordingR2', {
+      propertyName: ctx.property.fields['Property Name'],
+      propertyCityLine: propertyCityLine(ctx.property),
+      roomCountLine: roomCountLine(ctx.property, roomCount),
+      offerLines: wordingOfferLines(menu.offer), extensionLine: menu.extensionLine, anotherDayLine: menu.anotherDayLine
+    });
+  }
   if (rateCardV2Enabled()) {
     return msg('greetingRateCard', {
       propertyName: ctx.property.fields['Property Name'],
@@ -8855,6 +9005,19 @@ async function handleStayMenuChoice(ctx) {
   if (!menu) return false;
   const choice = parseStayMenuChoice(ctx.text, menu);
   if (choice === 'multi') return false;
+  // WABISTAY_WORDING_R2 (with V2): a pick that is closed names its window; anything else is a plain miss. Both say what is
+  // available now and always end with the reception number.
+  if (rateCardV2Enabled() && wordingR2Enabled() && menu.offer && menu.offer.some(o => o.open) && (!choice || !menu.keys.includes(choice))) {
+    const closed = menu.offer.find(o => o.key === choice && !o.open);
+    logToAxiom('info', 'stay_menu_reprompt', {
+      phone: ctx.phone, reply: String(ctx.text).slice(0, 40), choice: choice || null, offered: menu.keys, wording: closed ? 'unavailable' : 'miss'
+    });
+    const availableLines = wordingAvailableLines(menu.offer);
+    await sendWhatsApp(ctx.phone, closed
+      ? msg('stayMenuUnavailableR2', { itemName: closed.name, windowSentence: closed.refusal, availableLines, helpLine: wordingHelpLine(ctx.property) })
+      : msg('stayMenuMissR2', { availableLines, helpLine: wordingHelpLine(ctx.property) }));
+    return true;
+  }
   if (!choice || !menu.keys.includes(choice)) {
     logToAxiom('info', 'stay_menu_reprompt', {
       phone: ctx.phone, reply: String(ctx.text).slice(0, 40), choice: choice || null, offered: menu.keys
@@ -9027,6 +9190,11 @@ async function collectStayMenuDetails(ctx, pending) {
     checkInText: formatSastDateTime(ciIso),
     checkOutText: formatSastDateTime(coIso)
   };
+  // WABISTAY_WORDING_R2: staff lines say Check-out / Stay instead of Until.
+  const r2Short = SHORT_STAY_TYPES.includes(product.type);
+  const stayLines = r2Short
+    ? 'Stay: ' + stayRangeText(ciIso, coIso)
+    : 'Arriving: ' + formatSastDateTime(ciIso) + '\nCheck-out: ' + sastShortClock(coIso) + ' on ' + sastDayMonthShort(coIso);
   // V2: the guest is told reception adds 2 hours at the 2-hour rate (no bot logic behind it).
   const extraRates = rateCardV2Enabled() ? hourlyRatesFor(ctx.property, [2]) : null;
   const extensionNote = extraRates ? '\nNeed more time? Ask reception: an extra 2 hours is R' + extraRates[2] + '.' : '';
@@ -9038,18 +9206,27 @@ async function collectStayMenuDetails(ctx, pending) {
       propertyName: ctx.property.fields['Property Name'], guestName, guestPhone: ctx.phone, bookingRef,
       bookingType: product.type, checkInIso: ciIso, checkOutIso: coIso, hours: product.hours, amount
     }), {
-      key: 'stayMenuOwnerNewBooking',
-      vars: { ...view, phone: ctx.phone }
+      key: wordingR2Enabled() ? 'stayMenuOwnerNewBookingR2' : 'stayMenuOwnerNewBooking',
+      vars: { ...view, phone: ctx.phone, stayLines }
     }, { bookingId: pending.id });
     if (ownerSend && ownerSend.error) {
       logToAxiom('error', 'owner_stay_menu_booking_notify_failed', { bookingId: pending.id, error: JSON.stringify(ownerSend.error) });
     }
   }
   }, async () => {
+  if (wordingR2Enabled()) {
+    // ONE message: the booking and the payment choice.
+    const propertyName = ctx.property.fields['Property Name'];
+    const body = r2Short
+      ? msg('bookingPayShortR2', { guestName, stayLabel, bookingRef, stayRange: stayRangeText(ciIso, coIso), amount, endClock: sastClockText(coIso), propertyName })
+      : msg('bookingPayNightR2', { guestName, stayLabel, bookingRef, arriveText: formatSastDateTime(ciIso), checkoutText: sastShortClock(coIso) + ' on ' + sastDayMonthShort(coIso), amount, propertyName });
+    await sendBookingWithPaymentChoice(ctx, body);
+  } else {
   await sendWhatsApp(ctx.phone, rateCardV2Enabled()
     ? msg('stayMenuBookingReceivedV2', { ...view, extensionNote })
     : msg('stayMenuBookingReceived', view));
   await sendPaymentMethodMenu(ctx);
+  }
   });
   return true;
 }
@@ -9141,7 +9318,7 @@ async function collectCombinedDetails(ctx, pending, product) {
     const nightAmount = nightRate && Number(nightRate.fields['Amount']) > 0 ? Number(nightRate.fields['Amount']) : null;
     logToAxiom('info', 'combined_arrival_time_refused', { phone: ctx.phone, bookingId: pending.id });
     await sendWhatsApp(ctx.phone, nightAmount
-      ? msg('combinedTimeWindowOvernight', { amount: nightAmount })
+      ? msg(wordingR2Enabled() ? 'combinedTimeWindowOvernightR2' : 'combinedTimeWindowOvernight', { amount: nightAmount })
       : msg('combinedTimeWindow'));
     return true;
   }
@@ -9217,7 +9394,8 @@ async function collectCombinedDetails(ctx, pending, product) {
     guestName, bookingRef, amount, nights,
     nightsText: nights === 1 ? '1 night' : nights + ' nights',
     arrivalDateText: formatSastDayMonth(ciIso), arrivalTime: arrivalClock,
-    departureDateText: formatSastDayMonth(coIso), checkOutTime: formatSastTimeClock(coIso)
+    departureDateText: formatSastDayMonth(coIso), checkOutTime: formatSastTimeClock(coIso),
+    checkOutLine: sastShortClock(coIso) + ' on ' + formatSastDayMonth(coIso)
   };
   const extraRates = hourlyRatesFor(ctx.property, [2]);
   const extensionNote = extraRates ? '\n\nNeed more time? Ask reception: an extra 2 hours is R' + extraRates[2] + '.' : '';
@@ -9229,7 +9407,7 @@ async function collectCombinedDetails(ctx, pending, product) {
       propertyName: ctx.property.fields['Property Name'], guestName, guestPhone: ctx.phone, bookingRef,
       bookingType: 'Combined', checkInIso: ciIso, checkOutIso: coIso, amount
     }), {
-      key: 'combinedOwnerNewBooking',
+      key: wordingR2Enabled() ? 'combinedOwnerNewBookingR2' : 'combinedOwnerNewBooking',
       vars: { ...view, phone: ctx.phone }
     }, { bookingId: pending.id });
     if (ownerSend && ownerSend.error) {
@@ -9237,7 +9415,7 @@ async function collectCombinedDetails(ctx, pending, product) {
     }
   }
   }, async () => {
-  await sendWhatsApp(ctx.phone, msg('combinedBookingReceived', { ...view, extensionNote }));
+  await sendWhatsApp(ctx.phone, msg(wordingR2Enabled() ? 'combinedBookingReceivedR2' : 'combinedBookingReceived', { ...view, extensionNote }));
   await sendPaymentMethodMenu(ctx);
   });
   return true;
@@ -9460,6 +9638,20 @@ const PAYMENT_BUTTONS = [{ id: 'pay_card', title: 'Card' }, { id: 'pay_eft', tit
 // as before. On: two reply buttons; if they cannot be sent (over a limit, or Meta
 // rejects them at once) that is logged and the numbered text menu is sent once.
 // Typed 1 / 2 / card / eft are valid either way.
+// WABISTAY_WORDING_R2: the booking details and the payment choice as ONE message. Buttons when interactive messages are on;
+// otherwise (or if Meta refuses the buttons) the same body with the numbered choice added.
+async function sendBookingWithPaymentChoice(ctx, body) {
+  const textVersion = () => sendWhatsApp(ctx.phone, body + '\n\nReply with a number:\n1 - Card\n2 - Instant EFT');
+  if (!interactiveEnabled()) return textVersion();
+  const result = await sendInteractiveButtons(ctx.phone, { body, buttons: PAYMENT_BUTTONS });
+  if (result.ok) return result;
+  logToAxiom('warn', 'interactive_fallback_text', {
+    phone: ctx.phone, menu: 'booking_payment_merged', reason: result.invalid || 'meta_rejected',
+    error: result.error ? JSON.stringify(result.error) : null
+  });
+  return textVersion();
+}
+
 async function sendPaymentMethodMenu(ctx) {
   const propertyName = ctx.property.fields['Property Name'];
   const sendTextMenu = () => sendWhatsApp(ctx.phone, msg('paymentMethodMenu', { propertyName }));
@@ -10061,6 +10253,8 @@ module.exports.INTERACTIVE_LIMITS = INTERACTIVE_LIMITS;
 module.exports.parseOneLineNameAndTime = parseOneLineNameAndTime;
 module.exports.pickBookingForPaidRoom = pickBookingForPaidRoom;
 module.exports.parseStayMenuChoice = parseStayMenuChoice;
+module.exports.wordingR2Enabled = wordingR2Enabled;
+module.exports.checkoutPhrase = checkoutPhrase;
 module.exports.stayMenuKeysForHour = stayMenuKeysForHour;
 module.exports.stayWindowForArrival = stayWindowForArrival;
 module.exports.resolveBareHour = resolveBareHour;
