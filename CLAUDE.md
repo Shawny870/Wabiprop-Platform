@@ -96,6 +96,19 @@ NO frameworks, NO TypeScript, NO ORMs, NO npm bloat. Deterministic state machine
   subsystem. Flagged during Stage 3 part 2 (daily summary content build) when this gap blocked
   a true "average time-to-ready" metric; `runDailySummary` reports cleaner job duration
   (`Cleaning Job Started At` → `Cleaning Completed At`) as the available proxy in the meantime.
+- BACKLOG-02: A cancel / start-over option at every booking step. Today the only cancel is
+  "2 - Cancel my booking" on the confirmed menu (state CONFIRMED). A guest part-way through the
+  stay menu, the details step or the payment choice has no cancel; a typed "cancel" there is just an
+  unrecognised reply. Not built; decide after measuring how often guests try. Measure first with
+  three queries:
+  1. Axiom: `event == "state_transition" and reason == "cancel"` (cancels from the confirmed menu),
+     plus `cancel_booking_write_failed` for failures.
+  2. Airtable WS_Enquiries: rows with Outcome "Cancelled" (written when WABISTAY_ENQUIRY_TRACKING is
+     on; test phones excluded).
+  3. Axiom: `event == "stay_menu_reprompt" and reply contains "cancel"` (the reply field holds the
+     first 40 characters typed at the menu step). Cancel attempts at other steps are not logged as
+     cancels; they only show as WS_Enquiries "Invalid Input" rows.
+  A cleaner future measure is one logging-only event on every unrecognised reply.
 
 ## Rule 29 — Interaction Surface Declaration
 Every feature PR must name shared state, shared identity, shared grammar, and ordering dependence with existing flows, plus at least one interaction test per declared surface.
