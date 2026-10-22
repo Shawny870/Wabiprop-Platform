@@ -5,7 +5,7 @@ This file is read at the start of EVERY Claude Code session. If code and this co
 ## Three-role model
 - CEO (Shawn): approvals, device testing, go/no-go only. Never writes code.
 - Design Engineer (Claude AI): specs, architecture, transfer documents, challenge function.
-- Builder (Claude Code): code execution only. NEVER pushes to main. NEVER deploys. NEVER merges.
+- Builder (Claude Code): code execution only. May push feature branches and open pull requests. NEVER merges. NEVER touches main. NEVER deploys.
 
 ## Session ritual — do in this order, every session, no exceptions
 1. Read this file fully.
@@ -16,7 +16,7 @@ This file is read at the start of EVERY Claude Code session. If code and this co
 6. Confirm which single task this session builds. ONE task per session. No scope additions without CEO approval.
 7. Build. Run tests if test suite exists.
 8. Report what was built, what was tested, what was not tested.
-9. Open a PR. NEVER push to main. NEVER deploy. Shawn merges.
+9. Push the feature branch and open a PR. NEVER touch main. NEVER deploy. Shawn merges.
 
 ## Hard rules
 - Field names come from live Airtable schema or schema.json ONLY. Never type an Airtable field name from memory.
@@ -24,8 +24,8 @@ This file is read at the start of EVERY Claude Code session. If code and this co
 - Always return HTTP 200 to Meta immediately after receiving webhook (before async work).
 - Verify HMAC X-Hub-Signature-256 on RAW body — raw bytes, not re-serialised JSON.
 - Never refactor while adding a feature. Refactors are their own session, own PR.
-- Never push to main. Never deploy to production. Never merge PRs. CEO only.
-- Builder never pushes — Rule 26. This is non-negotiable and applies to every session.
+- Never touch main (no push, commit, force-push, rebase or reset of main). Never deploy to production. Never merge PRs. CEO only.
+- Rule 26 — Builder may push feature branches and open pull requests. Builder never merges, never touches main, and never deploys. Merging is CEO only. This is non-negotiable and applies to every session.
 - HTTP 200 from WhatsApp Send API means Meta accepted the request only — not delivery. Log async delivery callbacks to Axiom.
 - Business-initiated sends (cleaner, owner, summaries) must use approved utility templates — free-form text silently fails outside the 24h window.
 - Changes touching message templates, pricing values, state machine, or POPIA/consent code: label PR `needs-decision` — Shawn reviews before merging.
